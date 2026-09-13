@@ -166,6 +166,54 @@ func TestViewModelDoesNotInterpretUnknownEvidenceAsPath(t *testing.T) {
 	}
 }
 
+func TestViewModelProjectsNameResolutionSeparatelyFromRawEvidence(t *testing.T) {
+	target := fixtureTarget(445)
+	report := model.DiagnosticReport{
+		SchemaVersion: model.DiagnosticSchemaVersion,
+		Target:        target,
+		Status:        model.ReportStatusComplete,
+		Probes: []model.ProbeResult{{
+			Name:   "dns",
+			Target: target,
+			Status: model.ProbeStatusPassed,
+			NameResolution: &model.NameResolutionObservation{
+				RequestedName:       "fileserver.corp.example",
+				CandidateNames:      []string{"fileserver", "fileserver.corp.example"},
+				CandidateNamespaces: []string{"corp.example"},
+				A:                   []string{"10.30.14.22"},
+				SelectedAddress:     "10.30.14.22",
+				Limitations:         []string{"resolver server was not exposed"},
+				EffectivePath: &model.NameResolutionPath{
+					State:       model.NameResolutionPathEffective,
+					Mechanism:   model.NameResolutionMechanismDNS,
+					Certainty:   model.NameResolutionCertaintyObserved,
+					Provenance:  "native API",
+					EvidenceIDs: []string{"dns/resolution"},
+				},
+				EvidenceIDs: []string{"dns/configuration", "dns/resolution"},
+			},
+			Evidence: []model.Evidence{{
+				ID:   "dns/resolution",
+				Kind: model.EvidenceKindDNSResolution,
+				Raw:  json.RawMessage(`{"a":["10.30.14.22"]}`),
+			}},
+		}},
+	}
+	view, err := BuildDiagnosticView(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.NameResolution == nil || view.NameResolution.RequestedName != "fileserver.corp.example" || view.NameResolution.SelectedAddress != "10.30.14.22" {
+		t.Fatalf("name-resolution view = %#v", view.NameResolution)
+	}
+	if view.NameResolution.EffectivePath == nil || view.NameResolution.EffectivePath.Certainty != model.NameResolutionCertaintyObserved {
+		t.Fatalf("effective path view = %#v", view.NameResolution.EffectivePath)
+	}
+	if len(view.Evidence) != 1 || string(view.Evidence[0].Raw) != `{"a":["10.30.14.22"]}` {
+		t.Fatalf("raw evidence was not preserved: %#v", view.Evidence)
+	}
+}
+
 func TestViewModelProjectsNormalizedNetworkContext(t *testing.T) {
 	target := fixtureTarget(443)
 	target.NetworkContext = &model.NetworkContext{

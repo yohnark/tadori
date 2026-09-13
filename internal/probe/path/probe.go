@@ -300,7 +300,7 @@ func failedPathInterpretation(observations []model.PathObservation) model.ProbeI
 }
 
 func (p *Probe) observeProtocol(ctx context.Context, observer Observer, execution probe.ExecutionContext, target model.Target, protocol model.PathProtocol) (model.PathObservation, error) {
-	destination, _, _ := normalizeDestinationAddress(target.RequestedIdentity)
+	destination, _, _ := normalizeDestinationAddress(pathDestination(target))
 	observation := model.PathObservation{
 		Status:          model.PathObservationStatusObserved,
 		Protocol:        protocol,
@@ -396,6 +396,19 @@ func (p *Probe) observeProtocol(ctx context.Context, observer Observer, executio
 	}
 	observation.Segments = buildSegments(observation.Hops)
 	return observation, nil
+}
+
+// pathDestination uses the orchestrator's selected endpoint when one is
+// available. The requested hostname remains in Target for identity and TLS
+// semantics, while TTL-limited probes must observe the same address selected
+// by the DNS lane instead of performing a second lookup.
+func pathDestination(target model.Target) string {
+	if target.SelectedEndpoint != nil && target.SelectedEndpoint.Address != "" {
+		if address, err := netip.ParseAddr(strings.Trim(target.SelectedEndpoint.Address, "[]")); err == nil {
+			return model.NormalizeAddr(address).String()
+		}
+	}
+	return target.RequestedIdentity
 }
 
 // observeAttemptBounded protects the path lane from a platform adapter that

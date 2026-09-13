@@ -42,6 +42,7 @@ type DiagnosticViewModel struct {
 	Overall        OverallView              `json:"overall"`
 	Progress       []ProgressEvent          `json:"progress"`
 	Probes         []ProbeView              `json:"probes"`
+	NameResolution *NameResolutionView      `json:"name_resolution,omitempty"`
 	Findings       []FindingView            `json:"findings"`
 	Evidence       []EvidenceView           `json:"evidence"`
 	Paths          []PathView               `json:"paths"`
@@ -129,6 +130,45 @@ type EvidenceView struct {
 	InspectorState string             `json:"inspector_state"`
 	InspectorNote  string             `json:"inspector_note,omitempty"`
 	Raw            json.RawMessage    `json:"raw"`
+}
+
+// NameResolutionView is the presentation projection of the canonical DNS
+// observation. It keeps configured candidates beside the effective path so a
+// configured server is not mistaken for the server that answered the query.
+type NameResolutionView struct {
+	RequestedName       string                          `json:"requested_name"`
+	CandidateNames      []string                        `json:"candidate_names,omitempty"`
+	CandidateSuffixes   []string                        `json:"candidate_suffixes,omitempty"`
+	CandidateNamespaces []string                        `json:"candidate_namespaces,omitempty"`
+	Paths               []NameResolutionPathView        `json:"paths,omitempty"`
+	EffectivePath       *NameResolutionPathView         `json:"effective_path,omitempty"`
+	A                   []string                        `json:"a,omitempty"`
+	AAAA                []string                        `json:"aaaa,omitempty"`
+	SelectedAddress     string                          `json:"selected_address,omitempty"`
+	SelectedFamily      string                          `json:"selected_family,omitempty"`
+	HostsFileEntries    []model.NameResolutionHostEntry `json:"hosts_file_entries,omitempty"`
+	Limitations         []string                        `json:"limitations,omitempty"`
+	EvidenceIDs         []string                        `json:"evidence_ids,omitempty"`
+}
+
+type NameResolutionPathView struct {
+	State          model.NameResolutionPathState `json:"state"`
+	Label          string                        `json:"label"`
+	Mechanism      model.NameResolutionMechanism `json:"mechanism"`
+	Resolver       string                        `json:"resolver,omitempty"`
+	Interface      string                        `json:"interface,omitempty"`
+	InterfaceIndex int                           `json:"interface_index,omitempty"`
+	VirtualAdapter bool                          `json:"virtual_adapter,omitempty"`
+	VPN            bool                          `json:"vpn,omitempty"`
+	Namespace      string                        `json:"namespace,omitempty"`
+	Namespaces     []string                      `json:"namespaces,omitempty"`
+	PolicySource   string                        `json:"policy_source,omitempty"`
+	PolicyRule     string                        `json:"policy_rule,omitempty"`
+	A              []string                      `json:"a,omitempty"`
+	AAAA           []string                      `json:"aaaa,omitempty"`
+	Certainty      model.NameResolutionCertainty `json:"certainty"`
+	Provenance     string                        `json:"provenance,omitempty"`
+	EvidenceIDs    []string                      `json:"evidence_ids,omitempty"`
 }
 
 type PathView struct {
@@ -229,6 +269,7 @@ func BuildDiagnosticView(diagnosticReport model.DiagnosticReport) (DiagnosticVie
 	}
 
 	view.Overall = buildOverallView(diagnosticReport)
+	view.NameResolution = buildNameResolutionView(diagnosticReport)
 	pathInputs := make([]pathInput, 0)
 	for _, probe := range diagnosticReport.Probes {
 		probeEvidenceIDs := evidenceIDs(probe.Evidence)
@@ -285,6 +326,73 @@ func BuildDiagnosticView(diagnosticReport model.DiagnosticReport) (DiagnosticVie
 	view.Comparisons = buildComparisons(pathInputs)
 	view.Progress = completedProgress(view.Probes)
 	return view, nil
+}
+
+func buildNameResolutionView(diagnosticReport model.DiagnosticReport) *NameResolutionView {
+	var observation *model.NameResolutionObservation
+	for _, probe := range diagnosticReport.Probes {
+		if probe.NameResolution != nil {
+			observation = probe.NameResolution
+			break
+		}
+	}
+	if observation == nil {
+		return nil
+	}
+	view := &NameResolutionView{
+		RequestedName:       observation.RequestedName,
+		CandidateNames:      append([]string(nil), observation.CandidateNames...),
+		CandidateSuffixes:   append([]string(nil), observation.CandidateSuffixes...),
+		CandidateNamespaces: append([]string(nil), observation.CandidateNamespaces...),
+		A:                   append([]string(nil), observation.A...),
+		AAAA:                append([]string(nil), observation.AAAA...),
+		SelectedAddress:     observation.SelectedAddress,
+		SelectedFamily:      observation.SelectedFamily,
+		HostsFileEntries:    append([]model.NameResolutionHostEntry(nil), observation.HostsFileEntries...),
+		Limitations:         append([]string(nil), observation.Limitations...),
+		EvidenceIDs:         append([]string(nil), observation.EvidenceIDs...),
+		Paths:               make([]NameResolutionPathView, 0, len(observation.Paths)),
+	}
+	for _, path := range observation.Paths {
+		view.Paths = append(view.Paths, nameResolutionPathView(path))
+	}
+	if observation.EffectivePath != nil {
+		path := nameResolutionPathView(*observation.EffectivePath)
+		view.EffectivePath = &path
+	}
+	return view
+}
+
+func nameResolutionPathView(path model.NameResolutionPath) NameResolutionPathView {
+	label := string(path.Mechanism)
+	if path.Mechanism == model.NameResolutionMechanismLiteralIP {
+		label = "Literal IP"
+	} else if path.Mechanism == model.NameResolutionMechanismHostsFile {
+		label = "Hosts file candidate"
+	} else if path.VPN {
+		label = "VPN / Corporate DNS"
+	} else if path.Mechanism == model.NameResolutionMechanismDNS {
+		label = "System DNS client"
+	}
+	return NameResolutionPathView{
+		State:          path.State,
+		Label:          label,
+		Mechanism:      path.Mechanism,
+		Resolver:       path.Resolver,
+		Interface:      path.Interface,
+		InterfaceIndex: path.InterfaceIndex,
+		VirtualAdapter: path.VirtualAdapter,
+		VPN:            path.VPN,
+		Namespace:      path.Namespace,
+		Namespaces:     append([]string(nil), path.Namespaces...),
+		PolicySource:   path.PolicySource,
+		PolicyRule:     path.PolicyRule,
+		A:              append([]string(nil), path.A...),
+		AAAA:           append([]string(nil), path.AAAA...),
+		Certainty:      path.Certainty,
+		Provenance:     path.Provenance,
+		EvidenceIDs:    append([]string(nil), path.EvidenceIDs...),
+	}
 }
 
 func buildNetworkContextView(context model.NetworkContext) *NetworkContextView {

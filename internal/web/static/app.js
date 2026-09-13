@@ -21,6 +21,8 @@
   const destinationReferences = document.querySelector("#destination-references");
   const overallStatus = document.querySelector("#overall-status");
   const reportTarget = document.querySelector("#report-target");
+  const nameResolution = document.querySelector("#name-resolution");
+  const nameResolutionEmpty = document.querySelector("#name-resolution-empty");
   const networkContextPanel = document.querySelector("#network-context-panel");
   const networkContext = document.querySelector("#network-context");
   const probeCount = document.querySelector("#probe-count");
@@ -393,6 +395,98 @@
     }
   }
 
+  function renderNameResolution(resolution) {
+    nameResolution.replaceChildren();
+    nameResolutionEmpty.hidden = Boolean(resolution);
+    if (!resolution) {
+      return;
+    }
+
+    const effective = resolution.effective_path || {};
+    const fields = [
+      ["Requested name", resolution.requested_name || "not observable"],
+      ["Resolution path", effective.label || "not observed"],
+      ["Interface", effective.interface || "not observable"],
+      ["Resolver", effective.resolver || "not observable"],
+      ["Policy", policyText(effective)],
+      ["Answers A", listText(resolution.a)],
+      ["Answers AAAA", listText(resolution.aaaa)],
+      ["Selected endpoint", resolution.selected_address || "not selected"],
+      ["Certainty", effective.certainty || "not observable"],
+    ];
+    const table = element("div", "resolution-table");
+    for (const [label, value] of fields) {
+      const row = element("div", "resolution-row");
+      row.appendChild(element("span", "resolution-label", label));
+      row.appendChild(element("span", "resolution-value", value));
+      table.appendChild(row);
+    }
+    nameResolution.appendChild(table);
+
+    if (resolution.candidate_names && resolution.candidate_names.length) {
+      nameResolution.appendChild(resolutionMetadata("Candidate names", resolution.candidate_names.join(", ")));
+    }
+    if (resolution.candidate_suffixes && resolution.candidate_suffixes.length) {
+      nameResolution.appendChild(resolutionMetadata("Search suffixes", resolution.candidate_suffixes.join(", ")));
+    }
+    if (resolution.candidate_namespaces && resolution.candidate_namespaces.length) {
+      nameResolution.appendChild(resolutionMetadata("Candidate namespaces", resolution.candidate_namespaces.join(", ")));
+    }
+    if (effective.provenance) {
+      nameResolution.appendChild(resolutionMetadata("Provenance", effective.provenance));
+    }
+    if (resolution.limitations && resolution.limitations.length) {
+      nameResolution.appendChild(resolutionMetadata("Limitations", resolution.limitations.join(" · ")));
+    }
+
+    const candidates = (resolution.paths || []).filter((path) => path.state !== "effective");
+    if (candidates.length) {
+      const details = element("details", "resolution-candidates");
+      details.open = true;
+      details.appendChild(element("summary", "", `Configured candidates · ${candidates.length}`));
+      const list = element("div", "resolution-candidate-list");
+      for (const path of candidates) {
+        const row = element("div", "resolution-candidate");
+        row.appendChild(badge(path.label || path.mechanism, path.state === "policy_candidate" ? "warning" : "neutral"));
+        const description = [
+          path.resolver || "resolver not observable",
+          path.interface || "interface not observable",
+          path.namespace || (path.namespaces && path.namespaces.length ? path.namespaces.join(", ") : "no namespace"),
+          path.certainty || "certainty unknown",
+        ];
+        row.appendChild(element("span", "resolution-candidate-detail", description.join(" · ")));
+        if (path.evidence_ids && path.evidence_ids.length) {
+          row.appendChild(referenceGroup(path.evidence_ids));
+        }
+        list.appendChild(row);
+      }
+      details.appendChild(list);
+      nameResolution.appendChild(details);
+    }
+    if (resolution.evidence_ids && resolution.evidence_ids.length) {
+      const refs = element("div", "card-references");
+      refs.appendChild(element("span", "reference-label", "Evidence"));
+      refs.appendChild(referenceGroup(resolution.evidence_ids));
+      nameResolution.appendChild(refs);
+    }
+  }
+
+  function listText(values) {
+    return values && values.length ? values.join(", ") : "(none)";
+  }
+
+  function policyText(path) {
+    const values = [path.namespace, path.policy_source, path.policy_rule].filter(Boolean);
+    return values.length ? values.join(" / ") : "not observed";
+  }
+
+  function resolutionMetadata(label, value) {
+    const row = element("p", "resolution-metadata");
+    row.appendChild(element("span", "resolution-label", label));
+    row.appendChild(element("span", "resolution-value", value));
+    return row;
+  }
+
   function destinationTone(state) {
     switch (state) {
       case "confirmed":
@@ -643,6 +737,7 @@
     renderTargetDetails(view.report && view.report.target);
     renderNetworkContext(view.network_context);
     renderDestination(overall.destination || {});
+    renderNameResolution(view.name_resolution);
 
     probes.replaceChildren();
     const probeViews = view.probes || [];

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"net/netip"
-	"os/exec"
 	"strings"
 	"syscall"
 	"time"
@@ -38,27 +37,37 @@ type Address struct {
 // interface.  Loopback interfaces are retained in evidence but are not
 // considered usable for the active-interface interpretation.
 type InterfaceState struct {
-	Index     int       `json:"index"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type,omitempty"`
-	Hardware  string    `json:"hardware_address,omitempty"`
-	MTU       int       `json:"mtu"`
-	Up        bool      `json:"up"`
-	Loopback  bool      `json:"loopback"`
-	VPN       bool      `json:"vpn,omitempty"`
-	Virtual   bool      `json:"virtual,omitempty"`
-	Addresses []Address `json:"addresses,omitempty"`
+	Index         int          `json:"index"`
+	Name          string       `json:"name"`
+	Description   string       `json:"description,omitempty"`
+	Type          string       `json:"type,omitempty"`
+	Hardware      string       `json:"hardware_address,omitempty"`
+	MTU           int          `json:"mtu"`
+	Up            bool         `json:"up"`
+	Loopback      bool         `json:"loopback"`
+	VPN           bool         `json:"vpn,omitempty"`
+	Virtual       bool         `json:"virtual,omitempty"`
+	Addresses     []Address    `json:"addresses,omitempty"`
+	DNSServers    []netip.Addr `json:"dns_servers,omitempty"`
+	DNSSuffix     string       `json:"dns_suffix,omitempty"`
+	DNSSearchList []string     `json:"dns_search_list,omitempty"`
 }
 
 // Snapshot contains local interface and resolver configuration.  DNS servers
 // are evidence only; this package does not query or rank them.
 type Snapshot struct {
-	Interfaces        []InterfaceState `json:"interfaces"`
-	DNSServers        []netip.Addr     `json:"dns_servers,omitempty"`
-	Source            string           `json:"source,omitempty"`
-	ResolverError     string           `json:"resolver_error,omitempty"`
-	ResolverErrorKind string           `json:"resolver_error_kind,omitempty"`
-	CapturedAt        time.Time        `json:"captured_at"`
+	Interfaces        []InterfaceState                 `json:"interfaces"`
+	DNSServers        []netip.Addr                     `json:"dns_servers,omitempty"`
+	DNSSuffixes       []string                         `json:"dns_suffixes,omitempty"`
+	SearchList        []string                         `json:"search_list,omitempty"`
+	NRPT              []model.NameResolutionPolicyRule `json:"nrpt,omitempty"`
+	NRPTError         string                           `json:"nrpt_error,omitempty"`
+	HostsFileEntries  []model.NameResolutionHostEntry  `json:"hosts_file_entries,omitempty"`
+	HostsFileError    string                           `json:"hosts_file_error,omitempty"`
+	Source            string                           `json:"source,omitempty"`
+	ResolverError     string                           `json:"resolver_error,omitempty"`
+	ResolverErrorKind string                           `json:"resolver_error_kind,omitempty"`
+	CapturedAt        time.Time                        `json:"captured_at"`
 }
 
 // SnapshotProvider allows tests and platform adapters to provide deterministic
@@ -74,12 +83,13 @@ func (f SnapshotProviderFunc) Snapshot(ctx context.Context) (Snapshot, error) {
 	return f(ctx)
 }
 
-// SystemProvider reads interface state using net.Interfaces and resolver
-// configuration using the platform's standard resolver configuration file.
-// It performs no shell execution.
+// SystemProvider reads interface and resolver state through platform-native
+// adapters. The Windows implementation uses GetAdaptersAddresses and native
+// registry/file APIs; it never executes a shell command.
 type SystemProvider struct {
-	// ResolverConfigPath is primarily useful for tests.  An empty path uses
-	// the platform default (/etc/resolv.conf on Unix-like systems).
+	// ResolverConfigPath is primarily useful for tests. On Unix-like systems a
+	// blank path uses /etc/resolv.conf; on Windows a blank path uses native
+	// adapter state and a non-blank path is a fixture override.
 	ResolverConfigPath string
 }
 
@@ -92,37 +102,21 @@ func (p SystemProvider) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
-	interfaces, err := net.Interfaces()
+	interfaces, err := collectInterfaceStates(ctx)
 	if err != nil {
 		return Snapshot{}, err
 	}
-
-	snapshot := Snapshot{Interfaces: make([]InterfaceState, 0, len(interfaces)), Source: "net.Interfaces", CapturedAt: time.Now().UTC()}
-	for _, iface := range interfaces {
-		if err := ctx.Err(); err != nil {
-			return Snapshot{}, err
+	for index := range interfaces {
+		if interfaces[index].Type == "" {
+			interfaces[index].Type = interfaceType(interfaces[index].Name, interfaces[index].Loopback)
 		}
-		state := InterfaceState{
-			Index:    iface.Index,
-			Name:     iface.Name,
-			Type:     interfaceType(iface.Name, iface.Flags&net.FlagLoopback != 0),
-			Hardware: iface.HardwareAddr.String(),
-			MTU:      iface.MTU,
-			Up:       iface.Flags&net.FlagUp != 0,
-			Loopback: iface.Flags&net.FlagLoopback != 0,
+		if !interfaces[index].VPN && !interfaces[index].Virtual {
+			interfaces[index].VPN, interfaces[index].Virtual = classifyInterface(interfaces[index].Name, interfaces[index].Loopback)
 		}
-		state.VPN, state.Virtual = classifyInterface(iface.Name, state.Loopback)
-		if addresses, addressErr := iface.Addrs(); addressErr == nil {
-			for _, address := range addresses {
-				if parsed, ok := parseAddress(address); ok {
-					state.Addresses = append(state.Addresses, parsed)
-				}
-			}
-		}
-		snapshot.Interfaces = append(snapshot.Interfaces, state)
 	}
 
 	servers, resolverSource, resolverErr := readConfiguredDNSServers(ctx, p.ResolverConfigPath)
+	snapshot := Snapshot{Interfaces: normalizeInterfaceStates(interfaces), Source: interfaceSource(), CapturedAt: time.Now().UTC()}
 	if resolverErr != nil {
 		snapshot.ResolverError = resolverErr.Error()
 		snapshot.ResolverErrorKind = classifyResolverError(resolverErr)
@@ -135,7 +129,23 @@ func (p SystemProvider) Snapshot(ctx context.Context) (Snapshot, error) {
 		}
 	}
 	snapshot.DNSServers = servers
-	if resolverSource != "" {
+	if len(snapshot.DNSServers) == 0 {
+		snapshot.DNSServers = configuredServersFromInterfaces(snapshot.Interfaces)
+	}
+	snapshot.DNSSuffixes, snapshot.SearchList = suffixesFromInterfaces(snapshot.Interfaces)
+	policy, policyErr := readNameResolutionPolicy(ctx)
+	if policyErr != nil {
+		snapshot.NRPTError = policyErr.Error()
+	} else {
+		snapshot.NRPT = policy
+	}
+	hosts, hostsErr := readHostsFileEntries(ctx)
+	if hostsErr != nil {
+		snapshot.HostsFileError = hostsErr.Error()
+	} else {
+		snapshot.HostsFileEntries = hosts
+	}
+	if resolverSource != "" && !strings.Contains(snapshot.Source, resolverSource) {
 		snapshot.Source += ";" + resolverSource
 	}
 	return snapshot, nil
@@ -149,9 +159,6 @@ func classifyResolverError(err error) string {
 		return "timeout"
 	}
 	if errors.Is(err, ErrUnsupported) {
-		return "unsupported"
-	}
-	if errors.Is(err, exec.ErrNotFound) {
 		return "unsupported"
 	}
 	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
@@ -213,4 +220,61 @@ func parseAddress(address net.Addr) (Address, bool) {
 func usableAddress(address Address) bool {
 	ip := model.NormalizeAddr(address.IP)
 	return ip.IsValid() && !ip.IsUnspecified() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
+}
+
+func configuredServersFromInterfaces(interfaces []InterfaceState) []netip.Addr {
+	servers := make([]netip.Addr, 0)
+	for _, iface := range interfaces {
+		for _, server := range iface.DNSServers {
+			server = model.NormalizeAddr(server)
+			if !server.IsValid() {
+				continue
+			}
+			duplicate := false
+			for _, existing := range servers {
+				if existing == server {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				servers = append(servers, server)
+			}
+		}
+	}
+	return servers
+}
+
+func suffixesFromInterfaces(interfaces []InterfaceState) ([]string, []string) {
+	suffixes, searchList := make([]string, 0), make([]string, 0)
+	for _, iface := range interfaces {
+		suffixes = appendUniqueString(suffixes, iface.DNSSuffix)
+		for _, suffix := range iface.DNSSearchList {
+			searchList = appendUniqueString(searchList, suffix)
+			suffixes = appendUniqueString(suffixes, suffix)
+		}
+	}
+	return suffixes, searchList
+}
+
+func appendUniqueIP(values []netip.Addr, candidate netip.Addr) []netip.Addr {
+	for _, value := range values {
+		if value == candidate {
+			return values
+		}
+	}
+	return append(values, candidate)
+}
+
+func appendUniqueString(values []string, candidate string) []string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return values
+	}
+	for _, value := range values {
+		if strings.EqualFold(value, candidate) {
+			return values
+		}
+	}
+	return append(values, candidate)
 }

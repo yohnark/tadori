@@ -268,8 +268,12 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 					ProbeID:       item.job.name,
 					CorrelationID: sessionID + "/" + item.job.name,
 				}
-				execution := probe.ExecutionContext{Target: target, SessionID: identity.SessionID, ProbeID: identity.ProbeID, CorrelationID: identity.CorrelationID}
+				probeTarget := target
 				result := runBounded(ctx, timeout, item.job.name, func(runCtx context.Context) model.ProbeResult {
+					if item.job.name != "dns" && item.job.name != "interface_state" && item.job.name != "dns_configuration" {
+						probeTarget = targetWithResolvedAddress(runCtx, resolvedReady, &resolvedAddr, target)
+					}
+					execution := probe.ExecutionContext{Target: probeTarget, SessionID: identity.SessionID, ProbeID: identity.ProbeID, CorrelationID: identity.CorrelationID}
 					if item.job.packetType == "" {
 						return item.job.run(runCtx, execution)
 					}
@@ -279,7 +283,7 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 					result.Name = item.job.name
 				}
 				if result.Target.OriginalInput == "" && result.Target.RequestedIdentity == "" && result.Target.Port == 0 {
-					result.Target = target
+					result.Target = probeTarget
 				}
 				result.SessionID = identity.SessionID
 				result.ProbeID = identity.ProbeID
@@ -369,6 +373,20 @@ func waitForAddress(runCtx context.Context, ready <-chan struct{}, addr *netip.A
 	}
 }
 
+func targetWithResolvedAddress(ctx context.Context, ready <-chan struct{}, addr *netip.Addr, target model.Target) model.Target {
+	if target.LiteralIP != "" {
+		if target.SelectedEndpoint == nil {
+			target.SelectedEndpoint = &model.Endpoint{Address: target.LiteralIP, Port: target.Port}
+		}
+		return target
+	}
+	selected := waitForAddress(ctx, ready, addr)
+	if selected.IsValid() {
+		target.SelectedEndpoint = &model.Endpoint{Address: model.NormalizeAddr(selected).String(), Port: target.Port}
+	}
+	return target
+}
+
 // runBounded applies a per-probe deadline on top of ctx and recovers a panic
 // from a probe implementation so it cannot take down the whole diagnostic
 // run; a recovered panic is reported as an execution error result.
@@ -398,6 +416,11 @@ func runBounded(ctx context.Context, timeout time.Duration, name string, fn func
 func resolvedAddress(result model.ProbeResult) netip.Addr {
 	if result.Status != model.ProbeStatusPassed {
 		return netip.Addr{}
+	}
+	if result.NameResolution != nil {
+		if address, err := netip.ParseAddr(result.NameResolution.SelectedAddress); err == nil {
+			return model.NormalizeAddr(address)
+		}
 	}
 	for _, evidence := range result.Evidence {
 		if evidence.Kind != model.EvidenceKindDNSResolution {

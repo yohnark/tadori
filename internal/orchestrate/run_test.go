@@ -5,7 +5,9 @@ import (
 	"net"
 	stdhttp "net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -243,6 +245,27 @@ func TestRunHostPortTargetUsesTCPEndpointAndSkipsURLLanes(t *testing.T) {
 	pathResult := findProbe(t, got.Probes, "path")
 	if len(pathResult.Evidence) == 0 {
 		t.Fatal("host:port run did not retain path evidence")
+	}
+}
+
+func TestTargetWithResolvedAddressFeedsLaterProbesWithoutChangingIdentity(t *testing.T) {
+	target, err := model.ParseTarget(model.TargetIntent{Input: "https://fileserver.corp.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan struct{})
+	selected := netip.MustParseAddr("10.30.14.22")
+	close(ready)
+	got := targetWithResolvedAddress(context.Background(), ready, &selected, target)
+	if got.RequestedIdentity != "fileserver.corp.example" {
+		t.Fatalf("requested identity changed = %q", got.RequestedIdentity)
+	}
+	if got.SelectedEndpoint == nil || got.SelectedEndpoint.Address != selected.String() || got.SelectedEndpoint.Port != target.Port {
+		t.Fatalf("selected endpoint = %#v, want %s:%d", got.SelectedEndpoint, selected, target.Port)
+	}
+	url, err := got.HTTPURL()
+	if err != nil || !strings.Contains(url, "fileserver.corp.example") {
+		t.Fatalf("HTTPURL = %q, err = %v", url, err)
 	}
 }
 
