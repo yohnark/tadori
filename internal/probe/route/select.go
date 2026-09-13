@@ -3,6 +3,8 @@ package route
 import (
 	"net/netip"
 	"sort"
+
+	"github.com/yohnark/tadori/internal/model"
 )
 
 // Select chooses the route the kernel's longest-prefix routing rule would
@@ -10,11 +12,13 @@ import (
 // metric wins. The final tie-breakers make fixture and evidence ordering
 // deterministic.
 func Select(routes []Route, target netip.Addr) (Route, bool) {
+	target = model.NormalizeAddr(target)
 	if !target.IsValid() {
 		return Route{}, false
 	}
 	candidates := make([]Route, 0, len(routes))
 	for _, candidate := range routes {
+		candidate = normalizeRoute(candidate)
 		prefix := candidate.Destination
 		if !prefix.IsValid() || !prefix.Contains(target) {
 			continue
@@ -54,6 +58,7 @@ func SelectRoute(routes []Route, target netip.Addr) (Route, bool) {
 func Default(routes []Route, family int) (Route, bool) {
 	filtered := make([]Route, 0, len(routes))
 	for _, candidate := range routes {
+		candidate = normalizeRoute(candidate)
 		prefix := candidate.Destination
 		if !prefix.IsValid() || prefix.Bits() != 0 {
 			continue
@@ -81,4 +86,17 @@ func Default(routes []Route, family int) (Route, bool) {
 // SelectDefaultRoute is the descriptive alias for Default.
 func SelectDefaultRoute(routes []Route, family int) (Route, bool) {
 	return Default(routes, family)
+}
+
+func normalizeRoute(route Route) Route {
+	route.Destination = model.NormalizePrefix(route.Destination)
+	route.Gateway = model.NormalizeAddr(route.Gateway)
+	if address, err := netip.ParseAddr(route.Interface); err == nil {
+		route.Interface = model.NormalizeAddr(address).String()
+	}
+	return route
+}
+
+func normalizeRoutePrefix(prefix netip.Prefix) netip.Prefix {
+	return model.NormalizePrefix(prefix).Masked()
 }

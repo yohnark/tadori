@@ -42,6 +42,7 @@ type Options struct {
 // fail, so the returned report is complete whenever at least the requested
 // probes had a chance to run within ctx.
 func Run(ctx context.Context, target model.Target, opts Options) model.DiagnosticReport {
+	target = model.NormalizeTarget(target)
 	now := opts.Now
 	if now == nil {
 		now = time.Now

@@ -70,6 +70,7 @@ func (p *InterfaceProbe) Run(ctx context.Context, execution probe.ExecutionConte
 		provider = SystemProvider{}
 	}
 	snapshot, err := provider.Snapshot(callCtx)
+	snapshot.Interfaces = normalizeInterfaceStates(snapshot.Interfaces)
 	completed := time.Now().UTC()
 	if err != nil {
 		evidence := make([]model.Evidence, 0, 2)
@@ -143,6 +144,7 @@ func (p *DNSProbe) Run(ctx context.Context, execution probe.ExecutionContext) mo
 		provider = SystemProvider{}
 	}
 	snapshot, err := provider.Snapshot(callCtx)
+	snapshot.DNSServers = normalizeAddresses(snapshot.DNSServers)
 	completed := time.Now().UTC()
 	if err != nil {
 		reason := dnsConfigReason(err)
@@ -210,6 +212,48 @@ func makeEvidence(id string, kind model.EvidenceKind, source string, value any, 
 	}
 	captured := capturedAt
 	return model.Evidence{ID: id, Kind: kind, Source: source, CapturedAt: &captured, Raw: raw}
+}
+
+func normalizeInterfaceStates(interfaces []InterfaceState) []InterfaceState {
+	if interfaces == nil {
+		return nil
+	}
+	normalized := append([]InterfaceState(nil), interfaces...)
+	for index := range normalized {
+		if normalized[index].Addresses == nil {
+			continue
+		}
+		normalized[index].Addresses = append([]Address(nil), normalized[index].Addresses...)
+		for addressIndex := range normalized[index].Addresses {
+			normalized[index].Addresses[addressIndex] = normalizeAddress(normalized[index].Addresses[addressIndex])
+		}
+	}
+	return normalized
+}
+
+func normalizeAddresses(addresses []netip.Addr) []netip.Addr {
+	if addresses == nil {
+		return nil
+	}
+	normalized := append([]netip.Addr(nil), addresses...)
+	for index := range normalized {
+		normalized[index] = model.NormalizeAddr(normalized[index])
+	}
+	return normalized
+}
+
+func normalizeAddress(address Address) Address {
+	if !address.IP.Is4In6() {
+		return address
+	}
+	if address.Prefix > 32 {
+		if address.Prefix < 96 {
+			return address
+		}
+		address.Prefix -= 96
+	}
+	address.IP = model.NormalizeAddr(address.IP)
+	return address
 }
 
 func statusForError(err error) model.ProbeStatus {

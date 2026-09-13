@@ -43,7 +43,7 @@ func readConfiguredDNSServers(ctx context.Context, path string) ([]netip.Addr, s
 			value = value[:zone]
 		}
 		if address, parseErr := netip.ParseAddr(value); parseErr == nil {
-			servers = append(servers, address)
+			servers = append(servers, address.Unmap())
 		}
 	}
 	if err := scanner.Err(); err != nil {

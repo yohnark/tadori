@@ -130,7 +130,7 @@ func (p *TargetRouteProbe) RunForAddress(ctx context.Context, execution probe.Ex
 
 func (p *TargetRouteProbe) targetAddress(target model.Target) (netip.Addr, error) {
 	if p.TargetIP.IsValid() {
-		return p.TargetIP, nil
+		return model.NormalizeAddr(p.TargetIP), nil
 	}
 	return parseTargetAddress(target.Host)
 }
@@ -225,7 +225,7 @@ func (p *GatewayProbe) RunForAddress(ctx context.Context, execution probe.Execut
 
 func (p *GatewayProbe) targetAddress(target model.Target) (netip.Addr, error) {
 	if p.TargetIP.IsValid() {
-		return p.TargetIP, nil
+		return model.NormalizeAddr(p.TargetIP), nil
 	}
 	return parseTargetAddress(target.Host)
 }
@@ -250,7 +250,7 @@ func parseTargetAddress(host string) (netip.Addr, error) {
 	if err != nil {
 		return netip.Addr{}, err
 	}
-	return address, nil
+	return model.NormalizeAddr(address), nil
 }
 
 func targetFamily(target model.Target) int {
@@ -265,6 +265,7 @@ func targetFamily(target model.Target) int {
 }
 
 func selectedRouteEvidence(routeType string, selected Route, target string) map[string]any {
+	selected = normalizeRoute(selected)
 	return map[string]any{
 		"route_type":      routeType,
 		"target_ip":       target,

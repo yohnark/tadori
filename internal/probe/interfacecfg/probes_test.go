@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -46,6 +47,87 @@ func TestInterfaceProbeSuccessPreservesAddressesAndPrefixes(t *testing.T) {
 	}
 	if len(interfaces) != 2 || len(interfaces[1].Addresses) != 2 || interfaces[1].Addresses[1].Prefix != 64 {
 		t.Fatalf("address/prefix evidence lost: %#v", interfaces)
+	}
+}
+
+func TestParseAddressNormalizesMappedIPv4AndPreservesIPv6(t *testing.T) {
+	tests := []struct {
+		name     string
+		address  net.Addr
+		wantIP   string
+		wantCIDR int
+	}{
+		{
+			name:     "IPv4",
+			address:  &net.IPNet{IP: net.ParseIP("10.0.10.10"), Mask: net.CIDRMask(24, 32)},
+			wantIP:   "10.0.10.10",
+			wantCIDR: 24,
+		},
+		{
+			name:     "IPv4-mapped IPv6",
+			address:  &net.IPNet{IP: net.ParseIP("::ffff:10.0.10.10"), Mask: net.CIDRMask(120, 128)},
+			wantIP:   "10.0.10.10",
+			wantCIDR: 24,
+		},
+		{
+			name:     "IPv4 loopback",
+			address:  &net.IPNet{IP: net.ParseIP("::ffff:127.0.0.1"), Mask: net.CIDRMask(128, 128)},
+			wantIP:   "127.0.0.1",
+			wantCIDR: 32,
+		},
+		{
+			name:     "genuine IPv6",
+			address:  &net.IPNet{IP: net.ParseIP("2001:db8::10"), Mask: net.CIDRMask(64, 128)},
+			wantIP:   "2001:db8::10",
+			wantCIDR: 64,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := parseAddress(test.address)
+			if !ok {
+				t.Fatalf("parseAddress(%v) failed", test.address)
+			}
+			if got.IP.String() != test.wantIP || got.Prefix != test.wantCIDR {
+				t.Fatalf("address = %#v, want IP %q/prefix %d", got, test.wantIP, test.wantCIDR)
+			}
+		})
+	}
+}
+
+func TestInterfaceEvidenceNormalizesMappedAddressesAndLoopbackClassification(t *testing.T) {
+	snapshot := Snapshot{Interfaces: []InterfaceState{{
+		Name: "eth-test",
+		Up:   true,
+		Addresses: []Address{
+			{IP: netip.MustParseAddr("::ffff:10.0.10.10"), Prefix: 128},
+			{IP: netip.MustParseAddr("::ffff:127.0.0.1"), Prefix: 128},
+			{IP: netip.MustParseAddr("2001:db8::10"), Prefix: 64},
+		},
+	}}}
+	p := NewInterfaceProbe(SnapshotProviderFunc(func(context.Context) (Snapshot, error) { return snapshot, nil }))
+	got := p.Run(context.Background(), probe.ExecutionContext{})
+	if got.Status != model.ProbeStatusPassed {
+		t.Fatalf("status = %q, want passed", got.Status)
+	}
+
+	var interfaces []InterfaceState
+	if err := json.Unmarshal(got.Evidence[0].Raw, &interfaces); err != nil {
+		t.Fatalf("decode interface evidence: %v", err)
+	}
+	addresses := interfaces[0].Addresses
+	if addresses[0].IP.String() != "10.0.10.10" || addresses[0].Prefix != 32 {
+		t.Fatalf("mapped IPv4 evidence = %#v, want 10.0.10.10/32", addresses[0])
+	}
+	if addresses[1].IP.String() != "127.0.0.1" || addresses[1].Prefix != 32 {
+		t.Fatalf("mapped loopback evidence = %#v, want 127.0.0.1/32", addresses[1])
+	}
+	if addresses[2].IP.String() != "2001:db8::10" || addresses[2].Prefix != 64 {
+		t.Fatalf("IPv6 evidence = %#v, want 2001:db8::10/64", addresses[2])
+	}
+	if usableAddress(addresses[1]) {
+		t.Fatal("mapped IPv4 loopback was considered usable")
 	}
 }
 

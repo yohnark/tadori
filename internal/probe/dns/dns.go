@@ -333,7 +333,7 @@ func (p *Probe) lookupHost(ctx context.Context, host string) lookupResult {
 		addrs, err := p.resolver.LookupNetIP(ctx, family.network, host)
 		converted := make([]string, 0, len(addrs))
 		for _, addr := range addrs {
-			converted = append(converted, addr.String())
+			converted = append(converted, model.NormalizeAddr(addr).String())
 		}
 		fr := familyResult{Family: family.name, Addresses: converted}
 		if err != nil {
@@ -445,7 +445,7 @@ func targetHost(target model.Target) (string, error) {
 		return "", errors.New("malformed target: invalid host length")
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
-		return ip.String(), nil
+		return model.NormalizeAddr(ip).String(), nil
 	}
 	if strings.Contains(host, "..") {
 		return "", errors.New("malformed target: empty host label")
@@ -591,6 +591,9 @@ func normalizeResolverAddresses(addresses []string) []string {
 		address = strings.TrimSpace(address)
 		if address == "" {
 			continue
+		}
+		if parsed, err := netip.ParseAddr(strings.Trim(address, "[]")); err == nil {
+			address = model.NormalizeAddr(parsed).String()
 		}
 		if _, ok := seen[address]; ok {
 			continue

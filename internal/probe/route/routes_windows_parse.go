@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+
+	"github.com/yohnark/tadori/internal/model"
 )
 
 // parseWindowsRouteOutput parses the tabular output of the fixed `route
@@ -37,7 +39,7 @@ func parseWindowsIPv4Row(fields []string) (Route, bool) {
 		return Route{}, false
 	}
 	destination, err := netip.ParseAddr(fields[0])
-	if err != nil || !destination.Is4() {
+	if err != nil || !model.NormalizeAddr(destination).Is4() {
 		return Route{}, false
 	}
 	mask, err := netip.ParseAddr(fields[1])
@@ -49,7 +51,7 @@ func parseWindowsIPv4Row(fields []string) (Route, bool) {
 		return Route{}, false
 	}
 	interfaceAddress, err := netip.ParseAddr(fields[3])
-	if err != nil || !interfaceAddress.Is4() {
+	if err != nil || !model.NormalizeAddr(interfaceAddress).Is4() {
 		return Route{}, false
 	}
 	metric, err := strconv.Atoi(fields[4])
@@ -57,10 +59,10 @@ func parseWindowsIPv4Row(fields []string) (Route, bool) {
 		return Route{}, false
 	}
 	var gateway netip.Addr
-	if parsed, parseErr := netip.ParseAddr(fields[2]); parseErr == nil && parsed.Is4() {
-		gateway = parsed
+	if parsed, parseErr := netip.ParseAddr(fields[2]); parseErr == nil && model.NormalizeAddr(parsed).Is4() {
+		gateway = model.NormalizeAddr(parsed)
 	}
-	return Route{Destination: netip.PrefixFrom(destination, prefix).Masked(), Gateway: gateway, Interface: interfaceAddress.String(), Metric: metric}, true
+	return normalizeRoute(Route{Destination: netip.PrefixFrom(model.NormalizeAddr(destination), prefix).Masked(), Gateway: gateway, Interface: model.NormalizeAddr(interfaceAddress).String(), Metric: metric}), true
 }
 
 func parseWindowsIPv6Row(fields []string) (Route, bool) {
@@ -72,7 +74,7 @@ func parseWindowsIPv6Row(fields []string) (Route, bool) {
 	for index, field := range fields {
 		if parsed, err := netip.ParsePrefix(stripZone(field)); err == nil && !parsed.Addr().Is4() {
 			prefixIndex = index
-			destination = parsed.Masked()
+			destination = normalizeRoutePrefix(parsed)
 			break
 		}
 	}
@@ -104,11 +106,11 @@ func parseWindowsIPv6Row(fields []string) (Route, bool) {
 	var gateway netip.Addr
 	for _, field := range fields[prefixIndex+1:] {
 		if parsed, err := netip.ParseAddr(stripZone(field)); err == nil && !parsed.Is4() {
-			gateway = parsed
+			gateway = model.NormalizeAddr(parsed)
 			break
 		}
 	}
-	return Route{Destination: destination, Gateway: gateway, InterfaceIndex: interfaceIndex, Metric: metric}, true
+	return normalizeRoute(Route{Destination: destination, Gateway: gateway, InterfaceIndex: interfaceIndex, Metric: metric}), true
 }
 
 func stripZone(value string) string {
@@ -152,9 +154,15 @@ func decorateWindowsInterfaces(routes []Route) []Route {
 		if ifaceAddresses, addrErr := iface.Addrs(); addrErr == nil {
 			for _, address := range ifaceAddresses {
 				if ip, _, parseErr := net.ParseCIDR(address.String()); parseErr == nil {
-					addresses[ip.String()] = iface.Name
+					if parsed, ok := netip.AddrFromSlice(ip); ok {
+						addresses[model.NormalizeAddr(parsed).String()] = iface.Name
+					}
 				} else {
-					addresses[address.String()] = iface.Name
+					if parsed, parseErr := netip.ParseAddr(stripZone(address.String())); parseErr == nil {
+						addresses[model.NormalizeAddr(parsed).String()] = iface.Name
+					} else {
+						addresses[address.String()] = iface.Name
+					}
 				}
 			}
 		}

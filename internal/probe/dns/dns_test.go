@@ -79,6 +79,36 @@ func TestProbeSuccessPreservesConfigurationAndAAndAAAA(t *testing.T) {
 	}
 }
 
+func TestProbeNormalizesMappedResolverAddresses(t *testing.T) {
+	resolver := &fakeResolver{addresses: map[string][]netip.Addr{
+		"ip4": {netip.MustParseAddr("::ffff:192.0.2.10")},
+		"ip6": {netip.MustParseAddr("2001:db8::10")},
+	}}
+	p := New(
+		WithResolver(resolver),
+		WithResolverConfig(StaticResolverConfig{"::ffff:192.0.2.53"}),
+	)
+
+	result := p.Run(context.Background(), probe.ExecutionContext{Target: target()})
+	if result.Status != model.ProbeStatusPassed {
+		t.Fatalf("status = %q, want passed", result.Status)
+	}
+	var resolution DNSResolutionEvidence
+	if err := json.Unmarshal(result.Evidence[1].Raw, &resolution); err != nil {
+		t.Fatalf("decode resolution evidence: %v", err)
+	}
+	if len(resolution.A) != 1 || resolution.A[0] != "192.0.2.10" || len(resolution.AAAA) != 1 || resolution.AAAA[0] != "2001:db8::10" {
+		t.Fatalf("resolution evidence = %#v", resolution)
+	}
+	var configuration DNSConfigurationEvidence
+	if err := json.Unmarshal(result.Evidence[0].Raw, &configuration); err != nil {
+		t.Fatalf("decode configuration evidence: %v", err)
+	}
+	if len(configuration.Resolvers) != 1 || configuration.Resolvers[0] != "192.0.2.53" {
+		t.Fatalf("configuration evidence = %#v", configuration)
+	}
+}
+
 func TestProbeNXDOMAINIsDistinctFromTimeout(t *testing.T) {
 	nxdomain := &net.DNSError{Err: "no such host", Name: "missing.example.test", IsNotFound: true}
 	resolver := &fakeResolver{errors: map[string]error{"ip4": nxdomain, "ip6": nxdomain}}

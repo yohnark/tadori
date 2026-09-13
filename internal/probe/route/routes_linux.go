@@ -97,13 +97,13 @@ func parseLinuxIPv4Routes(path string) ([]Route, error) {
 			metric, _ = strconv.Atoi(fields[6])
 		}
 		name := fields[0]
-		routes = append(routes, Route{
-			Destination:    netip.PrefixFrom(destination, prefix).Masked(),
+		routes = append(routes, normalizeRoute(Route{
+			Destination:    normalizeRoutePrefix(netip.PrefixFrom(destination, prefix)),
 			Gateway:        gateway,
 			Interface:      name,
 			InterfaceIndex: interfaces[name],
 			Metric:         metric,
-		})
+		}))
 	}
 	if err := scanner.Err(); err != nil {
 		return routes, err
@@ -151,13 +151,13 @@ func parseLinuxIPv6Routes(path string) ([]Route, error) {
 			metric = int(metricValue)
 		}
 		name := fields[9]
-		routes = append(routes, Route{
-			Destination:    netip.PrefixFrom(destination, prefix).Masked(),
+		routes = append(routes, normalizeRoute(Route{
+			Destination:    normalizeRoutePrefix(netip.PrefixFrom(destination, prefix)),
 			Gateway:        gateway,
 			Interface:      name,
 			InterfaceIndex: interfaces[name],
 			Metric:         metric,
-		})
+		}))
 	}
 	if err := scanner.Err(); err != nil {
 		return routes, err

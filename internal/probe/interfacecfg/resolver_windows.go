@@ -18,7 +18,7 @@ func readConfiguredDNSServers(ctx context.Context, path string) ([]netip.Addr, s
 	parsed := make([]netip.Addr, 0, len(addresses))
 	for _, value := range addresses {
 		if address, parseErr := netip.ParseAddr(value); parseErr == nil {
-			parsed = append(parsed, address)
+			parsed = append(parsed, address.Unmap())
 		}
 	}
 	return parsed, config.Source(), err

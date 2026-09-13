@@ -6,6 +6,7 @@ package orchestrate
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -53,8 +54,15 @@ func ParseTarget(raw string) (model.Target, error) {
 	return model.Target{
 		URL:    raw,
 		Scheme: u.Scheme,
-		Host:   host,
+		Host:   canonicalHost(host),
 		Port:   portNumber,
 		Path:   u.EscapedPath(),
 	}, nil
+}
+
+func canonicalHost(host string) string {
+	if address, err := netip.ParseAddr(host); err == nil {
+		return model.NormalizeAddr(address).String()
+	}
+	return host
 }
