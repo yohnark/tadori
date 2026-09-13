@@ -725,23 +725,34 @@ func windowsResolverAddresses(ctx context.Context) ([]string, error) {
 		}
 		return nil, err
 	}
+	return ParseWindowsResolverAddresses(data), nil
+}
+
+// ParseWindowsResolverAddresses extracts DNS server values from the output of
+// `ipconfig /all`. The parser is intentionally independent from process
+// execution so Windows output can be tested deterministically. A delimiter is
+// identified by the IP value after it, rather than by the last colon on the
+// line: IPv6 values contain colons of their own.
+func ParseWindowsResolverAddresses(data []byte) []string {
 	var addresses []string
 	collect := false
 	for _, line := range strings.Split(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
 		lower := strings.ToLower(trimmed)
-		if strings.Contains(lower, "dns servers") {
+		if strings.HasPrefix(lower, "dns servers") {
+			candidate, hasDelimiter := windowsDNSValue(trimmed)
+			if !hasDelimiter {
+				collect = false
+				continue
+			}
 			collect = true
-			if index := strings.LastIndex(trimmed, ":"); index >= 0 {
-				candidate := strings.TrimSpace(trimmed[index+1:])
-				if net.ParseIP(candidate) != nil {
-					addresses = append(addresses, candidate)
-				}
+			if candidate != "" {
+				addresses = append(addresses, candidate)
 			}
 			continue
 		}
 		if collect {
-			candidate := strings.TrimSpace(strings.TrimPrefix(trimmed, "."))
+			candidate := strings.TrimSpace(trimmed)
 			if net.ParseIP(candidate) != nil {
 				addresses = append(addresses, candidate)
 				continue
@@ -749,5 +760,25 @@ func windowsResolverAddresses(ctx context.Context) ([]string, error) {
 			collect = false
 		}
 	}
-	return normalizeResolverAddresses(addresses), nil
+	return normalizeResolverAddresses(addresses)
+}
+
+// windowsDNSValue returns the IP value following the DNS Servers label and
+// whether that label has a usable colon delimiter. It scans every colon and
+// accepts only a suffix that is exactly one IP address, so an IPv6 value's
+// internal colons cannot be mistaken for the label delimiter.
+func windowsDNSValue(line string) (string, bool) {
+	for index, character := range line {
+		if character != ':' {
+			continue
+		}
+		candidate := strings.TrimSpace(line[index+1:])
+		if candidate == "" {
+			return "", true
+		}
+		if net.ParseIP(candidate) != nil {
+			return candidate, true
+		}
+	}
+	return "", false
 }

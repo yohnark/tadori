@@ -193,3 +193,51 @@ func TestParseResolverAddresses(t *testing.T) {
 		t.Fatalf("addresses = %#v, want %#v", got, want)
 	}
 }
+
+func TestParseWindowsResolverAddresses(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want []string
+	}{
+		{
+			name: "ipv4 and continuation",
+			data: "Windows IP Configuration\n    DNS Servers . . . . . . . . . . . : 192.0.2.53\n                                      192.0.2.54\n    NetBIOS over Tcpip. . . . . . . . : Enabled\n",
+			want: []string{"192.0.2.53", "192.0.2.54"},
+		},
+		{
+			name: "ipv6 first",
+			data: "    DNS Servers . . . . . . . . . . : 2001:db8::53\n                                      192.0.2.53\n",
+			want: []string{"2001:db8::53", "192.0.2.53"},
+		},
+		{
+			name: "ipv6 only",
+			data: "    DNS Servers . . . . . . . . . . : 2001:db8:1::53\n    NetBIOS over Tcpip. . . . . . . . : Disabled\n",
+			want: []string{"2001:db8:1::53"},
+		},
+		{
+			name: "duplicates and unrelated fields",
+			data: "    DNS Servers . . . . . . . . . . : 2001:db8::53\n                                      2001:db8::53\n    Default Gateway . . . . . . . . . : 192.0.2.1\n                                      192.0.2.2\n",
+			want: []string{"2001:db8::53"},
+		},
+		{
+			name: "value on continuation line",
+			data: "    DNS Servers . . . . . . . . . . :\n                                      2001:db8::53\n                                      192.0.2.53\n    DHCPv6 IAID . . . . . . . . . . . : 1\n",
+			want: []string{"2001:db8::53", "192.0.2.53"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := ParseWindowsResolverAddresses([]byte(test.data))
+			if len(got) != len(test.want) {
+				t.Fatalf("addresses = %#v, want %#v", got, test.want)
+			}
+			for index := range test.want {
+				if got[index] != test.want[index] {
+					t.Fatalf("addresses = %#v, want %#v", got, test.want)
+				}
+			}
+		})
+	}
+}
