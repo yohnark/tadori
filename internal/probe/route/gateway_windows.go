@@ -24,7 +24,7 @@ func defaultGatewayChecker(ctx context.Context, gateway netip.Addr) error {
 			return ctx.Err()
 		}
 		if errors.Is(err, exec.ErrNotFound) {
-			return ErrUnsupported
+			return ErrGatewayReachabilityUnsupported
 		}
 		return fmt.Errorf("%w: %v", errGatewayUnreachable, err)
 	}

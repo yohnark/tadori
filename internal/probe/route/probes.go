@@ -145,7 +145,9 @@ func (p *TargetRouteProbe) routes(ctx context.Context) ([]Route, error) {
 
 // GatewayProbe checks the next-hop gateway selected for the target. Failure
 // is intentionally represented only on this supporting probe result; callers
-// must not promote it to an end-to-end connectivity finding by itself.
+// must not promote it to an end-to-end connectivity finding by itself. An
+// unavailable optional checker is reported as skipped rather than as a route
+// inspection failure.
 type GatewayProbe struct {
 	Provider RouteTable
 	Checker  ReachabilityChecker
@@ -207,8 +209,17 @@ func (p *GatewayProbe) Run(ctx context.Context, execution probe.ExecutionContext
 	raw["supporting_only"] = true
 	if err != nil {
 		raw["error"] = err.Error()
+		if gatewayCheckUnsupported(err) {
+			// Route discovery above succeeded. The optional gateway check was
+			// unavailable, so do not describe the selected route as untested or
+			// turn the missing capability into a reachability failure.
+			raw["gateway_tested"] = false
+			raw["reachable"] = nil
+			raw["error"] = ErrGatewayReachabilityUnsupported.Error()
+			return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("gateway-reachability-1", raw)}, model.ProbeStatusSkipped, model.FailureReasonUnsupported, model.LayerGateway, model.FaultDomainGateway)
+		}
 		status := model.ProbeStatusFailed
-		if errors.Is(err, ErrUnsupported) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
 			status = model.ProbeStatusError
 		}
 		return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("gateway-reachability-1", raw)}, status, gatewayReason(err), model.LayerGateway, model.FaultDomainGateway)
@@ -340,4 +351,8 @@ func gatewayReason(err error) model.FailureReason {
 		return model.FailureReason(FailureReasonInsufficientPrivilege)
 	}
 	return model.FailureReasonGatewayUnreachable
+}
+
+func gatewayCheckUnsupported(err error) bool {
+	return errors.Is(err, ErrGatewayReachabilityUnsupported) || errors.Is(err, ErrUnsupported)
 }
