@@ -251,28 +251,50 @@
     };
   }
 
-  function renderProbe(probe, index) {
-    const card = element("article", toneClass("probe-card", probe.tone));
-    const header = element("div", "card-heading");
-    const title = element("h3", "card-title", `${index + 1}. ${text(probe.name)}`);
-    header.appendChild(title);
-    header.appendChild(badge(probe.status_label || probe.status, probe.tone));
-    card.appendChild(header);
-
+  function renderProbeBody(probe) {
+    const body = element("div", "card-body");
     const metadata = element("div", "metadata");
     metadata.appendChild(metadataItem("duration", `${text(probe.duration_ms)} ms`));
     metadata.appendChild(metadataItem("layer", probe.layer));
     metadata.appendChild(metadataItem("fault domain", probe.fault_domain));
-    card.appendChild(metadata);
+    body.appendChild(metadata);
 
     const interpretation = element("p", "interpretation", `Reason: ${text(probe.failure_reason)}`);
-    card.appendChild(interpretation);
+    body.appendChild(interpretation);
     if (probe.evidence_ids && probe.evidence_ids.length) {
       const refs = element("div", "card-references");
       refs.appendChild(element("span", "reference-label", "Evidence"));
       refs.appendChild(referenceGroup(probe.evidence_ids));
-      card.appendChild(refs);
+      body.appendChild(refs);
     }
+    return body;
+  }
+
+  function renderProbe(probe, index) {
+    const isSkipped = probe.status === "skipped";
+    const isQuiet = probe.tone === "positive" || probe.tone === "neutral" || isSkipped;
+    const cardClass = isSkipped ? toneClass("probe-card", "neutral") : toneClass("probe-card", probe.tone);
+    const badgeTone = isSkipped ? "neutral" : probe.tone;
+
+    if (!isQuiet) {
+      const card = element("article", cardClass);
+      const header = element("div", "card-heading");
+      header.appendChild(element("h3", "card-title", `${index + 1}. ${text(probe.name)}`));
+      header.appendChild(badge(probe.status_label || probe.status, badgeTone));
+      card.appendChild(header);
+      card.appendChild(renderProbeBody(probe));
+      probes.appendChild(card);
+      return;
+    }
+
+    const card = element("details", cardClass);
+    const summary = element("summary", "card-heading");
+    const title = element("h3", "card-title", `${index + 1}. ${text(probe.name)}`);
+    title.title = text(probe.name);
+    summary.appendChild(title);
+    summary.appendChild(badge(probe.status_label || probe.status, badgeTone));
+    card.appendChild(summary);
+    card.appendChild(renderProbeBody(probe));
     probes.appendChild(card);
   }
 
