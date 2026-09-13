@@ -10,17 +10,16 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yohnark/tadori/internal/model"
 )
 
 // MarshalJSON returns the canonical JSON representation of report.
 //
-// The model's JSON tags and field order are the canonical contract.  Keeping
-// this projection as a direct marshal is important: it retains probe and
-// evidence ordering, timing values, raw evidence, and findings exactly as
-// supplied by the caller.  In particular, this function does not inspect or
-// classify Evidence.Raw.
+// The model's JSON tags and field order are the canonical contract. Timestamp
+// marshalers normalize report, probe, and evidence timestamps to UTC without
+// changing the supplied report or inspecting Evidence.Raw.
 func MarshalJSON(report model.DiagnosticReport) ([]byte, error) {
 	return json.Marshal(report)
 }
@@ -67,10 +66,10 @@ func RenderHuman(report model.DiagnosticReport) string {
 	if report.StartedAt != nil || report.CompletedAt != nil {
 		out.WriteString("Report timing:")
 		if report.StartedAt != nil {
-			fmt.Fprintf(&out, " started_at=%s", strconv.Quote(report.StartedAt.Format("2006-01-02T15:04:05.999999999Z07:00")))
+			fmt.Fprintf(&out, " started_at=%s", strconv.Quote(formatTimestamp(*report.StartedAt)))
 		}
 		if report.CompletedAt != nil {
-			fmt.Fprintf(&out, " completed_at=%s", strconv.Quote(report.CompletedAt.Format("2006-01-02T15:04:05.999999999Z07:00")))
+			fmt.Fprintf(&out, " completed_at=%s", strconv.Quote(formatTimestamp(*report.CompletedAt)))
 		}
 		out.WriteByte('\n')
 	}
@@ -99,7 +98,7 @@ func RenderHuman(report model.DiagnosticReport) string {
 				fmt.Fprintf(&out, " source=%s", evidence.Source)
 			}
 			if evidence.CapturedAt != nil {
-				fmt.Fprintf(&out, " captured_at=%s", evidence.CapturedAt.Format("2006-01-02T15:04:05.999999999Z07:00"))
+				fmt.Fprintf(&out, " captured_at=%s", formatTimestamp(*evidence.CapturedAt))
 			}
 			// Raw is intentionally written as supplied.  It is evidence, not
 			// an input to renderer policy.
@@ -183,10 +182,16 @@ func formatTarget(target model.Target) string {
 func formatTiming(timing model.Timing) string {
 	parts := []string{fmt.Sprintf("duration_ms=%d", timing.DurationMS)}
 	if timing.StartedAt != nil {
-		parts = append(parts, "started_at="+strconv.Quote(timing.StartedAt.Format("2006-01-02T15:04:05.999999999Z07:00")))
+		parts = append(parts, "started_at="+strconv.Quote(formatTimestamp(*timing.StartedAt)))
 	}
 	if timing.CompletedAt != nil {
-		parts = append(parts, "completed_at="+strconv.Quote(timing.CompletedAt.Format("2006-01-02T15:04:05.999999999Z07:00")))
+		parts = append(parts, "completed_at="+strconv.Quote(formatTimestamp(*timing.CompletedAt)))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// formatTimestamp is presentation-only. Human output uses one explicit zone
+// for every timestamp in a report and does not alter the model value.
+func formatTimestamp(timestamp time.Time) string {
+	return timestamp.UTC().Format(time.RFC3339Nano)
 }
