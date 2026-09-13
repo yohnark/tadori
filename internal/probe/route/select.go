@@ -12,9 +12,22 @@ import (
 // metric wins. The final tie-breakers make fixture and evidence ordering
 // deterministic.
 func Select(routes []Route, target netip.Addr) (Route, bool) {
+	selection, ok := SelectDetailed(routes, target)
+	if !ok {
+		return Route{}, false
+	}
+	return selection.Selected, true
+}
+
+// SelectDetailed applies the route precedence available in the normalized
+// table: longest matching prefix, then lowest metric. Interface and textual
+// ordering are stable fallbacks for deterministic output only. A tie before
+// those fallbacks is reported as ambiguous because the generic table does not
+// expose a platform's remaining equal-cost selection state.
+func SelectDetailed(routes []Route, target netip.Addr) (Selection, bool) {
 	target = model.NormalizeAddr(target)
 	if !target.IsValid() {
-		return Route{}, false
+		return Selection{}, false
 	}
 	candidates := make([]Route, 0, len(routes))
 	for _, candidate := range routes {
@@ -26,7 +39,7 @@ func Select(routes []Route, target netip.Addr) (Route, bool) {
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
-		return Route{}, false
+		return Selection{}, false
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		a, b := candidates[i], candidates[j]
@@ -42,7 +55,25 @@ func Select(routes []Route, target netip.Addr) (Route, bool) {
 		}
 		return a.Interface < b.Interface
 	})
-	return candidates[0], true
+	ambiguous := false
+	if len(candidates) > 1 {
+		first := candidates[0]
+		for _, candidate := range candidates[1:] {
+			if candidate.Destination.Bits() != first.Destination.Bits() || candidate.Metric != first.Metric {
+				break
+			}
+			if !sameRoute(candidate, first) {
+				ambiguous = true
+				break
+			}
+		}
+	}
+	return Selection{Target: target, Selected: candidates[0], Candidates: candidates, Ambiguous: ambiguous}, true
+}
+
+// SelectRouteDetailed is the descriptive alias for SelectDetailed.
+func SelectRouteDetailed(routes []Route, target netip.Addr) (Selection, bool) {
+	return SelectDetailed(routes, target)
 }
 
 // SelectRoute is the descriptive alias used by callers that prefer an
@@ -91,10 +122,23 @@ func SelectDefaultRoute(routes []Route, family int) (Route, bool) {
 func normalizeRoute(route Route) Route {
 	route.Destination = model.NormalizePrefix(route.Destination)
 	route.Gateway = model.NormalizeAddr(route.Gateway)
+	route.Source = model.NormalizeAddr(route.Source)
 	if address, err := netip.ParseAddr(route.Interface); err == nil {
 		route.Interface = model.NormalizeAddr(address).String()
 	}
 	return route
+}
+
+func sameRoute(left, right Route) bool {
+	return left.Destination == right.Destination &&
+		left.Gateway == right.Gateway &&
+		left.Interface == right.Interface &&
+		left.InterfaceIndex == right.InterfaceIndex &&
+		left.Metric == right.Metric &&
+		left.Source == right.Source &&
+		left.InterfaceType == right.InterfaceType &&
+		left.VPNOrTunnel == right.VPNOrTunnel &&
+		left.VirtualAdapter == right.VirtualAdapter
 }
 
 func normalizeRoutePrefix(prefix netip.Prefix) netip.Prefix {

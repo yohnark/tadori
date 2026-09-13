@@ -425,6 +425,44 @@ func TestWriteHumanAndTerminalAlias(t *testing.T) {
 	}
 }
 
+func TestRenderHumanPlacesNetworkContextBeforeRawRouteEvidence(t *testing.T) {
+	target := model.NewTarget("10.0.10.25", 80)
+	target.NetworkContext = &model.NetworkContext{
+		RequestedIdentity:          "10.0.10.25",
+		SelectedDestinationAddress: "10.0.10.25",
+		SelectedSourceInterface:    "Ethernet",
+		SelectedSourceAddress:      "10.0.10.10",
+		EffectiveRoute:             model.RouteDispositionOnLink,
+		RoutePrefix:                "10.0.10.0/24",
+		NextHop:                    "on-link",
+		NetworkScope:               model.NetworkScopeSameLink,
+	}
+	report := model.DiagnosticReport{
+		Target: target,
+		Status: model.ReportStatusComplete,
+		Probes: []model.ProbeResult{{
+			Name:   "target_route",
+			Status: model.ProbeStatusPassed,
+			Evidence: []model.Evidence{{
+				ID:   "route-1",
+				Kind: model.EvidenceKindRoute,
+				Raw:  json.RawMessage(`{"route_type":"target","effective_route":"on_link"}`),
+			}},
+		}},
+	}
+	human := RenderHuman(report)
+	contextAt := strings.Index(human, "Network Context:")
+	evidenceAt := strings.Index(human, "Evidence:")
+	if contextAt < 0 || evidenceAt < 0 || contextAt >= evidenceAt {
+		t.Fatalf("network context was not rendered before raw evidence:\n%s", human)
+	}
+	for _, want := range []string{"Network scope: Local link", "Source interface: Ethernet", "Source address: 10.0.10.10", "Route: On-link", "Gateway: Not applicable"} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("human network context missing %q:\n%s", want, human)
+		}
+	}
+}
+
 func TestRenderHumanIncludesStructuredPathObservation(t *testing.T) {
 	raw, err := json.Marshal(model.PathObservation{
 		Status:             model.PathObservationStatusObserved,

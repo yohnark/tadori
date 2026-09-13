@@ -62,7 +62,7 @@ func parseLinuxIPv4Routes(path string) ([]Route, error) {
 	}
 	defer file.Close()
 
-	interfaces := interfaceIndices()
+	interfaces := linuxInterfaceMetadata()
 	routes := make([]Route, 0)
 	scanner := bufio.NewScanner(file)
 	lineNo := 0
@@ -97,13 +97,12 @@ func parseLinuxIPv4Routes(path string) ([]Route, error) {
 			metric, _ = strconv.Atoi(fields[6])
 		}
 		name := fields[0]
-		routes = append(routes, normalizeRoute(Route{
-			Destination:    normalizeRoutePrefix(netip.PrefixFrom(destination, prefix)),
-			Gateway:        gateway,
-			Interface:      name,
-			InterfaceIndex: interfaces[name],
-			Metric:         metric,
-		}))
+		routes = append(routes, normalizeRoute(enrichLinuxRoute(Route{
+			Destination: normalizeRoutePrefix(netip.PrefixFrom(destination, prefix)),
+			Gateway:     gateway,
+			Interface:   name,
+			Metric:      metric,
+		}, interfaces[name])))
 	}
 	if err := scanner.Err(); err != nil {
 		return routes, err
@@ -121,7 +120,7 @@ func parseLinuxIPv6Routes(path string) ([]Route, error) {
 	}
 	defer file.Close()
 
-	interfaces := interfaceIndices()
+	interfaces := linuxInterfaceMetadata()
 	routes := make([]Route, 0)
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -151,13 +150,12 @@ func parseLinuxIPv6Routes(path string) ([]Route, error) {
 			metric = int(metricValue)
 		}
 		name := fields[9]
-		routes = append(routes, normalizeRoute(Route{
-			Destination:    normalizeRoutePrefix(netip.PrefixFrom(destination, prefix)),
-			Gateway:        gateway,
-			Interface:      name,
-			InterfaceIndex: interfaces[name],
-			Metric:         metric,
-		}))
+		routes = append(routes, normalizeRoute(enrichLinuxRoute(Route{
+			Destination: normalizeRoutePrefix(netip.PrefixFrom(destination, prefix)),
+			Gateway:     gateway,
+			Interface:   name,
+			Metric:      metric,
+		}, interfaces[name])))
 	}
 	if err := scanner.Err(); err != nil {
 		return routes, err
@@ -165,16 +163,73 @@ func parseLinuxIPv6Routes(path string) ([]Route, error) {
 	return routes, nil
 }
 
-func interfaceIndices() map[string]int {
-	result := make(map[string]int)
+type linuxInterfaceInfo struct {
+	Index       int
+	Type        string
+	VPNOrTunnel bool
+	Virtual     bool
+}
+
+func linuxInterfaceMetadata() map[string]linuxInterfaceInfo {
+	result := make(map[string]linuxInterfaceInfo)
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return result
 	}
 	for _, iface := range interfaces {
-		result[iface.Name] = iface.Index
+		vpn, virtual := classifyLinuxInterface(iface.Name, iface.Flags&net.FlagLoopback != 0)
+		info := linuxInterfaceInfo{Index: iface.Index, Type: linuxInterfaceType(iface.Name, vpn, virtual), VPNOrTunnel: vpn, Virtual: virtual}
+		result[iface.Name] = info
 	}
 	return result
+}
+
+func interfaceIndices() map[string]int {
+	result := make(map[string]int)
+	for name, info := range linuxInterfaceMetadata() {
+		result[name] = info.Index
+	}
+	return result
+}
+
+func enrichLinuxRoute(route Route, info linuxInterfaceInfo) Route {
+	route.InterfaceIndex = info.Index
+	route.InterfaceType = info.Type
+	route.VPNOrTunnel = info.VPNOrTunnel
+	route.VirtualAdapter = info.Virtual
+	return route
+}
+
+func classifyLinuxInterface(name string, loopback bool) (vpn, virtual bool) {
+	lower := strings.ToLower(name)
+	if loopback || lower == "lo" {
+		return false, true
+	}
+	vpn = containsLinuxInterfaceHint(lower, "vpn", "wireguard", "openvpn", "tun", "tap", "wg", "tailscale", "zerotier")
+	virtual = vpn || containsLinuxInterfaceHint(lower, "docker", "container", "veth", "br-", "virbr", "cni", "podman", "vmnet", "virtual", "dummy")
+	return vpn, virtual
+}
+
+func containsLinuxInterfaceHint(value string, hints ...string) bool {
+	for _, hint := range hints {
+		if value == hint || strings.Contains(value, hint) {
+			return true
+		}
+	}
+	return false
+}
+
+func linuxInterfaceType(name string, vpn, virtual bool) string {
+	if strings.EqualFold(name, "lo") {
+		return "loopback"
+	}
+	if vpn {
+		return "vpn"
+	}
+	if virtual {
+		return "virtual"
+	}
+	return "physical_or_unknown"
 }
 
 func parseHexUint32(value string) (uint32, bool) {

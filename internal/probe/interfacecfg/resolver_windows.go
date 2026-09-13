@@ -65,18 +65,28 @@ func parseWindowsAdapterAddresses(buffer []byte) []InterfaceState {
 	states := make([]InterfaceState, 0)
 	for adapter := first; adapter != nil; adapter = adapter.Next {
 		state := InterfaceState{
-			Index:          int(adapter.IfIndex),
-			Name:           utf16Pointer(adapter.FriendlyName),
-			Description:    utf16Pointer(adapter.Description),
-			MTU:            int(adapter.Mtu),
-			Up:             adapter.OperStatus == windows.IfOperStatusUp,
-			Loopback:       adapter.IfType == windows.IF_TYPE_SOFTWARE_LOOPBACK,
-			VirtualAdapter: windowsVirtualAdapter(adapter),
+			Index:       int(adapter.IfIndex),
+			Name:        utf16Pointer(adapter.FriendlyName),
+			Description: utf16Pointer(adapter.Description),
+			MTU:         int(adapter.Mtu),
+			Up:          adapter.OperStatus == windows.IfOperStatusUp,
+			Loopback:    adapter.IfType == windows.IF_TYPE_SOFTWARE_LOOPBACK,
+			Virtual:     windowsVirtualAdapter(adapter),
 		}
 		if state.Name == "" {
 			state.Name = state.Description
 		}
 		state.VPN = windowsVPNAdapter(state.Name, state.Description, adapter.IfType, adapter.TunnelType)
+		switch {
+		case state.Loopback:
+			state.Type = "loopback"
+		case state.VPN:
+			state.Type = "vpn"
+		case state.Virtual:
+			state.Type = "virtual"
+		default:
+			state.Type = "physical_or_unknown"
+		}
 		if adapter.PhysicalAddressLength > 0 && adapter.PhysicalAddressLength <= uint32(len(adapter.PhysicalAddress)) {
 			state.Hardware = net.HardwareAddr(adapter.PhysicalAddress[:adapter.PhysicalAddressLength]).String()
 		}

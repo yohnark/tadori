@@ -37,19 +37,20 @@ type Address struct {
 // interface.  Loopback interfaces are retained in evidence but are not
 // considered usable for the active-interface interpretation.
 type InterfaceState struct {
-	Index          int          `json:"index"`
-	Name           string       `json:"name"`
-	Description    string       `json:"description,omitempty"`
-	Hardware       string       `json:"hardware_address,omitempty"`
-	MTU            int          `json:"mtu"`
-	Up             bool         `json:"up"`
-	Loopback       bool         `json:"loopback"`
-	VirtualAdapter bool         `json:"virtual_adapter,omitempty"`
-	VPN            bool         `json:"vpn,omitempty"`
-	Addresses      []Address    `json:"addresses,omitempty"`
-	DNSServers     []netip.Addr `json:"dns_servers,omitempty"`
-	DNSSuffix      string       `json:"dns_suffix,omitempty"`
-	DNSSearchList  []string     `json:"dns_search_list,omitempty"`
+	Index         int          `json:"index"`
+	Name          string       `json:"name"`
+	Description   string       `json:"description,omitempty"`
+	Type          string       `json:"type,omitempty"`
+	Hardware      string       `json:"hardware_address,omitempty"`
+	MTU           int          `json:"mtu"`
+	Up            bool         `json:"up"`
+	Loopback      bool         `json:"loopback"`
+	VPN           bool         `json:"vpn,omitempty"`
+	Virtual       bool         `json:"virtual,omitempty"`
+	Addresses     []Address    `json:"addresses,omitempty"`
+	DNSServers    []netip.Addr `json:"dns_servers,omitempty"`
+	DNSSuffix     string       `json:"dns_suffix,omitempty"`
+	DNSSearchList []string     `json:"dns_search_list,omitempty"`
 }
 
 // Snapshot contains local interface and resolver configuration.  DNS servers
@@ -104,6 +105,14 @@ func (p SystemProvider) Snapshot(ctx context.Context) (Snapshot, error) {
 	interfaces, err := collectInterfaceStates(ctx)
 	if err != nil {
 		return Snapshot{}, err
+	}
+	for index := range interfaces {
+		if interfaces[index].Type == "" {
+			interfaces[index].Type = interfaceType(interfaces[index].Name, interfaces[index].Loopback)
+		}
+		if !interfaces[index].VPN && !interfaces[index].Virtual {
+			interfaces[index].VPN, interfaces[index].Virtual = classifyInterface(interfaces[index].Name, interfaces[index].Loopback)
+		}
 	}
 
 	servers, resolverSource, resolverErr := readConfiguredDNSServers(ctx, p.ResolverConfigPath)

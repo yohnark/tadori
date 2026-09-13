@@ -214,6 +214,32 @@ func TestViewModelProjectsNameResolutionSeparatelyFromRawEvidence(t *testing.T) 
 	}
 }
 
+func TestViewModelProjectsNormalizedNetworkContext(t *testing.T) {
+	target := fixtureTarget(443)
+	target.NetworkContext = &model.NetworkContext{
+		RequestedIdentity:          target.RequestedIdentity,
+		SelectedDestinationAddress: "10.0.10.25",
+		SelectedSourceInterface:    "Ethernet",
+		SelectedSourceAddress:      "10.0.10.10",
+		EffectiveRoute:             model.RouteDispositionOnLink,
+		RoutePrefix:                "10.0.10.0/24",
+		NextHop:                    "on-link",
+		RouteMetric:                10,
+		NetworkScope:               model.NetworkScopeSameLink,
+		EvidenceIDs:                []string{"target-route-1", "interface-state-1"},
+	}
+	view, err := BuildDiagnosticView(representativeReport(target, model.ReportStatusComplete))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.NetworkContext == nil || view.NetworkContext.NetworkScopeLabel != "Local link" || view.NetworkContext.EffectiveRouteLabel != "On-link" {
+		t.Fatalf("network context view = %#v", view.NetworkContext)
+	}
+	if view.NetworkContext.SelectedSourceInterface != "Ethernet" || view.NetworkContext.RoutePrefix != "10.0.10.0/24" {
+		t.Fatalf("network context fields were lost: %#v", view.NetworkContext)
+	}
+}
+
 func TestViewModelUsesPacketEndpointConfirmationWithoutAddingPacketUI(t *testing.T) {
 	target := fixtureTarget(443)
 	flow := model.PacketFlowEvidence{

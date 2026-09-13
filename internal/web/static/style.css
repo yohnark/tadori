@@ -799,6 +799,45 @@ details.probe-card .card-title {
   color: var(--ink);
 }
 
+.network-context-panel {
+  margin-top: 16px;
+}
+
+.context-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+
+.context-item {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 12px 14px;
+  background: var(--paper);
+}
+
+.context-label {
+  color: var(--muted);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.context-value {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+}
+
+.context-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px 14px;
+  background: var(--paper);
+}
+
 .interpretation {
   margin: 6px 0 0;
   color: var(--muted);
@@ -1211,6 +1250,10 @@ button.track-node:focus-visible {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .context-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .workbench-inspector {
     position: static;
     max-height: none;
@@ -1315,5 +1358,13 @@ button.track-node:focus-visible {
 
   .not-topology {
     display: none;
+  }
+
+  .context-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .context-note {
+    grid-column: auto;
   }
 }

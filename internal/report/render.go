@@ -102,6 +102,10 @@ func RenderHuman(report model.DiagnosticReport) string {
 		}
 	}
 
+	if report.Target.NetworkContext != nil {
+		renderNetworkContext(&out, *report.Target.NetworkContext)
+	}
+
 	out.WriteString("Evidence:\n")
 	evidenceCount := 0
 	for _, probe := range report.Probes {
@@ -325,6 +329,95 @@ func formatTarget(target model.Target) string {
 		return target.OriginalInput
 	}
 	return "(unspecified)"
+}
+
+func renderNetworkContext(out *strings.Builder, context model.NetworkContext) {
+	out.WriteString("Network Context:\n")
+	fmt.Fprintf(out, "  Network scope: %s\n", networkScopeLabel(context.NetworkScope))
+	if context.RequestedIdentity != "" {
+		fmt.Fprintf(out, "  Requested identity: %s\n", context.RequestedIdentity)
+	}
+	if context.SelectedDestinationAddress != "" {
+		fmt.Fprintf(out, "  Selected destination: %s\n", context.SelectedDestinationAddress)
+	}
+	if context.SelectedSourceInterface != "" {
+		if context.SelectedSourceInterfaceIndex != 0 {
+			fmt.Fprintf(out, "  Source interface: %s (index %d)\n", context.SelectedSourceInterface, context.SelectedSourceInterfaceIndex)
+		} else {
+			fmt.Fprintf(out, "  Source interface: %s\n", context.SelectedSourceInterface)
+		}
+	} else {
+		out.WriteString("  Source interface: Unknown\n")
+	}
+	if context.SelectedSourceAddress != "" {
+		fmt.Fprintf(out, "  Source address: %s\n", context.SelectedSourceAddress)
+	} else {
+		out.WriteString("  Source address: Unknown\n")
+	}
+	fmt.Fprintf(out, "  Route: %s\n", routeDispositionLabel(context.EffectiveRoute))
+	if context.RoutePrefix != "" {
+		fmt.Fprintf(out, "  Route prefix: %s\n", context.RoutePrefix)
+	}
+	if context.Gateway != "" {
+		fmt.Fprintf(out, "  Gateway: %s\n", context.Gateway)
+	} else {
+		out.WriteString("  Gateway: Not applicable\n")
+	}
+	if context.NextHop != "" {
+		fmt.Fprintf(out, "  Next hop: %s\n", context.NextHop)
+	}
+	fmt.Fprintf(out, "  Route metric: %d\n", context.RouteMetric)
+	if context.VPNOrTunnelInvolvement {
+		out.WriteString("  VPN/tunnel involvement: observed\n")
+	}
+	if context.VirtualAdapterInvolvement {
+		out.WriteString("  Virtual adapter involvement: observed\n")
+	}
+	if context.Neighbor != nil {
+		fmt.Fprintf(out, "  Neighbor evidence: %s\n", context.Neighbor.Observation)
+		if context.Neighbor.Note != "" {
+			fmt.Fprintf(out, "  Neighbor note: %s\n", context.Neighbor.Note)
+		}
+	}
+	if len(context.CompetingRoutes) > 0 {
+		fmt.Fprintf(out, "  Competing routes: %d\n", len(context.CompetingRoutes))
+	}
+	if context.RouteSelectionAmbiguous {
+		out.WriteString("  Route selection: ambiguous\n")
+	}
+	if len(context.EvidenceIDs) > 0 {
+		fmt.Fprintf(out, "  Context evidence: %s\n", strings.Join(context.EvidenceIDs, ","))
+	}
+}
+
+func networkScopeLabel(scope model.NetworkScope) string {
+	switch scope {
+	case model.NetworkScopeLoopback:
+		return "Loopback"
+	case model.NetworkScopeLinkLocal:
+		return "Link-local"
+	case model.NetworkScopeSameLink:
+		return "Local link"
+	case model.NetworkScopePrivateRouted:
+		return "Private routed"
+	case model.NetworkScopeVPNTunnelRouted:
+		return "VPN / tunnel routed"
+	case model.NetworkScopeExternalRouted:
+		return "External routed"
+	default:
+		return "Unknown"
+	}
+}
+
+func routeDispositionLabel(disposition model.RouteDisposition) string {
+	switch disposition {
+	case model.RouteDispositionOnLink:
+		return "On-link"
+	case model.RouteDispositionRouted:
+		return "Routed"
+	default:
+		return "Unknown"
+	}
 }
 
 func formatPathDestination(host string, port uint16) string {

@@ -38,6 +38,7 @@ type ProgressRunner func(context.Context, model.Target, func(ProgressEvent)) mod
 type DiagnosticViewModel struct {
 	Report         model.DiagnosticReport   `json:"report"`
 	CanonicalJSON  string                   `json:"canonical_json"`
+	NetworkContext *NetworkContextView      `json:"network_context,omitempty"`
 	Overall        OverallView              `json:"overall"`
 	Progress       []ProgressEvent          `json:"progress"`
 	Probes         []ProbeView              `json:"probes"`
@@ -46,6 +47,31 @@ type DiagnosticViewModel struct {
 	Evidence       []EvidenceView           `json:"evidence"`
 	Paths          []PathView               `json:"paths"`
 	Comparisons    []ProtocolComparisonView `json:"comparisons"`
+}
+
+// NetworkContextView is the presentation projection of the canonical target
+// routing context. The machine-readable context remains in Report.Target;
+// labels here are derived only for the browser view.
+type NetworkContextView struct {
+	NetworkScope               model.NetworkScope      `json:"network_scope"`
+	NetworkScopeLabel          string                  `json:"network_scope_label"`
+	RequestedIdentity          string                  `json:"requested_identity"`
+	SelectedDestinationAddress string                  `json:"selected_destination_address,omitempty"`
+	SelectedSourceInterface    string                  `json:"selected_source_interface,omitempty"`
+	SelectedSourceAddress      string                  `json:"selected_source_address,omitempty"`
+	EffectiveRoute             model.RouteDisposition  `json:"effective_route"`
+	EffectiveRouteLabel        string                  `json:"effective_route_label"`
+	RoutePrefix                string                  `json:"route_prefix,omitempty"`
+	NextHop                    string                  `json:"next_hop,omitempty"`
+	Gateway                    string                  `json:"gateway,omitempty"`
+	RouteMetric                int                     `json:"route_metric"`
+	VPNOrTunnelInvolvement     bool                    `json:"vpn_or_tunnel_involvement,omitempty"`
+	VirtualAdapterInvolvement  bool                    `json:"virtual_adapter_involvement,omitempty"`
+	RouteSelectionAmbiguous    bool                    `json:"route_selection_ambiguous,omitempty"`
+	CompetingRoutes            []model.RouteCandidate  `json:"competing_routes,omitempty"`
+	Neighbor                   *model.NeighborEvidence `json:"neighbor,omitempty"`
+	Provenance                 []string                `json:"provenance,omitempty"`
+	EvidenceIDs                []string                `json:"evidence_ids,omitempty"`
 }
 
 // OverallView keeps report execution status separate from diagnosis and from
@@ -238,6 +264,9 @@ func BuildDiagnosticView(diagnosticReport model.DiagnosticReport) (DiagnosticVie
 		Paths:         make([]PathView, 0),
 		Comparisons:   make([]ProtocolComparisonView, 0),
 	}
+	if diagnosticReport.Target.NetworkContext != nil {
+		view.NetworkContext = buildNetworkContextView(*diagnosticReport.Target.NetworkContext)
+	}
 
 	view.Overall = buildOverallView(diagnosticReport)
 	view.NameResolution = buildNameResolutionView(diagnosticReport)
@@ -363,6 +392,69 @@ func nameResolutionPathView(path model.NameResolutionPath) NameResolutionPathVie
 		Certainty:      path.Certainty,
 		Provenance:     path.Provenance,
 		EvidenceIDs:    append([]string(nil), path.EvidenceIDs...),
+	}
+}
+
+func buildNetworkContextView(context model.NetworkContext) *NetworkContextView {
+	return &NetworkContextView{
+		NetworkScope:               context.NetworkScope,
+		NetworkScopeLabel:          networkScopeLabel(context.NetworkScope),
+		RequestedIdentity:          context.RequestedIdentity,
+		SelectedDestinationAddress: context.SelectedDestinationAddress,
+		SelectedSourceInterface:    context.SelectedSourceInterface,
+		SelectedSourceAddress:      context.SelectedSourceAddress,
+		EffectiveRoute:             context.EffectiveRoute,
+		EffectiveRouteLabel:        routeDispositionLabel(context.EffectiveRoute),
+		RoutePrefix:                context.RoutePrefix,
+		NextHop:                    context.NextHop,
+		Gateway:                    context.Gateway,
+		RouteMetric:                context.RouteMetric,
+		VPNOrTunnelInvolvement:     context.VPNOrTunnelInvolvement,
+		VirtualAdapterInvolvement:  context.VirtualAdapterInvolvement,
+		RouteSelectionAmbiguous:    context.RouteSelectionAmbiguous,
+		CompetingRoutes:            append([]model.RouteCandidate(nil), context.CompetingRoutes...),
+		Neighbor:                   cloneNeighborEvidence(context.Neighbor),
+		Provenance:                 append([]string(nil), context.Provenance...),
+		EvidenceIDs:                append([]string(nil), context.EvidenceIDs...),
+	}
+}
+
+func cloneNeighborEvidence(neighbor *model.NeighborEvidence) *model.NeighborEvidence {
+	if neighbor == nil {
+		return nil
+	}
+	copy := *neighbor
+	copy.Entries = append([]model.NeighborEntry(nil), neighbor.Entries...)
+	return &copy
+}
+
+func networkScopeLabel(scope model.NetworkScope) string {
+	switch scope {
+	case model.NetworkScopeLoopback:
+		return "Loopback"
+	case model.NetworkScopeLinkLocal:
+		return "Link-local"
+	case model.NetworkScopeSameLink:
+		return "Local link"
+	case model.NetworkScopePrivateRouted:
+		return "Private routed"
+	case model.NetworkScopeVPNTunnelRouted:
+		return "VPN / tunnel routed"
+	case model.NetworkScopeExternalRouted:
+		return "External routed"
+	default:
+		return "Unknown"
+	}
+}
+
+func routeDispositionLabel(disposition model.RouteDisposition) string {
+	switch disposition {
+	case model.RouteDispositionOnLink:
+		return "On-link"
+	case model.RouteDispositionRouted:
+		return "Routed"
+	default:
+		return "Unknown"
 	}
 }
 

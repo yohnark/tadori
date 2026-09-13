@@ -193,7 +193,7 @@ func (windowsEnvironmentProvider) ResolutionEnvironment(ctx context.Context) (Re
 			Name:           iface.Name,
 			Up:             iface.Up,
 			Loopback:       iface.Loopback,
-			VirtualAdapter: iface.VirtualAdapter,
+			VirtualAdapter: iface.Virtual,
 			VPN:            iface.VPN,
 			DNSSuffix:      iface.DNSSuffix,
 			DNSSearchList:  append([]string(nil), iface.DNSSearchList...),
