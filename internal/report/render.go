@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -74,6 +75,12 @@ func RenderHuman(report model.DiagnosticReport) string {
 	}
 	if report.Target.Resource != "" {
 		fmt.Fprintf(&out, "Resource: %s\n", report.Target.Resource)
+	}
+	if report.Target.SelectedEndpoint != nil {
+		fmt.Fprintf(&out, "Tadori probe candidate: %s\n", formatEndpoint(*report.Target.SelectedEndpoint))
+	}
+	if report.Target.TestedEndpoint != nil {
+		fmt.Fprintf(&out, "Transport-tested endpoint: %s\n", formatEndpoint(*report.Target.TestedEndpoint))
 	}
 	if report.StartedAt != nil || report.CompletedAt != nil {
 		out.WriteString("Report timing:")
@@ -221,7 +228,7 @@ func renderNameResolution(out *strings.Builder, diagnosticReport model.Diagnosti
 	} else {
 		out.WriteString("  Answers AAAA: (none)\n")
 	}
-	fmt.Fprintf(out, "  Selected endpoint: %s\n", valueOrUnavailable(observation.SelectedAddress))
+	fmt.Fprintf(out, "  Resolver representative answer (not OS/application selection): %s\n", valueOrUnavailable(observation.SelectedAddress))
 	if len(observation.CandidateNames) > 0 {
 		fmt.Fprintf(out, "  Candidate names: %s\n", strings.Join(observation.CandidateNames, ", "))
 	}
@@ -244,6 +251,17 @@ func renderNameResolution(out *strings.Builder, diagnosticReport model.Diagnosti
 				path.State, path.Mechanism, valueOrUnavailable(path.Resolver), valueOrUnavailable(path.Interface), valueOrUnavailable(path.Namespace), valueOrUnavailable(string(path.Certainty)))
 		}
 	}
+}
+
+func formatEndpoint(endpoint model.Endpoint) string {
+	value := net.JoinHostPort(endpoint.Address, strconv.Itoa(int(endpoint.Port)))
+	if endpoint.Family != "" {
+		value += " [" + string(endpoint.Family) + "]"
+	}
+	if endpoint.SelectionReason != "" {
+		value += " (" + string(endpoint.SelectionReason) + ")"
+	}
+	return value
 }
 
 func firstNameResolution(diagnosticReport model.DiagnosticReport) *model.NameResolutionObservation {

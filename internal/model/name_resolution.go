@@ -91,19 +91,23 @@ type NameResolutionHostEntry struct {
 // identity is not replaced by an answer, and configured paths are not promoted
 // to effective provenance.
 type NameResolutionObservation struct {
-	RequestedName       string                    `json:"requested_name"`
-	CandidateNames      []string                  `json:"candidate_names,omitempty"`
-	CandidateSuffixes   []string                  `json:"candidate_suffixes,omitempty"`
-	CandidateNamespaces []string                  `json:"candidate_namespaces,omitempty"`
-	Paths               []NameResolutionPath      `json:"paths,omitempty"`
-	EffectivePath       *NameResolutionPath       `json:"effective_path,omitempty"`
-	A                   []string                  `json:"a,omitempty"`
-	AAAA                []string                  `json:"aaaa,omitempty"`
-	SelectedAddress     string                    `json:"selected_address,omitempty"`
-	SelectedFamily      string                    `json:"selected_family,omitempty"`
-	HostsFileEntries    []NameResolutionHostEntry `json:"hosts_file_entries,omitempty"`
-	Limitations         []string                  `json:"limitations,omitempty"`
-	EvidenceIDs         []string                  `json:"evidence_ids,omitempty"`
+	RequestedName       string               `json:"requested_name"`
+	CandidateNames      []string             `json:"candidate_names,omitempty"`
+	CandidateSuffixes   []string             `json:"candidate_suffixes,omitempty"`
+	CandidateNamespaces []string             `json:"candidate_namespaces,omitempty"`
+	Paths               []NameResolutionPath `json:"paths,omitempty"`
+	EffectivePath       *NameResolutionPath  `json:"effective_path,omitempty"`
+	A                   []string             `json:"a,omitempty"`
+	AAAA                []string             `json:"aaaa,omitempty"`
+	// SelectedAddress is the resolver observation's deterministic
+	// representative answer. It is not evidence of OS/application endpoint
+	// selection; transport owns TestedEndpoint and Tadori owns its probe
+	// candidate on Target.
+	SelectedAddress  string                    `json:"selected_address,omitempty"`
+	SelectedFamily   string                    `json:"selected_family,omitempty"`
+	HostsFileEntries []NameResolutionHostEntry `json:"hosts_file_entries,omitempty"`
+	Limitations      []string                  `json:"limitations,omitempty"`
+	EvidenceIDs      []string                  `json:"evidence_ids,omitempty"`
 }
 
 // NormalizeNameResolutionObservation returns a copy with stable IP and

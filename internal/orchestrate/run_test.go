@@ -2,6 +2,7 @@ package orchestrate
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	stdhttp "net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yohnark/tadori/internal/model"
+	"github.com/yohnark/tadori/internal/probe/dns"
 )
 
 // TestRunAgainstLocalFixture exercises the full wiring path end to end
@@ -266,6 +268,99 @@ func TestTargetWithResolvedAddressFeedsLaterProbesWithoutChangingIdentity(t *tes
 	url, err := got.HTTPURL()
 	if err != nil || !strings.Contains(url, "fileserver.corp.example") {
 		t.Fatalf("HTTPURL = %q, err = %v", url, err)
+	}
+}
+
+func TestResolvedCandidatesFeedTransportSelectedEndpointToPath(t *testing.T) {
+	target, err := model.ParseTarget(model.TargetIntent{Input: "https://service.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &endpointSelectionState{}
+	state.setCandidates(model.EndpointCandidatesFromAnswers([]string{"192.0.2.10"}, []string{"2001:db8::10"}))
+	resolvedReady := make(chan struct{})
+	close(resolvedReady)
+	withCandidates := targetWithResolvedCandidates(context.Background(), resolvedReady, state, target)
+	if len(withCandidates.ResolvedCandidates) != 2 || len(withCandidates.ProbeCandidates) != 2 {
+		t.Fatalf("candidate contract = %#v", withCandidates)
+	}
+	if withCandidates.SelectedEndpoint == nil || withCandidates.SelectedEndpoint.Address != "192.0.2.10" {
+		t.Fatalf("initial Tadori candidate = %#v", withCandidates.SelectedEndpoint)
+	}
+
+	tested := &model.Endpoint{
+		Address: "2001:db8::10", Port: target.Port, Family: model.EndpointFamilyIPv6,
+		SelectionReason: model.EndpointSelectionTransport,
+		Provenance:      "transport conn.RemoteAddr observation",
+	}
+	state.setTested(tested)
+	transportReady := make(chan struct{})
+	close(transportReady)
+	transportTarget := targetWithTransportEndpoint(context.Background(), transportReady, state, withCandidates)
+	if transportTarget.TestedEndpoint == nil || transportTarget.TestedEndpoint.Address != tested.Address {
+		t.Fatalf("tested endpoint = %#v, want %#v", transportTarget.TestedEndpoint, tested)
+	}
+	if transportTarget.SelectedEndpoint == nil || transportTarget.SelectedEndpoint.Address != tested.Address {
+		t.Fatalf("dependent probe endpoint = %#v, want concrete transport candidate", transportTarget.SelectedEndpoint)
+	}
+	if destination := targetAddressForProbe(transportTarget); !destination.IsValid() || destination.String() != tested.Address {
+		t.Fatalf("path/route destination = %q, want %q", destination, tested.Address)
+	}
+}
+
+func TestEnrichTargetEndpointsKeepsAllCandidatesAndSuccessfulConcreteEndpoint(t *testing.T) {
+	target, err := model.ParseTarget(model.TargetIntent{Input: "https://service.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dnsRaw, err := json.Marshal(dns.DNSResolutionEvidence{
+		Host: "service.example.test",
+		A:    []string{"192.0.2.10", "192.0.2.11"},
+		AAAA: []string{"2001:db8::10"},
+		Results: []dns.DNSFamilyResult{
+			{Family: "A", Addresses: []string{"192.0.2.10", "192.0.2.11"}},
+			{Family: "AAAA", Addresses: []string{"2001:db8::10"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tested := model.Endpoint{Address: "2001:db8::10", Port: target.Port, Family: model.EndpointFamilyIPv6, SelectionReason: model.EndpointSelectionTransport}
+	tcpRaw, err := json.Marshal(struct {
+		TestedEndpoint    string                  `json:"tested_endpoint"`
+		CandidateAttempts []model.EndpointAttempt `json:"candidate_attempts"`
+	}{
+		TestedEndpoint: "[2001:db8::10]:443",
+		CandidateAttempts: []model.EndpointAttempt{
+			{Candidate: model.EndpointCandidate{Address: "192.0.2.10", Family: model.EndpointFamilyIPv4, Order: 1}, Status: model.ProbeStatusFailed, FailureReason: model.FailureReasonTCPConnectionRefused, Error: "connection refused"},
+			{Candidate: model.EndpointCandidate{Address: "2001:db8::10", Family: model.EndpointFamilyIPv6, Order: 2}, Status: model.ProbeStatusPassed, FailureReason: model.FailureReasonNone},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := enrichTargetEndpoints(target, []model.ProbeResult{
+		{Name: "dns", Evidence: []model.Evidence{{Kind: model.EvidenceKindDNSResolution, Raw: dnsRaw}}},
+		{Name: "tcp", Status: model.ProbeStatusPassed, Target: model.Target{TestedEndpoint: &tested}, Evidence: []model.Evidence{{Kind: model.EvidenceKindTCPConnection, Raw: tcpRaw}}},
+	})
+	if len(got.ResolvedCandidates) != 3 || len(got.ProbeCandidates) != 3 {
+		t.Fatalf("candidate sets = resolved %#v probe %#v", got.ResolvedCandidates, got.ProbeCandidates)
+	}
+	if got.ResolvedCandidates[0].Address != "192.0.2.10" || got.ResolvedCandidates[2].Family != model.EndpointFamilyIPv6 {
+		t.Fatalf("candidate ordering/family = %#v", got.ResolvedCandidates)
+	}
+	if got.SelectedEndpoint == nil || got.SelectedEndpoint.Address != "192.0.2.10" || got.SelectedEndpoint.SelectionReason != model.EndpointSelectionDeterministic {
+		t.Fatalf("Tadori selected candidate = %#v", got.SelectedEndpoint)
+	}
+	if got.TestedEndpoint == nil || got.TestedEndpoint.Address != tested.Address {
+		t.Fatalf("tested endpoint = %#v, want %#v", got.TestedEndpoint, tested)
+	}
+	if len(got.CandidateAttempts) != 2 || got.CandidateAttempts[0].Status != model.ProbeStatusFailed || got.CandidateAttempts[1].Status != model.ProbeStatusPassed {
+		t.Fatalf("candidate attempts = %#v", got.CandidateAttempts)
+	}
+	pathObservation := model.PathObservation{Destination: "2001:0DB8::10", DestinationPort: target.Port}
+	if !pathObservation.MatchesTarget(got) {
+		t.Fatal("path observation for tested concrete candidate did not match enriched target")
 	}
 }
 

@@ -266,7 +266,7 @@ func TestRenderHumanPlacesNormalizedNameResolutionBeforeRawEvidence(t *testing.T
 		"Interface: Contoso VPN",
 		"Resolver: 10.20.0.53",
 		"Answers A: 10.30.14.22",
-		"Selected endpoint: 10.30.14.22",
+		"Resolver representative answer (not OS/application selection): 10.30.14.22",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("name-resolution output missing %q:\n%s", want, got)
