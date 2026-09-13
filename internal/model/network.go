@@ -105,5 +105,7 @@ type NetworkContext struct {
 	Certainty                    ObservationCertainty  `json:"certainty"`
 	ProbeNames                   []string              `json:"probe_names,omitempty"`
 	Limitations                  []string              `json:"limitations,omitempty"`
+	FailureReason                FailureReason         `json:"failure_reason"`
+	FaultDomain                  FaultDomain           `json:"fault_domain"`
 	Conflicts                    []ObservationConflict `json:"conflicts,omitempty"`
 }

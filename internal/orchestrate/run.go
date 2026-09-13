@@ -131,7 +131,7 @@ func Run(ctx context.Context, target model.Target, opts Options) model.Diagnosti
 		Probes:       results,
 		Observations: observations.Build(target, results),
 	}
-	report.Findings = diagnosis.Diagnose(report.Probes)
+	report = diagnosis.DiagnoseReport(report)
 	return report
 }
 

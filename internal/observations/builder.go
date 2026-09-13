@@ -1293,7 +1293,13 @@ func buildNameResolutionObservation(target model.Target, probes []model.ProbeRes
 		RequestedName: target.RequestedIdentity,
 		Certainty:     model.ObservationCertaintyUnknown,
 	}
+	var failures []sourceValue
 	for _, probe := range probes {
+		if probe.Interpretation.Layer == model.LayerDNS || isDNSFailureReason(probe.Interpretation.FailureReason) {
+			if reason := probe.Interpretation.FailureReason; reason != "" && reason != model.FailureReasonNone && reason != model.FailureReasonUnknown {
+				failures = append(failures, sourceValue{value: string(reason), probe: probe.Name, evidenceID: firstEvidenceID(evidenceIDs(probe.Evidence))})
+			}
+		}
 		if probe.NameResolution != nil {
 			value := model.NormalizeNameResolutionObservation(*probe.NameResolution)
 			mergeNameResolution(&observation, value, probe.Name)
@@ -1357,7 +1363,30 @@ func buildNameResolutionObservation(target model.Target, probes []model.ProbeRes
 			}
 		}
 	}
+	if len(failures) != 0 {
+		observation.FailureReason = model.FailureReason(failures[0].value)
+		observation.FaultDomain = model.FaultDomainDNS
+		observation.ProbeNames = appendUnique(observation.ProbeNames, failures[0].probe)
+		for _, probe := range probes {
+			if probe.Name == failures[0].probe {
+				observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidenceIDs(probe.Evidence)...)
+				break
+			}
+		}
+		if values := distinctSourceValues(failures); len(values) > 1 {
+			observation.Conflicts = append(observation.Conflicts, conflict("name_resolution.failure_reason", values, failures))
+		}
+	}
 	return model.NormalizeNameResolutionObservation(observation)
+}
+
+func isDNSFailureReason(reason model.FailureReason) bool {
+	switch reason {
+	case model.FailureReasonDNSNXDomain, model.FailureReasonDNSNoAnswer, model.FailureReasonDNSTimeout, model.FailureReasonDNSResolverFailure:
+		return true
+	default:
+		return false
+	}
 }
 
 func mergeNameResolution(destination *model.NameResolutionObservation, source model.NameResolutionObservation, probeName string) {
@@ -1546,7 +1575,48 @@ func buildNetworkObservation(target model.Target, probes []model.ProbeResult) mo
 			context.EvidenceIDs = appendUnique(context.EvidenceIDs, evidenceIDs(probe.Evidence)...)
 		}
 	}
+	// A standalone gateway probe can carry the selected route shape when the
+	// target-route probe was unavailable. Project only that bounded route
+	// applicability into the canonical context; gateway reachability remains
+	// supporting evidence for diagnosis.
+	if context.EffectiveRoute == model.RouteDispositionUnknown {
+		for _, probe := range probes {
+			for _, evidence := range probe.Evidence {
+				if evidence.Kind != model.EvidenceKindGatewayReachability {
+					continue
+				}
+				var value struct {
+					Destination    string                 `json:"destination"`
+					RoutePrefix    string                 `json:"route_prefix"`
+					Gateway        string                 `json:"gateway"`
+					EffectiveRoute model.RouteDisposition `json:"effective_route"`
+				}
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil || value.EffectiveRoute == "" {
+					continue
+				}
+				context.EffectiveRoute = value.EffectiveRoute
+				context.RoutePrefix = value.RoutePrefix
+				if context.RoutePrefix == "" {
+					context.RoutePrefix = value.Destination
+				}
+				context.Gateway = value.Gateway
+				context.EvidenceIDs = appendUnique(context.EvidenceIDs, evidence.ID)
+				context.ProbeNames = appendUnique(context.ProbeNames, probe.Name)
+				context.Certainty = model.ObservationCertaintyDerived
+				break
+			}
+			if context.EffectiveRoute != model.RouteDispositionUnknown {
+				break
+			}
+		}
+	}
+	var failures []sourceValue
 	for _, probe := range probes {
+		if probe.Interpretation.Layer == model.LayerInterface || probe.Interpretation.Layer == model.LayerIPConfiguration || probe.Interpretation.Layer == model.LayerRoute || probe.Interpretation.FailureReason == model.FailureReasonGatewayUnreachable {
+			if reason := probe.Interpretation.FailureReason; reason != "" && reason != model.FailureReasonNone && reason != model.FailureReasonUnknown {
+				failures = append(failures, sourceValue{value: string(reason), probe: probe.Name, evidenceID: firstEvidenceID(evidenceIDs(probe.Evidence))})
+			}
+		}
 		relevant := false
 		for _, evidence := range probe.Evidence {
 			if evidence.Kind == model.EvidenceKindRoute || evidence.Kind == model.EvidenceKindInterfaceState {
@@ -1559,6 +1629,20 @@ func buildNetworkObservation(target model.Target, probes []model.ProbeResult) mo
 		}
 		if relevant {
 			context.ProbeNames = appendUnique(context.ProbeNames, probe.Name)
+		}
+	}
+	if len(failures) != 0 {
+		context.FailureReason = model.FailureReason(failures[0].value)
+		context.FaultDomain = model.FaultDomainRouting
+		context.ProbeNames = appendUnique(context.ProbeNames, failures[0].probe)
+		for _, probe := range probes {
+			if probe.Name == failures[0].probe {
+				context.EvidenceIDs = appendUnique(context.EvidenceIDs, evidenceIDs(probe.Evidence)...)
+				break
+			}
+		}
+		if values := distinctSourceValues(failures); len(values) > 1 {
+			context.Conflicts = append(context.Conflicts, conflict("network_context.failure_reason", values, failures))
 		}
 	}
 	if context.EffectiveRoute != model.RouteDispositionUnknown || context.SelectedDestinationAddress != "" {

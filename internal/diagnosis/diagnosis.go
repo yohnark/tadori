@@ -1,458 +1,683 @@
 package diagnosis
 
 import (
-	"encoding/json"
-	"net/netip"
 	"sort"
+	"strings"
 
 	"github.com/yohnark/tadori/internal/model"
+	"github.com/yohnark/tadori/internal/observations"
 )
 
-// Diagnose returns the deterministic interpretation of collected probe
-// results. The returned slice is newly allocated and the input is never
-// modified. At most one primary finding is returned, followed by an optional
-// gateway finding when gateway failure is useful supporting evidence.
-//
-// A result's normalized FailureReason is authoritative. Status and Layer are
-// used to recognize successful observations and to resolve contradictory
-// observations. Path evidence is the one intentionally structured exception:
-// its protocol/port fields are decoded so a TCP destination response can be
-// correlated with the requested endpoint without promoting ICMP evidence.
+// DiagnoseObservations interprets the report-level observation envelope. The
+// envelope is the authority for cross-probe meaning; raw probe evidence is
+// deliberately not inspected here.
+func DiagnoseObservations(value model.Observations) []model.DiagnosticFinding {
+	return diagnoseObservationState(model.NormalizeObservations(value), nil, false)
+}
+
+// Diagnose is a compatibility entry point for callers that still have only
+// probe results. Results are first projected into the canonical observation
+// envelope. Probe interpretations are retained only for facts for which the
+// current envelope has no normalized field, and for opaque extension reasons.
 func Diagnose(probes []model.ProbeResult) []model.DiagnosticFinding {
-	observations := normalize(probes)
-	if len(observations) == 0 {
-		return nil
-	}
-
-	// Rules are ordered from the earliest decisive boundary to the latest.
-	// Keeping this as a slice (rather than ranging over a map) makes both
-	// precedence and output stable. We collect the first built-in match before
-	// comparing it with extension reasons below, so an opaque lower-layer
-	// reason cannot be hidden by a known higher-layer reason.
-	var builtIn *builtInCandidate
-	for _, rule := range rules {
-		matches := matching(observations, rule.reason)
-		if len(matches) == 0 {
-			continue
-		}
-		viable := make([]observation, 0, len(matches))
-		for _, match := range matches {
-			if !contradicted(match, observations) {
-				viable = append(viable, match)
-			}
-		}
-		if len(viable) == 0 {
-			continue
-		}
-		candidate := builtInCandidate{reason: rule.reason, matches: viable}
-		builtIn = &candidate
-		break
-	}
-
-	// Probe-specific reasons may be added to model.FailureReason without
-	// changing this package. They are not interpreted by their text: the
-	// canonical layer and fault domain supplied by the probe are retained.
-	extension := genericFailure(observations)
-	if extension != nil && (builtIn == nil || layerRank(extension.result.Interpretation.Layer) < builtInLayerRank(*builtIn)) {
-		return withGatewaySupport(makeExtensionFinding(*extension, observations), observations)
-	}
-	if builtIn != nil {
-		return withGatewaySupport(makeFinding(builtIn.reason, builtIn.matches), observations)
-	}
-
-	// A gateway result is supporting evidence and can still be useful when no
-	// decisive layer produced a finding.
-	if gateway := matchingApplicableGateways(observations); len(gateway) != 0 && !contradicted(gateway[0], observations) {
-		return []model.DiagnosticFinding{makeFinding(model.FailureReasonGatewayUnreachable, gateway)}
-	}
-
-	return nil
+	return diagnoseFromProbes(probes)
 }
 
-func withGatewaySupport(finding model.DiagnosticFinding, observations []observation) []model.DiagnosticFinding {
-	// Gateway reachability is supporting evidence rather than a claim that
-	// the gateway is necessarily the root cause. Preserve it as a second
-	// machine-readable finding when a decisive failure exists.
-	gateway := matchingApplicableGateways(observations)
-	if len(gateway) != 0 && !contradicted(gateway[0], observations) {
-		return []model.DiagnosticFinding{finding, makeFinding(model.FailureReasonGatewayUnreachable, gateway)}
-	}
-	return []model.DiagnosticFinding{finding}
+// Findings is an output-oriented compatibility alias for Diagnose.
+func Findings(probes []model.ProbeResult) []model.DiagnosticFinding { return Diagnose(probes) }
+
+// Analyze is an interpretation-oriented compatibility alias for Diagnose.
+func Analyze(probes []model.ProbeResult) []model.DiagnosticFinding { return Diagnose(probes) }
+
+// FindingsFromObservations is the output-oriented observation API.
+func FindingsFromObservations(value model.Observations) []model.DiagnosticFinding {
+	return DiagnoseObservations(value)
 }
 
-// Findings is an explicit alias for callers that prefer the output-oriented
-// name. It has the same pure and deterministic behavior as Diagnose.
-func Findings(probes []model.ProbeResult) []model.DiagnosticFinding {
-	return Diagnose(probes)
+// AnalyzeObservations is the interpretation-oriented observation API.
+func AnalyzeObservations(value model.Observations) []model.DiagnosticFinding {
+	return DiagnoseObservations(value)
 }
 
-// Analyze is an alias for Diagnose retained as a discoverable interpretation
-// entry point.
-func Analyze(probes []model.ProbeResult) []model.DiagnosticFinding {
-	return Diagnose(probes)
-}
-
-// DiagnoseReport returns a copy of report with Findings replaced by the
-// interpretation of report.Probes. It does not change report status or raw
-// probe evidence.
+// DiagnoseReport applies diagnosis to the report's canonical observation
+// envelope without changing status, target, probes, or raw evidence. A
+// report produced before the observation envelope was populated is accepted
+// through the compatibility projection for the transition period.
 func DiagnoseReport(report model.DiagnosticReport) model.DiagnosticReport {
-	report.Findings = Diagnose(report.Probes)
+	value := model.NormalizeObservations(report.Observations)
+	if !hasCanonicalObservations(value) && len(report.Probes) != 0 {
+		target := report.Target
+		if target.RequestedIdentity == "" {
+			target = targetFromProbes(report.Probes)
+		}
+		value = observations.Build(compatibilityTargetSnapshot(target), compatibilityProbeSnapshot(report.Probes))
+	}
+	report.Findings = diagnoseObservationState(value, report.Probes, len(report.Probes) != 0)
 	return report
 }
 
 // Apply is a concise alias for DiagnoseReport.
-func Apply(report model.DiagnosticReport) model.DiagnosticReport {
-	return DiagnoseReport(report)
+func Apply(report model.DiagnosticReport) model.DiagnosticReport { return DiagnoseReport(report) }
+
+func diagnoseFromProbes(probes []model.ProbeResult) []model.DiagnosticFinding {
+	target := targetFromProbes(probes)
+	value := observations.Build(compatibilityTargetSnapshot(target), compatibilityProbeSnapshot(probes))
+	return diagnoseObservationState(value, probes, true)
 }
 
-type rule struct {
-	reason model.FailureReason
+// Target.TestedEndpoint is deprecated execution state. A probe-only caller
+// can carry a stale value from a different observation lane, so the
+// compatibility projection lets actual TCP/path evidence repopulate the
+// canonical endpoint view instead of manufacturing transport success.
+func compatibilityTargetSnapshot(target model.Target) model.Target {
+	target.TestedEndpoint = nil
+	return target
 }
 
-type builtInCandidate struct {
-	reason  model.FailureReason
-	matches []observation
+func compatibilityProbeSnapshot(probes []model.ProbeResult) []model.ProbeResult {
+	result := append([]model.ProbeResult(nil), probes...)
+	for index := range result {
+		result[index].Target = compatibilityTargetSnapshot(result[index].Target)
+	}
+	return result
 }
 
-func builtInLayerRank(candidate builtInCandidate) int {
-	layer, _ := semantics(candidate.reason)
-	return layerRank(layer)
+type candidate struct {
+	reason      model.FailureReason
+	layer       model.Layer
+	domain      model.FaultDomain
+	target      model.Target
+	probeNames  []string
+	evidenceIDs []string
+	comparative bool
+	supporting  bool
 }
 
-// This table is the diagnosis policy. Reasons in the same layer are ordered
-// from more specific to less specific where the contract supplies that
-// distinction (for example NXDOMAIN before resolver timeout).
+type success struct {
+	layer       model.Layer
+	target      model.Target
+	probeNames  []string
+	evidenceIDs []string
+}
+
+type diagnosisState struct {
+	value      model.Observations
+	target     model.Target
+	candidates []candidate
+	successes  []success
+}
+
+type rule struct{ reason model.FailureReason }
+
+// This table is the diagnosis policy. It is ordered from the earliest
+// decisive boundary to the latest, with specific reasons preceding broader
+// reasons within a boundary.
 var rules = []rule{
-	{reason: model.FailureReasonInterfaceDown},
-	{reason: model.FailureReasonNoIPAddress},
-	{reason: model.FailureReasonNoRoute},
-	{reason: model.FailureReasonInvalidRoute},
-	{reason: model.FailureReasonEffectiveRouteDifference},
-	{reason: model.FailureReasonDNSNXDomain},
-	{reason: model.FailureReasonDNSNoAnswer},
-	{reason: model.FailureReasonDNSTimeout},
-	{reason: model.FailureReasonDNSResolverFailure},
-	{reason: model.FailureReasonProxyAuthenticationRequired},
-	{reason: model.FailureReasonProxyConnectDenied},
-	{reason: model.FailureReasonDirectEgressRestricted},
-	{reason: model.FailureReasonProxyConfigurationDivergence},
-	{reason: model.FailureReasonProxyConfigurationFailure},
-	{reason: model.FailureReasonProxyUnavailable},
-	{reason: model.FailureReasonNetworkUnreachable},
-	{reason: model.FailureReasonFirewallBlocked},
-	{reason: model.FailureReasonTCPTimeout},
-	{reason: model.FailureReasonTCPConnectionRefused},
-	{reason: model.FailureReasonTCPConnectionReset},
-	{reason: model.FailureReasonTCPSYNNotObserved},
-	{reason: model.FailureReasonTLSInterceptionSuspected},
-	{reason: model.FailureReasonTLSTrustStoreMismatch},
-	{reason: model.FailureReasonTLSHandshakeFailure},
-	{reason: model.FailureReasonCertificateValidationFailure},
-	{reason: model.FailureReasonHTTPStatusCode},
-	{reason: model.FailureReasonHTTPFailure},
-	{reason: model.FailureReasonProbeExecution},
+	{model.FailureReasonInterfaceDown},
+	{model.FailureReasonNoIPAddress},
+	{model.FailureReasonNoRoute},
+	{model.FailureReasonInvalidRoute},
+	{model.FailureReasonEffectiveRouteDifference},
+	{model.FailureReasonDNSNXDomain},
+	{model.FailureReasonDNSNoAnswer},
+	{model.FailureReasonDNSTimeout},
+	{model.FailureReasonDNSResolverFailure},
+	{model.FailureReasonProxyAuthenticationRequired},
+	{model.FailureReasonProxyConnectDenied},
+	{model.FailureReasonDirectEgressRestricted},
+	{model.FailureReasonProxyConfigurationDivergence},
+	{model.FailureReasonProxyConfigurationFailure},
+	{model.FailureReasonProxyUnavailable},
+	{model.FailureReasonNetworkUnreachable},
+	{model.FailureReasonFirewallBlocked},
+	{model.FailureReasonTCPTimeout},
+	{model.FailureReasonTCPConnectionRefused},
+	{model.FailureReasonTCPConnectionReset},
+	{model.FailureReasonTCPSYNNotObserved},
+	{model.FailureReasonTLSInterceptionSuspected},
+	{model.FailureReasonTLSTrustStoreMismatch},
+	{model.FailureReasonTLSHandshakeFailure},
+	{model.FailureReasonCertificateValidationFailure},
+	{model.FailureReasonHTTPStatusCode},
+	{model.FailureReasonHTTPFailure},
+	{model.FailureReasonProbeExecution},
 }
 
-type observation struct {
-	result model.ProbeResult
-	reason model.FailureReason
+func diagnoseObservationState(value model.Observations, probes []model.ProbeResult, compatibility bool) []model.DiagnosticFinding {
+	state := diagnosisState{value: value, target: targetFromObservations(value)}
+	collectCanonical(&state)
+	if compatibility {
+		collectCompatibility(&state, probes)
+	}
+	return selectFindings(state)
 }
 
-func normalize(probes []model.ProbeResult) []observation {
-	observations := make([]observation, 0, len(probes))
-	for _, result := range probes {
-		reason := result.Interpretation.FailureReason
-		if reason == "" {
-			// FailureReasonNone is the canonical success value, but accepting
-			// the zero value for a passed fixture keeps interpretation tolerant
-			// of callers that only populate the required status and layer.
-			if result.Status == model.ProbeStatusPassed {
-				reason = model.FailureReasonNone
-			} else {
-				reason = model.FailureReasonUnknown
+func collectCanonical(state *diagnosisState) {
+	value, target := state.value, state.target
+	collectEndpoint(state, value.Endpoint, target)
+	collectNameResolution(state, value.NameResolution, target)
+	collectNetwork(state, value.NetworkContext, target)
+	collectTransport(state, value.Transport, target)
+	collectPacketFlows(state, value, target)
+	collectPaths(state, value, target)
+	collectSecurity(state, value.Security, target)
+	collectApplication(state, value.Application, target)
+	collectEnterprise(state, value.EnterprisePolicy, target)
+}
+
+func collectEndpoint(state *diagnosisState, value model.EndpointObservation, target model.Target) {
+	target = mergeTarget(target, model.Target{RequestedIdentity: value.RequestedIdentity, Port: value.Port})
+	refs := candidateRefs{probeNames: value.ProbeNames, evidenceIDs: value.EvidenceIDs}
+	if value.TestedEndpoint != nil {
+		state.successes = append(state.successes, success{layer: model.LayerTCP, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+	}
+	attempts := value.CandidateAttempts
+	if len(attempts) == 0 || endpointAttemptsSucceeded(attempts) {
+		return
+	}
+	for _, attempt := range attempts {
+		if !activeReason(attempt.FailureReason) {
+			continue
+		}
+		layer, domain := semantics(attempt.FailureReason)
+		ids := append(append([]string(nil), attempt.EvidenceIDs...), attempt.Candidate.EvidenceIDs...)
+		state.candidates = append(state.candidates, candidate{reason: attempt.FailureReason, layer: layer, domain: domain, target: target, probeNames: value.ProbeNames, evidenceIDs: ids})
+	}
+}
+
+func collectNameResolution(state *diagnosisState, value model.NameResolutionObservation, target model.Target) {
+	target = mergeTarget(target, model.Target{RequestedIdentity: value.RequestedName})
+	refs := candidateRefs{probeNames: value.ProbeNames, evidenceIDs: value.EvidenceIDs}
+	if activeReason(value.FailureReason) {
+		addReasonCandidate(state, value.FailureReason, model.LayerDNS, model.FaultDomainDNS, target, refs, false)
+	}
+	for _, conflict := range value.Conflicts {
+		if !strings.Contains(conflict.Field, "failure_reason") {
+			continue
+		}
+		for _, reason := range conflict.Values {
+			if model.FailureReason(reason) == value.FailureReason {
+				continue
+			}
+			ids := append(append([]string(nil), value.EvidenceIDs...), conflict.EvidenceIDs...)
+			addReasonCandidate(state, model.FailureReason(reason), model.LayerDNS, model.FaultDomainDNS, target, candidateRefs{probeNames: value.ProbeNames, evidenceIDs: ids}, false)
+		}
+	}
+	// An effective resolver path with an empty answer set is an observed
+	// no-answer result. Configured paths without an effective path remain
+	// policy context and are intentionally not causal diagnosis.
+	if !activeReason(value.FailureReason) && value.EffectivePath != nil && len(value.A) == 0 && len(value.AAAA) == 0 && value.Certainty == model.ObservationCertaintyObserved {
+		addReasonCandidate(state, model.FailureReasonDNSNoAnswer, model.LayerDNS, model.FaultDomainDNS, target, refs, false)
+	}
+	if nameResolutionSucceeded(value) {
+		state.successes = append(state.successes, success{layer: model.LayerDNS, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+	}
+}
+
+func collectNetwork(state *diagnosisState, value model.NetworkContext, target model.Target) {
+	target = mergeTarget(target, model.Target{RequestedIdentity: value.RequestedIdentity})
+	refs := candidateRefs{probeNames: value.ProbeNames, evidenceIDs: value.EvidenceIDs}
+	if activeReason(value.FailureReason) && !(value.EffectiveRoute != model.RouteDispositionUnknown && (value.FailureReason == model.FailureReasonNoRoute || value.FailureReason == model.FailureReasonInvalidRoute)) {
+		addReasonCandidate(state, value.FailureReason, model.LayerRoute, value.FaultDomain, target, refs, false)
+	}
+	for _, conflict := range value.Conflicts {
+		if !strings.Contains(conflict.Field, "failure_reason") {
+			continue
+		}
+		for _, reason := range conflict.Values {
+			if model.FailureReason(reason) == value.FailureReason {
+				continue
+			}
+			addReasonCandidate(state, model.FailureReason(reason), model.LayerRoute, value.FaultDomain, target, candidateRefs{probeNames: value.ProbeNames, evidenceIDs: append(append([]string(nil), value.EvidenceIDs...), conflict.EvidenceIDs...)}, false)
+		}
+	}
+	if value.EffectiveRoute != "" && value.EffectiveRoute != model.RouteDispositionUnknown {
+		state.successes = append(state.successes, success{layer: model.LayerRoute, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+	}
+}
+
+func collectTransport(state *diagnosisState, value model.TransportObservation, target model.Target) {
+	target = mergeTarget(target, targetFromEndpoint(value.ProbeEndpoint, value.TestedEndpoint, value.RequestedEndpoint))
+	refs := candidateRefs{probeNames: value.ProbeNames, evidenceIDs: value.EvidenceIDs}
+	if transportSucceeded(value) {
+		state.successes = append(state.successes, success{layer: model.LayerTCP, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+		return
+	}
+	reason := value.FailureReason
+	if !activeReason(reason) {
+		reason = transportReason(value.ConnectionOutcome)
+	}
+	if activeReason(reason) && !strongPacketFlow(state.value, reason, target) && value.Applicability != model.ObservationApplicabilityUnsupported && value.Applicability != model.ObservationApplicabilityInapplicable {
+		addReasonCandidate(state, reason, model.LayerTCP, value.FaultDomain, target, refs, false)
+	}
+	for _, conflict := range value.Conflicts {
+		if conflict.Field != "transport.connection_outcome" {
+			continue
+		}
+		for _, outcome := range conflict.Values {
+			if conflictReason := transportReason(model.TransportConnectionOutcome(outcome)); activeReason(conflictReason) {
+				addReasonCandidate(state, conflictReason, model.LayerTCP, value.FaultDomain, target, candidateRefs{probeNames: value.ProbeNames, evidenceIDs: append(append([]string(nil), value.EvidenceIDs...), conflict.EvidenceIDs...)}, false)
 			}
 		}
-		result, reason = applyPacketFlowEvidence(result, reason)
-		observations = append(observations, observation{result: result, reason: reason})
-		observations = append(observations, pathDestinationSuccesses(result)...)
 	}
-	return observations
 }
 
-// applyPacketFlowEvidence supplements, but does not replace, a probe's
-// interpretation. Only a complete, identity-compatible flow can strengthen
-// a TCP result. A missing response remains a bounded observation and is not
-// converted into a network-drop claim.
-func applyPacketFlowEvidence(result model.ProbeResult, reason model.FailureReason) (model.ProbeResult, model.FailureReason) {
-	for _, evidence := range result.Evidence {
-		flow, err := model.DecodePacketFlowEvidence(evidence)
-		if err != nil || !packetFlowBelongsToResult(flow, result) || flow.CaptureStatus != model.PacketCaptureStatusAvailable {
+func collectPacketFlows(state *diagnosisState, value model.Observations, target model.Target) {
+	for index, flow := range value.PacketFlows {
+		flowTarget := mergeTarget(target, flow.Target)
+		names, ids := provenanceAt(value.PacketFlowProvenance, index)
+		if len(ids) == 0 {
+			ids = append(ids, value.Transport.PacketFlowEvidenceIDs...)
+		}
+		refs := candidateRefs{probeNames: names, evidenceIDs: ids}
+		if flow.CaptureStatus != model.PacketCaptureStatusAvailable || !flowCorrelates(flow.Target, flowTarget, model.LayerTCP) {
 			continue
 		}
 		switch flow.Outcome {
 		case model.PacketFlowOutcomeTCPHandshakeConfirmed, model.PacketFlowOutcomeTCPSYNACK:
-			if flow.Certainty == model.EvidenceCertaintyConfirmedEndpointResponse && (result.Status == model.ProbeStatusFailed || result.Status == model.ProbeStatusError) {
-				return packetFlowSuccessResult(result, evidence), model.FailureReasonNone
+			if flow.Certainty == model.EvidenceCertaintyConfirmedEndpointResponse {
+				state.successes = append(state.successes, success{layer: model.LayerTCP, target: flowTarget, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
 			}
 		case model.PacketFlowOutcomeTCPRST:
-			if flow.Certainty == model.EvidenceCertaintyConfirmedEndpointResponse && (result.Status == model.ProbeStatusFailed || result.Status == model.ProbeStatusError) {
-				switch reason {
-				case model.FailureReasonTCPTimeout, model.FailureReasonProbeExecution, model.FailureReasonUnknown, model.FailureReasonNone:
-					result.Interpretation.FailureReason = model.FailureReasonTCPConnectionReset
-					return result, model.FailureReasonTCPConnectionReset
-				}
+			if flow.Certainty == model.EvidenceCertaintyConfirmedEndpointResponse && packetFlowCanStrengthen(value.Transport.FailureReason, value.Transport.ConnectionOutcome, model.FailureReasonTCPConnectionReset) {
+				addReasonCandidate(state, model.FailureReasonTCPConnectionReset, model.LayerTCP, model.FaultDomainTransport, flowTarget, refs, false)
 			}
 		case model.PacketFlowOutcomeProbeNotEmitted:
-			if result.Status == model.ProbeStatusFailed || result.Status == model.ProbeStatusError {
-				switch reason {
-				case model.FailureReasonTCPTimeout, model.FailureReasonProbeExecution, model.FailureReasonUnknown, model.FailureReasonNone:
-					result.Interpretation.FailureReason = model.FailureReasonTCPSYNNotObserved
-					result.Interpretation.Layer = model.LayerTCP
-					result.Interpretation.FaultDomain = model.FaultDomainLocal
-					return result, model.FailureReasonTCPSYNNotObserved
-				}
+			if packetFlowCanStrengthen(value.Transport.FailureReason, value.Transport.ConnectionOutcome, model.FailureReasonTCPSYNNotObserved) {
+				addReasonCandidate(state, model.FailureReasonTCPSYNNotObserved, model.LayerTCP, model.FaultDomainLocal, flowTarget, refs, false)
 			}
 		}
 	}
-	return result, reason
 }
 
-func packetFlowBelongsToResult(flow model.PacketFlowEvidence, result model.ProbeResult) bool {
-	if flow.ProbeID != "" && result.ProbeID != "" && flow.ProbeID != result.ProbeID {
-		return false
-	}
-	if flow.SessionID != "" && result.SessionID != "" && flow.SessionID != result.SessionID {
-		return false
-	}
-	if flow.CorrelationID != "" && result.CorrelationID != "" && flow.CorrelationID != result.CorrelationID {
-		return false
-	}
-	if result.Target.RequestedIdentity != "" && flow.Target.RequestedIdentity != "" && !targetsCorrelate(result.Target, flow.Target, model.LayerTCP) {
-		return false
-	}
-	return true
-}
-
-func packetFlowSuccessResult(result model.ProbeResult, evidence model.Evidence) model.ProbeResult {
-	synthetic := result
-	synthetic.Name = result.Name + "/packet-flow"
-	synthetic.Status = model.ProbeStatusPassed
-	synthetic.Evidence = []model.Evidence{evidence}
-	synthetic.Interpretation = model.ProbeInterpretation{
-		FailureReason: model.FailureReasonNone,
-		Layer:         model.LayerTCP,
-		FaultDomain:   model.FaultDomainTransport,
-	}
-	return synthetic
-}
-
-func pathDestinationSuccesses(result model.ProbeResult) []observation {
-	if result.Name == "" {
-		return nil
-	}
-	derived := make([]observation, 0)
-	for _, evidence := range result.Evidence {
-		pathObservation, err := model.DecodePathObservation(evidence)
-		if err != nil || pathObservation.Status != model.PathObservationStatusObserved || pathObservation.Protocol != model.PathProtocolTCP || !pathObservation.PortAware || !pathObservation.DestinationReached || !pathObservation.DestinationTCPConnected {
+func collectPaths(state *diagnosisState, value model.Observations, target model.Target) {
+	for index, path := range value.Paths {
+		pathTarget := targetForDestination(target, path.Destination, path.DestinationPort)
+		names, ids := provenanceAt(value.PathProvenance, index)
+		refs := candidateRefs{probeNames: names, evidenceIDs: ids}
+		if path.Status != model.PathObservationStatusObserved || !path.PortAware || path.Protocol != model.PathProtocolTCP || !path.DestinationReached {
 			continue
 		}
-		if result.Target.Port == 0 || !pathObservation.MatchesTarget(result.Target) {
+		if path.DestinationTCPConnected {
+			state.successes = append(state.successes, success{layer: model.LayerTCP, target: pathTarget, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+		}
+	}
+	for _, correlation := range value.PathCorrelations {
+		if correlation.TCPDestinationConnected {
+			pathTarget := targetForDestination(target, correlation.Destination, correlation.DestinationPort)
+			state.successes = append(state.successes, success{layer: model.LayerTCP, target: pathTarget})
+		}
+	}
+}
+
+func collectSecurity(state *diagnosisState, value model.SecurityObservation, target model.Target) {
+	target = mergeTarget(target, targetFromEndpoint(value.EndpointUsed, nil, ""))
+	refs := candidateRefs{probeNames: value.ProbeNames, evidenceIDs: value.EvidenceIDs}
+	if value.HandshakeComplete {
+		state.successes = append(state.successes, success{layer: model.LayerTLS, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+		return
+	}
+	reason := value.FailureReason
+	if !activeReason(reason) {
+		switch value.CertificateValidation {
+		case model.CertificateValidationInvalid, model.CertificateValidationExpired, model.CertificateValidationHostnameMismatch, model.CertificateValidationUntrusted, model.CertificateValidationIncomplete:
+			reason = model.FailureReasonCertificateValidationFailure
+		}
+	}
+	if activeReason(reason) && value.Applicability != model.ObservationApplicabilityUnsupported {
+		addReasonCandidate(state, reason, model.LayerTLS, value.FaultDomain, target, refs, false)
+	}
+}
+
+func collectApplication(state *diagnosisState, value model.ApplicationObservation, target model.Target) {
+	target = mergeTarget(target, targetFromEndpoint(value.EndpointUsed, nil, ""))
+	refs := candidateRefs{probeNames: value.ProbeNames, evidenceIDs: value.EvidenceIDs}
+	if value.ResponseReceived && value.Result == model.HTTPResultSuccess && value.StatusCode < 400 {
+		state.successes = append(state.successes, success{layer: model.LayerHTTP, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+		return
+	}
+	reason := value.FailureReason
+	if !activeReason(reason) {
+		switch value.Result {
+		case model.HTTPResultStatusFailure:
+			reason = model.FailureReasonHTTPStatusCode
+		case model.HTTPResultRequestFailure:
+			reason = model.FailureReasonHTTPFailure
+		}
+	}
+	if activeReason(reason) && value.Applicability != model.ObservationApplicabilityUnsupported {
+		addReasonCandidate(state, reason, model.LayerHTTP, value.FaultDomain, target, refs, false)
+	}
+}
+
+func collectEnterprise(state *diagnosisState, value model.EnterprisePolicyObservation, target model.Target) {
+	enterpriseTarget := mergeTarget(target, model.Target{RequestedIdentity: value.RequestedIdentity})
+	enterpriseRefs := candidateRefs{probeNames: value.ProbeNames, evidenceIDs: value.EvidenceIDs}
+	comparison := value.DirectVsProxy
+	if comparison.State == model.EnterprisePathComparisonDirectFailureProxyWorks && comparison.DirectWorksKnown && comparison.ProxyWorksKnown && comparison.PolicyPossible {
+		ids := append(append([]string(nil), enterpriseRefs.evidenceIDs...), comparison.EvidenceIDs...)
+		addReasonCandidate(state, model.FailureReasonDirectEgressRestricted, model.LayerNetwork, model.FaultDomainPolicy, enterpriseTarget, candidateRefs{probeNames: enterpriseRefs.probeNames, evidenceIDs: ids}, true)
+	}
+	if value.ProxyConfigurationKnown && value.ProxyConfigurationDiverges && comparison.State != model.EnterprisePathComparisonUnknown {
+		ids := append(append([]string(nil), enterpriseRefs.evidenceIDs...), enterpriseConflictEvidenceIDs(value)...)
+		addReasonCandidate(state, model.FailureReasonProxyConfigurationDivergence, model.LayerProxy, model.FaultDomainProxy, enterpriseTarget, candidateRefs{probeNames: enterpriseRefs.probeNames, evidenceIDs: ids}, false)
+	}
+	if value.Network.RouteDifferenceKnown && value.Network.RouteDifference {
+		ids := append(append([]string(nil), enterpriseRefs.evidenceIDs...), value.Network.EvidenceIDs...)
+		addReasonCandidate(state, model.FailureReasonEffectiveRouteDifference, model.LayerRoute, model.FaultDomainRouting, enterpriseTarget, candidateRefs{probeNames: enterpriseRefs.probeNames, evidenceIDs: ids}, true)
+	}
+	if value.TLS.PossibleInterception && value.TLS.InterceptionSuspicion == model.EnterpriseInterceptionSuspicionPossible && value.TLS.Certainty != model.ObservationCertaintyUnsupported {
+		ids := append(append([]string(nil), enterpriseRefs.evidenceIDs...), value.TLS.EvidenceIDs...)
+		addReasonCandidate(state, model.FailureReasonTLSInterceptionSuspected, model.LayerTLS, model.FaultDomainTLS, enterpriseTarget, candidateRefs{probeNames: enterpriseRefs.probeNames, evidenceIDs: ids}, true)
+	}
+	if value.TLS.TrustMismatchKnown && value.TLS.TrustMismatch && value.TLS.Certainty != model.ObservationCertaintyUnsupported {
+		ids := append(append([]string(nil), enterpriseRefs.evidenceIDs...), value.TLS.EvidenceIDs...)
+		addReasonCandidate(state, model.FailureReasonTLSTrustStoreMismatch, model.LayerTLS, model.FaultDomainTLS, enterpriseTarget, candidateRefs{probeNames: enterpriseRefs.probeNames, evidenceIDs: ids}, true)
+	}
+	for _, path := range value.Paths {
+		pathTarget := mergeTarget(enterpriseTarget, model.Target{RequestedIdentity: value.RequestedIdentity})
+		refs := candidateRefs{probeNames: provenanceProbeNames(path.Provenance), evidenceIDs: path.EvidenceIDs}
+		if activeReason(path.FailureReason) {
+			layer, domain := semantics(path.FailureReason)
+			if layer == model.LayerUnknown {
+				layer, domain = enterprisePathLayer(path)
+			}
+			addReasonCandidate(state, path.FailureReason, layer, domain, pathTarget, refs, false)
+		}
+		if pathWorks(path) {
+			addEnterprisePathSuccesses(state, path, pathTarget, refs)
+		}
+	}
+	collectEnterpriseProxySource(state, value.WinHTTP, enterpriseTarget)
+	collectEnterpriseProxySource(state, value.WinINET, enterpriseTarget)
+}
+
+func collectEnterpriseProxySource(state *diagnosisState, value model.EnterpriseProxySourceObservation, target model.Target) {
+	refs := candidateRefs{evidenceIDs: append(append([]string(nil), value.EvidenceIDs...), value.Configuration.EvidenceIDs...)}
+	if value.Configuration.Error != "" {
+		addReasonCandidate(state, model.FailureReasonProxyConfigurationFailure, model.LayerProxy, model.FaultDomainProxy, target, refs, false)
+	}
+	if value.Effective.Observed && !value.Effective.ResolutionOK && value.Effective.Error != "" {
+		ids := append(append([]string(nil), refs.evidenceIDs...), value.Effective.EvidenceIDs...)
+		addReasonCandidate(state, model.FailureReasonProxyConfigurationFailure, model.LayerProxy, model.FaultDomainProxy, target, candidateRefs{probeNames: provenanceProbeNames(value.Effective.Provenance), evidenceIDs: ids}, false)
+	}
+	for _, endpoint := range value.EndpointReachability {
+		ids := append(append([]string(nil), refs.evidenceIDs...), endpoint.EvidenceIDs...)
+		if endpoint.Reachability == model.EnterpriseEndpointUnavailable || endpoint.Reachability == model.EnterpriseEndpointTimeout {
+			addReasonCandidate(state, model.FailureReasonProxyUnavailable, model.LayerProxy, model.FaultDomainProxy, target, candidateRefs{evidenceIDs: ids}, false)
+		}
+	}
+}
+
+func addEnterprisePathSuccesses(state *diagnosisState, path model.EnterprisePathObservation, target model.Target, refs candidateRefs) {
+	if path.TCPConnected || path.HTTPResponse || path.TLSHandshake {
+		state.successes = append(state.successes, success{layer: model.LayerTCP, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+	}
+	if path.TLSHandshake && path.CertificateTrusted && path.HostnameVerified {
+		state.successes = append(state.successes, success{layer: model.LayerTLS, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+	}
+	if path.HTTPResponse && path.HTTPStatusCode >= 200 && path.HTTPStatusCode < 400 {
+		state.successes = append(state.successes, success{layer: model.LayerHTTP, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+	}
+}
+
+func collectCompatibility(state *diagnosisState, probes []model.ProbeResult) {
+	for _, probe := range probes {
+		reason := probe.Interpretation.FailureReason
+		if activeReason(reason) {
+			if reason == model.FailureReasonICMPFailure || reason == model.FailureReasonPathObservation || reason == model.FailureReasonPathCancellation || probe.Interpretation.Layer == model.LayerICMP || probe.Interpretation.FaultDomain == model.FaultDomainICMP || !compatibilityReasonAllowed(reason, state.value) {
+				continue
+			}
+			layer, domain := semantics(reason)
+			if layer == model.LayerUnknown {
+				layer, domain = probe.Interpretation.Layer, probe.Interpretation.FaultDomain
+			}
+			state.candidates = append(state.candidates, candidate{reason: reason, layer: layer, domain: domain, target: compatibilityTarget(state.target, probe.Target), probeNames: []string{probe.Name}, evidenceIDs: evidenceIDs(probe.Evidence), supporting: reason == model.FailureReasonGatewayUnreachable})
 			continue
 		}
-		// A TCP path response at the requested destination port is a
-		// successful transport observation even when every earlier TTL is
-		// unobservable. Keep the original path evidence as the reference.
-		synthetic := result
-		synthetic.Name = result.Name + "/tcp-destination"
-		synthetic.Status = model.ProbeStatusPassed
-		synthetic.Evidence = []model.Evidence{evidence}
-		synthetic.Interpretation = model.ProbeInterpretation{
-			FailureReason: model.FailureReasonNone,
-			Layer:         model.LayerTCP,
-			FaultDomain:   model.FaultDomainTransport,
-		}
-		derived = append(derived, observation{result: synthetic, reason: model.FailureReasonNone})
-	}
-	return derived
-}
-
-func matching(observations []observation, reason model.FailureReason) []observation {
-	matches := make([]observation, 0)
-	for _, observation := range observations {
-		if observation.reason == reason {
-			matches = append(matches, observation)
-		}
-	}
-	return matches
-}
-
-func matchingApplicableGateways(observations []observation) []observation {
-	matches := matching(observations, model.FailureReasonGatewayUnreachable)
-	applicable := make([]observation, 0, len(matches))
-	for _, match := range matches {
-		if gatewayCheckApplies(match.result) {
-			applicable = append(applicable, match)
-		}
-	}
-	return applicable
-}
-
-// gatewayCheckApplies prevents a stale or hand-built gateway failure from
-// becoming a diagnosis when the selected route explicitly has no gateway.
-// Evidence that predates the structured route shape remains applicable so
-// older callers do not silently lose a real supporting observation.
-func gatewayCheckApplies(result model.ProbeResult) bool {
-	for _, evidence := range result.Evidence {
-		if evidence.Kind != model.EvidenceKindRoute && evidence.Kind != model.EvidenceKindGatewayReachability {
-			continue
-		}
-		var routeValue struct {
-			Destination    string                 `json:"destination"`
-			RoutePrefix    string                 `json:"route_prefix"`
-			Gateway        string                 `json:"gateway"`
-			EffectiveRoute model.RouteDisposition `json:"effective_route"`
-			GatewayTested  *bool                  `json:"gateway_tested"`
-		}
-		if err := json.Unmarshal(evidence.Raw, &routeValue); err != nil {
-			continue
-		}
-		if routeValue.GatewayTested != nil && !*routeValue.GatewayTested {
-			return false
-		}
-		if routeValue.EffectiveRoute == model.RouteDispositionOnLink && (routeValue.Destination != "" || routeValue.RoutePrefix != "") {
-			return false
-		}
-		if !gatewayPresent(routeValue.Gateway) && (routeValue.Destination != "" || routeValue.RoutePrefix != "") {
-			return false
-		}
-	}
-	return true
-}
-
-func gatewayPresent(value string) bool {
-	if value == "" {
-		return false
-	}
-	address, err := netip.ParseAddr(value)
-	if err != nil {
-		// Preserve the conservative behavior for legacy opaque values: a
-		// non-empty, unparseable gateway is still evidence that a check may
-		// have been applicable.
-		return true
-	}
-	return !address.IsUnspecified()
-}
-
-func makeFinding(reason model.FailureReason, matches []observation) model.DiagnosticFinding {
-	layer, domain := semantics(reason)
-	probeNames := make([]string, 0, len(matches))
-	evidenceIDs := make([]string, 0)
-	for _, match := range matches {
-		if match.result.Name != "" {
-			probeNames = append(probeNames, match.result.Name)
-		}
-		for _, evidence := range match.result.Evidence {
-			if evidence.ID != "" {
-				evidenceIDs = append(evidenceIDs, evidence.ID)
+		if probe.Status == model.ProbeStatusPassed && probe.Interpretation.FailureReason == model.FailureReasonNone {
+			layer := probe.Interpretation.Layer
+			if layer != model.LayerProxy && (!canonicalLayerPresent(state.value, layer) || compatibilitySuccessCanFillGap(state.value, layer)) {
+				state.successes = append(state.successes, success{layer: layer, target: compatibilityTarget(state.target, probe.Target), probeNames: []string{probe.Name}, evidenceIDs: evidenceIDs(probe.Evidence)})
 			}
 		}
 	}
-	sort.Strings(probeNames)
-	sort.Strings(evidenceIDs)
-	return model.DiagnosticFinding{
-		FailureReason: reason,
-		Layer:         layer,
-		FaultDomain:   domain,
-		ProbeNames:    unique(probeNames),
-		EvidenceIDs:   unique(evidenceIDs),
-	}
 }
 
-func makeExtensionFinding(candidate observation, observations []observation) model.DiagnosticFinding {
-	layer := candidate.result.Interpretation.Layer
-	if layer == "" {
-		layer = model.LayerUnknown
-	}
-	domain := candidate.result.Interpretation.FaultDomain
-	if domain == "" {
-		domain = model.FaultDomainUnknown
-	}
-	matches := make([]observation, 0, 1)
-	for _, other := range observations {
-		if !isGenericFailure(other) {
-			continue
+func selectFindings(state diagnosisState) []model.DiagnosticFinding {
+	var builtIn *candidate
+	for _, policy := range rules {
+		matches := candidatesForReason(state.candidates, policy.reason)
+		viable := make([]candidate, 0, len(matches))
+		for _, match := range matches {
+			if !candidateContradicted(match, state.successes) {
+				viable = append(viable, match)
+			}
 		}
-		if other.result.Interpretation.Layer == model.LayerICMP || other.result.Interpretation.FaultDomain == model.FaultDomainICMP || other.reason == model.FailureReasonICMPFailure {
-			continue
-		}
-		if other.reason == candidate.reason && other.result.Interpretation.Layer == candidate.result.Interpretation.Layer && other.result.Interpretation.FaultDomain == candidate.result.Interpretation.FaultDomain && targetsCorrelate(candidate.result.Target, other.result.Target, candidate.result.Interpretation.Layer) {
-			matches = append(matches, other)
+		if len(viable) != 0 {
+			value := mergeCandidates(viable)
+			builtIn = &value
+			break
 		}
 	}
-	finding := makeFinding(candidate.reason, matches)
-	finding.Layer = layer
-	finding.FaultDomain = domain
-	return finding
-}
-
-// genericFailure selects an extension reason without assigning semantics to
-// its value. Layer order is fixed so a collector's input ordering cannot
-// change the primary finding. Reason/name are only stable tie-breakers when
-// two opaque extensions occupy the same layer.
-func genericFailure(observations []observation) *observation {
-	candidates := make([]observation, 0)
-	for _, observation := range observations {
-		if !isGenericFailure(observation) {
-			continue
-		}
-		if observation.result.Interpretation.Layer == model.LayerICMP || observation.result.Interpretation.FaultDomain == model.FaultDomainICMP || observation.reason == model.FailureReasonICMPFailure {
-			continue
-		}
-		candidates = append(candidates, observation)
+	extension := genericFailure(state.candidates, state.successes)
+	if extension != nil && (builtIn == nil || layerRank(extension.layer) < layerRank(builtIn.layer)) {
+		return withGatewaySupport(makeFinding(*extension), state)
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		left, right := candidates[i], candidates[j]
-		if layerRank(left.result.Interpretation.Layer) != layerRank(right.result.Interpretation.Layer) {
-			return layerRank(left.result.Interpretation.Layer) < layerRank(right.result.Interpretation.Layer)
-		}
-		if left.reason != right.reason {
-			return left.reason < right.reason
-		}
-		if left.result.Interpretation.Layer != right.result.Interpretation.Layer {
-			return left.result.Interpretation.Layer < right.result.Interpretation.Layer
-		}
-		if left.result.Interpretation.FaultDomain != right.result.Interpretation.FaultDomain {
-			return left.result.Interpretation.FaultDomain < right.result.Interpretation.FaultDomain
-		}
-		return left.result.Name < right.result.Name
-	})
-	for _, candidate := range candidates {
-		if !contradictedExtension(candidate, observations) {
-			selected := candidate
-			return &selected
-		}
+	if builtIn != nil {
+		return withGatewaySupport(makeFinding(*builtIn), state)
+	}
+	if gateway := gatewayCandidates(state); len(gateway) != 0 {
+		return []model.DiagnosticFinding{makeFinding(mergeCandidates(gateway))}
 	}
 	return nil
 }
 
-func isGenericFailure(observation observation) bool {
-	if observation.result.Status != model.ProbeStatusFailed && observation.result.Status != model.ProbeStatusError {
+func withGatewaySupport(finding model.DiagnosticFinding, state diagnosisState) []model.DiagnosticFinding {
+	result := []model.DiagnosticFinding{finding}
+	if gateway := gatewayCandidates(state); len(gateway) != 0 {
+		result = append(result, makeFinding(mergeCandidates(gateway)))
+	}
+	return result
+}
+
+func gatewayCandidates(state diagnosisState) []candidate {
+	if state.value.NetworkContext.EffectiveRoute == model.RouteDispositionOnLink {
+		return nil
+	}
+	result := make([]candidate, 0)
+	for _, value := range state.candidates {
+		if value.reason != model.FailureReasonGatewayUnreachable {
+			continue
+		}
+		if state.value.NetworkContext.EffectiveRoute == model.RouteDispositionRouted && state.value.NetworkContext.Gateway == "" {
+			continue
+		}
+		if !candidateContradicted(value, state.successes) {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func candidatesForReason(values []candidate, reason model.FailureReason) []candidate {
+	result := make([]candidate, 0)
+	for _, value := range values {
+		if value.reason == reason && !value.supporting {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func genericFailure(values []candidate, successes []success) *candidate {
+	ordered := make([]candidate, 0)
+	for _, value := range values {
+		if isGenericReason(value.reason) && !value.supporting && !candidateContradicted(value, successes) {
+			ordered = append(ordered, value)
+		}
+	}
+	if len(ordered) == 0 {
+		return nil
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		left, right := ordered[i], ordered[j]
+		if layerRank(left.layer) != layerRank(right.layer) {
+			return layerRank(left.layer) < layerRank(right.layer)
+		}
+		if left.reason != right.reason {
+			return left.reason < right.reason
+		}
+		if left.domain != right.domain {
+			return left.domain < right.domain
+		}
+		return strings.Join(sortedUnique(left.probeNames), "\x00") < strings.Join(sortedUnique(right.probeNames), "\x00")
+	})
+	first := ordered[0]
+	selected := []candidate{first}
+	for _, value := range ordered[1:] {
+		if value.reason == first.reason && value.layer == first.layer && value.domain == first.domain {
+			selected = append(selected, value)
+		}
+	}
+	merged := mergeCandidates(selected)
+	return &merged
+}
+
+func candidateContradicted(value candidate, successes []success) bool {
+	if value.comparative {
 		return false
 	}
-	switch observation.reason {
-	case "", model.FailureReasonNone, model.FailureReasonUnknown,
-		model.FailureReasonICMPFailure, model.FailureReasonUnsupported,
-		model.FailureReasonPathObservation, model.FailureReasonPathCancellation:
+	for _, success := range successes {
+		if !targetsCorrelate(value.target, success.target, value.layer) {
+			continue
+		}
+		if successfulLayerContradicts(value.reason, value.layer, success.layer) {
+			return true
+		}
+	}
+	return false
+}
+
+func successfulLayerContradicts(reason model.FailureReason, failedLayer, successfulLayer model.Layer) bool {
+	// Comparative observations describe distinct lanes. Their policy finding
+	// remains useful even when one endpoint lane succeeds.
+	switch reason {
+	case model.FailureReasonDirectEgressRestricted, model.FailureReasonEffectiveRouteDifference, model.FailureReasonTLSInterceptionSuspected, model.FailureReasonTLSTrustStoreMismatch, model.FailureReasonProxyConfigurationDivergence:
 		return false
 	}
-	for _, rule := range rules {
-		if observation.reason == rule.reason {
+	switch failedLayer {
+	case model.LayerInterface, model.LayerIPConfiguration, model.LayerRoute, model.LayerGateway, model.LayerNetwork:
+		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
+	case model.LayerDNS, model.LayerProxy:
+		return successfulLayer == failedLayer
+	case model.LayerTCP:
+		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
+	case model.LayerTLS:
+		return successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
+	case model.LayerHTTP:
+		return successfulLayer == model.LayerHTTP
+	default:
+		return false
+	}
+}
+
+func makeFinding(value candidate) model.DiagnosticFinding {
+	layer, domain := semantics(value.reason)
+	if layer == model.LayerUnknown {
+		layer, domain = value.layer, value.domain
+	}
+	return model.DiagnosticFinding{FailureReason: value.reason, Layer: layer, FaultDomain: domain, ProbeNames: sortedUnique(value.probeNames), EvidenceIDs: sortedUnique(value.evidenceIDs)}
+}
+
+func mergeCandidates(values []candidate) candidate {
+	if len(values) == 0 {
+		return candidate{}
+	}
+	result := values[0]
+	for _, value := range values[1:] {
+		result.probeNames = append(result.probeNames, value.probeNames...)
+		result.evidenceIDs = append(result.evidenceIDs, value.evidenceIDs...)
+		result.comparative = result.comparative || value.comparative
+	}
+	result.probeNames = sortedUnique(result.probeNames)
+	result.evidenceIDs = sortedUnique(result.evidenceIDs)
+	return result
+}
+
+type candidateRefs struct {
+	probeNames  []string
+	evidenceIDs []string
+}
+
+func addReasonCandidate(state *diagnosisState, reason model.FailureReason, fallbackLayer model.Layer, fallbackDomain model.FaultDomain, target model.Target, refs candidateRefs, comparative bool) {
+	if !activeReason(reason) {
+		return
+	}
+	layer, domain := semantics(reason)
+	if layer == model.LayerUnknown {
+		layer, domain = fallbackLayer, fallbackDomain
+	}
+	if domain == "" {
+		domain = model.FaultDomainUnknown
+	}
+	state.candidates = append(state.candidates, candidate{reason: reason, layer: layer, domain: domain, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs, comparative: comparative, supporting: reason == model.FailureReasonGatewayUnreachable})
+}
+
+func activeReason(reason model.FailureReason) bool {
+	switch reason {
+	case "", model.FailureReasonNone, model.FailureReasonUnknown, model.FailureReasonUnsupported, model.FailureReasonICMPFailure, model.FailureReasonPathObservation, model.FailureReasonPathCancellation:
+		return false
+	default:
+		return true
+	}
+}
+
+func isGenericReason(reason model.FailureReason) bool {
+	if !activeReason(reason) || reason == model.FailureReasonGatewayUnreachable {
+		return false
+	}
+	for _, value := range rules {
+		if value.reason == reason {
 			return false
 		}
 	}
-	// Gateway is intentionally not in rules because it is supporting-only,
-	// but it is not an extension reason and must not be duplicated here.
-	return observation.reason != model.FailureReasonGatewayUnreachable
+	return true
+}
+
+func semantics(reason model.FailureReason) (model.Layer, model.FaultDomain) {
+	switch reason {
+	case model.FailureReasonInterfaceDown:
+		return model.LayerInterface, model.FaultDomainLocal
+	case model.FailureReasonNoIPAddress:
+		return model.LayerIPConfiguration, model.FaultDomainLocal
+	case model.FailureReasonNoRoute, model.FailureReasonInvalidRoute, model.FailureReasonEffectiveRouteDifference:
+		return model.LayerRoute, model.FaultDomainRouting
+	case model.FailureReasonGatewayUnreachable:
+		return model.LayerGateway, model.FaultDomainGateway
+	case model.FailureReasonDNSNXDomain, model.FailureReasonDNSNoAnswer, model.FailureReasonDNSTimeout, model.FailureReasonDNSResolverFailure:
+		return model.LayerDNS, model.FaultDomainDNS
+	case model.FailureReasonProxyConfigurationFailure, model.FailureReasonProxyConfigurationDivergence, model.FailureReasonProxyUnavailable, model.FailureReasonProxyConnectDenied, model.FailureReasonProxyAuthenticationRequired:
+		return model.LayerProxy, model.FaultDomainProxy
+	case model.FailureReasonDirectEgressRestricted:
+		return model.LayerNetwork, model.FaultDomainPolicy
+	case model.FailureReasonNetworkUnreachable:
+		return model.LayerNetwork, model.FaultDomainNetwork
+	case model.FailureReasonFirewallBlocked:
+		return model.LayerNetwork, model.FaultDomainFirewall
+	case model.FailureReasonTCPSYNNotObserved:
+		return model.LayerTCP, model.FaultDomainLocal
+	case model.FailureReasonTCPTimeout, model.FailureReasonTCPConnectionRefused, model.FailureReasonTCPConnectionReset:
+		return model.LayerTCP, model.FaultDomainTransport
+	case model.FailureReasonTLSHandshakeFailure, model.FailureReasonCertificateValidationFailure, model.FailureReasonTLSTrustStoreMismatch, model.FailureReasonTLSInterceptionSuspected:
+		return model.LayerTLS, model.FaultDomainTLS
+	case model.FailureReasonHTTPStatusCode, model.FailureReasonHTTPFailure:
+		return model.LayerHTTP, model.FaultDomainHTTP
+	case model.FailureReasonProbeExecution:
+		return model.LayerUnknown, model.FaultDomainUnknown
+	default:
+		return model.LayerUnknown, model.FaultDomainUnknown
+	}
 }
 
 func layerRank(layer model.Layer) int {
@@ -486,155 +711,158 @@ func layerRank(layer model.Layer) int {
 	}
 }
 
-func contradictedExtension(candidate observation, observations []observation) bool {
-	for _, observation := range observations {
-		if observation.result.Status != model.ProbeStatusPassed || observation.reason != model.FailureReasonNone {
+func targetFromObservations(value model.Observations) model.Target {
+	target := model.Target{RequestedIdentity: value.Endpoint.RequestedIdentity, LiteralIP: value.Endpoint.LiteralIP, Service: value.Endpoint.Service, ApplicationProtocol: value.Endpoint.ApplicationProtocol, TransportProtocol: value.Endpoint.TransportProtocol, Port: value.Endpoint.Port, Resource: value.Endpoint.Resource}
+	if target.RequestedIdentity == "" {
+		target.RequestedIdentity = value.NameResolution.RequestedName
+	}
+	if value.Endpoint.SelectedEndpoint != nil {
+		endpoint := *value.Endpoint.SelectedEndpoint
+		target.SelectedEndpoint = &endpoint
+	}
+	if value.Endpoint.TestedEndpoint != nil {
+		endpoint := *value.Endpoint.TestedEndpoint
+		target.TestedEndpoint = &endpoint
+	}
+	return target
+}
+
+func targetFromProbes(probes []model.ProbeResult) model.Target {
+	var target model.Target
+	for _, probe := range probes {
+		candidate := probe.Target
+		if candidate.RequestedIdentity == "" && candidate.Port == 0 && candidate.OriginalInput == "" {
 			continue
 		}
-		if !targetsCorrelate(candidate.result.Target, observation.result.Target, candidate.result.Interpretation.Layer) {
-			continue
+		if target.RequestedIdentity == "" || target.Port == 0 {
+			target = candidate
 		}
-		if successfulLayerContradicts(candidate.result.Interpretation.Layer, observation.result.Interpretation.Layer) {
+	}
+	return target
+}
+
+func mergeTarget(left, right model.Target) model.Target {
+	result := left
+	if result.RequestedIdentity == "" {
+		result.RequestedIdentity = right.RequestedIdentity
+	}
+	if result.Port == 0 {
+		result.Port = right.Port
+	}
+	if result.LiteralIP == "" {
+		result.LiteralIP = right.LiteralIP
+	}
+	if result.SelectedEndpoint == nil && right.SelectedEndpoint != nil {
+		endpoint := *right.SelectedEndpoint
+		result.SelectedEndpoint = &endpoint
+	}
+	if result.TestedEndpoint == nil && right.TestedEndpoint != nil {
+		endpoint := *right.TestedEndpoint
+		result.TestedEndpoint = &endpoint
+	}
+	return result
+}
+
+func compatibilityTarget(base, probe model.Target) model.Target {
+	if probe.RequestedIdentity != "" || probe.Port != 0 || probe.OriginalInput != "" {
+		return probe
+	}
+	return base
+}
+
+func targetForDestination(base model.Target, destination string, port uint16) model.Target {
+	result := base
+	if destination != "" {
+		result.RequestedIdentity = destination
+	}
+	if port != 0 {
+		result.Port = port
+	}
+	return result
+}
+
+func targetFromEndpoint(probe, tested *model.Endpoint, requested string) model.Target {
+	target := model.Target{RequestedIdentity: requested}
+	if tested != nil {
+		target.Port = tested.Port
+		target.TestedEndpoint = tested
+	} else if probe != nil {
+		target.Port = probe.Port
+		target.SelectedEndpoint = probe
+	}
+	return target
+}
+
+func endpointAttemptsSucceeded(values []model.EndpointAttempt) bool {
+	for _, value := range values {
+		if value.Status == model.ProbeStatusPassed || value.FailureReason == model.FailureReasonNone {
 			return true
 		}
 	}
 	return false
 }
 
-func successfulLayerContradicts(failedLayer, successfulLayer model.Layer) bool {
-	switch failedLayer {
-	case model.LayerInterface, model.LayerIPConfiguration, model.LayerRoute,
-		model.LayerGateway, model.LayerNetwork:
-		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
-	case model.LayerDNS, model.LayerProxy:
-		return successfulLayer == failedLayer
-	case model.LayerTCP:
-		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
-	case model.LayerTLS:
-		return successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
-	case model.LayerHTTP:
-		return successfulLayer == model.LayerHTTP
+func transportSucceeded(value model.TransportObservation) bool {
+	return value.Connected || value.ConnectionOutcome == model.TransportConnectionOutcomeConnected || value.TestedEndpoint != nil || endpointAttemptsSucceeded(value.CandidateAttempts)
+}
+
+func transportReason(outcome model.TransportConnectionOutcome) model.FailureReason {
+	switch outcome {
+	case model.TransportConnectionOutcomeTimeout:
+		return model.FailureReasonTCPTimeout
+	case model.TransportConnectionOutcomeRefused:
+		return model.FailureReasonTCPConnectionRefused
+	case model.TransportConnectionOutcomeReset:
+		return model.FailureReasonTCPConnectionReset
+	case model.TransportConnectionOutcomeUnreachable:
+		return model.FailureReasonNetworkUnreachable
 	default:
+		return model.FailureReasonNone
+	}
+}
+
+func packetFlowCanStrengthen(reason model.FailureReason, outcome model.TransportConnectionOutcome, strengthened model.FailureReason) bool {
+	if strengthened == model.FailureReasonTCPConnectionReset || strengthened == model.FailureReasonTCPSYNNotObserved {
+		return reason == model.FailureReasonTCPTimeout || reason == model.FailureReasonProbeExecution || reason == model.FailureReasonUnknown || reason == model.FailureReasonNone || outcome == model.TransportConnectionOutcomeTimeout
+	}
+	return false
+}
+
+func nameResolutionSucceeded(value model.NameResolutionObservation) bool {
+	return value.SelectedAddress != "" || len(value.A) != 0 || len(value.AAAA) != 0 || value.EffectivePath != nil && value.EffectivePath.Mechanism == model.NameResolutionMechanismLiteralIP
+}
+
+func pathWorks(value model.EnterprisePathObservation) bool {
+	if activeReason(value.FailureReason) {
 		return false
 	}
+	return value.HTTPResponse && value.HTTPStatusCode >= 200 && value.HTTPStatusCode < 400 || value.TLSHandshake && value.CertificateTrusted && value.HostnameVerified
 }
 
-func unique(values []string) []string {
-	if len(values) < 2 {
-		return values
-	}
-	result := values[:1]
-	for _, value := range values[1:] {
-		if value != result[len(result)-1] {
-			result = append(result, value)
-		}
-	}
-	return result
-}
-
-// semantics intentionally derives output boundaries from machine-readable
-// FailureReason constants. It never examines probe names, raw errors, or
-// presentation text.
-func semantics(reason model.FailureReason) (model.Layer, model.FaultDomain) {
-	switch reason {
-	case model.FailureReasonInterfaceDown:
-		return model.LayerInterface, model.FaultDomainLocal
-	case model.FailureReasonNoIPAddress:
-		return model.LayerIPConfiguration, model.FaultDomainLocal
-	case model.FailureReasonNoRoute, model.FailureReasonInvalidRoute, model.FailureReasonEffectiveRouteDifference:
-		return model.LayerRoute, model.FaultDomainRouting
-	case model.FailureReasonGatewayUnreachable:
-		return model.LayerGateway, model.FaultDomainGateway
-	case model.FailureReasonDNSNXDomain, model.FailureReasonDNSNoAnswer,
-		model.FailureReasonDNSTimeout, model.FailureReasonDNSResolverFailure:
-		return model.LayerDNS, model.FaultDomainDNS
-	case model.FailureReasonProxyConfigurationFailure,
-		model.FailureReasonProxyConfigurationDivergence,
-		model.FailureReasonProxyUnavailable,
-		model.FailureReasonProxyConnectDenied,
-		model.FailureReasonProxyAuthenticationRequired:
+func enterprisePathLayer(value model.EnterprisePathObservation) (model.Layer, model.FaultDomain) {
+	if strings.Contains(strings.ToLower(value.Mode), "proxy") || strings.Contains(strings.ToLower(value.Source), "proxy") {
 		return model.LayerProxy, model.FaultDomainProxy
-	case model.FailureReasonDirectEgressRestricted:
-		return model.LayerNetwork, model.FaultDomainPolicy
-	case model.FailureReasonNetworkUnreachable:
-		return model.LayerNetwork, model.FaultDomainNetwork
-	case model.FailureReasonFirewallBlocked:
-		return model.LayerNetwork, model.FaultDomainFirewall
-	case model.FailureReasonTCPSYNNotObserved:
-		return model.LayerTCP, model.FaultDomainLocal
-	case model.FailureReasonTCPTimeout,
-		model.FailureReasonTCPConnectionRefused,
-		model.FailureReasonTCPConnectionReset:
-		return model.LayerTCP, model.FaultDomainTransport
-	case model.FailureReasonTLSHandshakeFailure,
-		model.FailureReasonCertificateValidationFailure,
-		model.FailureReasonTLSTrustStoreMismatch,
-		model.FailureReasonTLSInterceptionSuspected:
-		return model.LayerTLS, model.FaultDomainTLS
-	case model.FailureReasonHTTPStatusCode, model.FailureReasonHTTPFailure:
-		return model.LayerHTTP, model.FaultDomainHTTP
-	case model.FailureReasonProbeExecution:
-		return model.LayerUnknown, model.FaultDomainUnknown
-	default:
-		return model.LayerUnknown, model.FaultDomainUnknown
 	}
+	return model.LayerUnknown, model.FaultDomainUnknown
 }
 
-func contradicted(candidate observation, observations []observation) bool {
-	reason := candidate.reason
-	// A normalized success at the same or a later boundary is stronger than a
-	// contradictory failed observation. DNS is intentionally treated as its
-	// own branch: a successful TCP connection does not prove hostname lookup
-	// succeeded, and vice versa.
-	for _, observation := range observations {
-		if observation.result.Status != model.ProbeStatusPassed || observation.reason != model.FailureReasonNone {
-			continue
-		}
-		if !targetsCorrelate(candidate.result.Target, observation.result.Target, candidate.result.Interpretation.Layer) {
-			continue
-		}
-		layer := observation.result.Interpretation.Layer
-		switch reason {
-		case model.FailureReasonInterfaceDown, model.FailureReasonNoIPAddress,
-			model.FailureReasonNoRoute, model.FailureReasonInvalidRoute,
-			model.FailureReasonGatewayUnreachable,
-			model.FailureReasonNetworkUnreachable,
-			model.FailureReasonFirewallBlocked:
-			if layer == model.LayerTCP || layer == model.LayerTLS || layer == model.LayerHTTP {
-				return true
-			}
-		case model.FailureReasonDNSNXDomain, model.FailureReasonDNSNoAnswer,
-			model.FailureReasonDNSTimeout, model.FailureReasonDNSResolverFailure:
-			if layer == model.LayerDNS {
-				return true
-			}
-		case model.FailureReasonProxyUnavailable:
-			// Configuration success is not proof that a particular URL's
-			// endpoint, CONNECT policy, or authentication path succeeds. Keep
-			// the legacy contradiction only for a generic endpoint-unavailable
-			// result, and retain the more specific enterprise findings.
-			if layer == model.LayerProxy {
-				return true
-			}
-		case model.FailureReasonTCPTimeout, model.FailureReasonTCPConnectionRefused,
-			model.FailureReasonTCPConnectionReset, model.FailureReasonTCPSYNNotObserved:
-			if layer == model.LayerTCP || layer == model.LayerTLS || layer == model.LayerHTTP {
-				return true
-			}
-		case model.FailureReasonTLSHandshakeFailure,
-			model.FailureReasonCertificateValidationFailure:
-			if layer == model.LayerTLS || layer == model.LayerHTTP {
-				return true
-			}
-		case model.FailureReasonHTTPStatusCode, model.FailureReasonHTTPFailure:
-			if layer == model.LayerHTTP {
-				return true
-			}
-		case model.FailureReasonProbeExecution:
-			// Generic execution errors are only useful when no normalized
-			// success exists at all; do not let one stale error override proof
-			// that the path works.
-			if layer != model.LayerUnknown {
+func targetsCorrelate(left, right model.Target, layer model.Layer) bool {
+	leftIdentity, rightIdentity := targetIdentity(left), targetIdentity(right)
+	if leftIdentity != "" && rightIdentity != "" && !strings.EqualFold(leftIdentity, rightIdentity) && !targetAddressesCorrelate(left, right) {
+		return false
+	}
+	if transportEndpointLayer(layer) && left.Port != 0 && right.Port != 0 && left.Port != right.Port {
+		return false
+	}
+	return true
+}
+
+func targetAddressesCorrelate(left, right model.Target) bool {
+	leftValues := targetAddresses(left)
+	rightValues := targetAddresses(right)
+	for _, leftValue := range leftValues {
+		for _, rightValue := range rightValues {
+			if strings.EqualFold(leftValue, rightValue) || left.MatchesAddress(rightValue) || right.MatchesAddress(leftValue) {
 				return true
 			}
 		}
@@ -642,15 +870,35 @@ func contradicted(candidate observation, observations []observation) bool {
 	return false
 }
 
-func targetsCorrelate(left, right model.Target, layer model.Layer) bool {
-	if left.RequestedIdentity != "" && right.RequestedIdentity != "" &&
-		!left.MatchesAddress(right.RequestedIdentity) && !right.MatchesAddress(left.RequestedIdentity) {
-		return false
+func targetAddresses(value model.Target) []string {
+	result := []string{}
+	if value.LiteralIP != "" {
+		result = append(result, value.LiteralIP)
 	}
-	if transportEndpointLayer(layer) && left.Port != 0 && right.Port != 0 && left.Port != right.Port {
-		return false
+	if value.SelectedEndpoint != nil {
+		result = append(result, value.SelectedEndpoint.Address)
 	}
-	return true
+	if value.TestedEndpoint != nil {
+		result = append(result, value.TestedEndpoint.Address)
+	}
+	return result
+}
+
+func flowCorrelates(flow, target model.Target, layer model.Layer) bool {
+	return targetsCorrelate(flow, target, layer)
+}
+
+func targetIdentity(value model.Target) string {
+	if value.RequestedIdentity != "" {
+		return value.RequestedIdentity
+	}
+	if value.TestedEndpoint != nil {
+		return value.TestedEndpoint.Address
+	}
+	if value.SelectedEndpoint != nil {
+		return value.SelectedEndpoint.Address
+	}
+	return value.LiteralIP
 }
 
 func transportEndpointLayer(layer model.Layer) bool {
@@ -660,4 +908,140 @@ func transportEndpointLayer(layer model.Layer) bool {
 	default:
 		return false
 	}
+}
+
+func provenanceAt(values []model.ObservationProvenance, index int) ([]string, []string) {
+	if index < 0 || index >= len(values) {
+		return nil, nil
+	}
+	value := values[index]
+	names := []string{}
+	if value.ProbeName != "" {
+		names = append(names, value.ProbeName)
+	}
+	return names, append([]string(nil), value.EvidenceIDs...)
+}
+
+func provenanceProbeNames(values []string) []string {
+	result := make([]string, 0)
+	for _, value := range values {
+		if strings.HasPrefix(value, "probe:") && len(value) > len("probe:") {
+			result = append(result, strings.TrimPrefix(value, "probe:"))
+		}
+	}
+	return sortedUnique(result)
+}
+
+func evidenceIDs(values []model.Evidence) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value.ID != "" {
+			result = append(result, value.ID)
+		}
+	}
+	return sortedUnique(result)
+}
+
+func sortedUnique(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := append([]string(nil), values...)
+	sort.Strings(result)
+	write := 1
+	for _, value := range result[1:] {
+		if value != result[write-1] {
+			result[write] = value
+			write++
+		}
+	}
+	return result[:write]
+}
+
+func compatibilityReasonAllowed(reason model.FailureReason, value model.Observations) bool {
+	switch reason {
+	case model.FailureReasonInterfaceDown, model.FailureReasonNoIPAddress:
+		return !activeReason(value.NetworkContext.FailureReason)
+	case model.FailureReasonNoRoute, model.FailureReasonInvalidRoute:
+		return value.NetworkContext.EffectiveRoute == model.RouteDispositionUnknown && !activeReason(value.NetworkContext.FailureReason)
+	case model.FailureReasonEffectiveRouteDifference:
+		return !value.EnterprisePolicy.Network.RouteDifferenceKnown
+	case model.FailureReasonDNSNXDomain, model.FailureReasonDNSNoAnswer, model.FailureReasonDNSTimeout, model.FailureReasonDNSResolverFailure:
+		return !activeReason(value.NameResolution.FailureReason)
+	case model.FailureReasonTCPTimeout, model.FailureReasonTCPConnectionRefused, model.FailureReasonTCPConnectionReset, model.FailureReasonTCPSYNNotObserved, model.FailureReasonNetworkUnreachable:
+		return !transportHasObservation(value.Transport) && !strongPacketFlow(value, reason, targetFromObservations(value))
+	case model.FailureReasonTLSHandshakeFailure, model.FailureReasonCertificateValidationFailure, model.FailureReasonTLSTrustStoreMismatch, model.FailureReasonTLSInterceptionSuspected:
+		return !securityHasObservation(value.Security) && !value.EnterprisePolicy.TLS.PossibleInterception
+	case model.FailureReasonHTTPStatusCode, model.FailureReasonHTTPFailure:
+		return !applicationHasObservation(value.Application)
+	default:
+		return true
+	}
+}
+
+func transportHasObservation(value model.TransportObservation) bool {
+	directEvidence := len(value.EvidenceIDs) != 0 && len(value.PacketFlowEvidenceIDs) != len(value.EvidenceIDs)
+	return activeReason(value.FailureReason) || value.ConnectionOutcome != "" && value.ConnectionOutcome != model.TransportConnectionOutcomeNotAttempted && value.ConnectionOutcome != model.TransportConnectionOutcomeUnknown || directEvidence || len(value.CandidateAttempts) != 0 || value.TestedEndpoint != nil
+}
+
+func strongPacketFlow(value model.Observations, reason model.FailureReason, target model.Target) bool {
+	if reason != model.FailureReasonTCPTimeout && reason != model.FailureReasonProbeExecution && reason != model.FailureReasonUnknown && reason != model.FailureReasonNone {
+		return false
+	}
+	for _, flow := range value.PacketFlows {
+		if flow.CaptureStatus != model.PacketCaptureStatusAvailable || !flowCorrelates(flow.Target, target, model.LayerTCP) {
+			continue
+		}
+		switch flow.Outcome {
+		case model.PacketFlowOutcomeTCPHandshakeConfirmed, model.PacketFlowOutcomeTCPSYNACK:
+			return flow.Certainty == model.EvidenceCertaintyConfirmedEndpointResponse
+		case model.PacketFlowOutcomeTCPRST, model.PacketFlowOutcomeProbeNotEmitted:
+			return true
+		}
+	}
+	return false
+}
+
+func securityHasObservation(value model.SecurityObservation) bool {
+	return value.HandshakeComplete || activeReason(value.FailureReason) || len(value.EvidenceIDs) != 0
+}
+
+func applicationHasObservation(value model.ApplicationObservation) bool {
+	return value.RequestAttempted || value.ResponseReceived || activeReason(value.FailureReason) || len(value.EvidenceIDs) != 0
+}
+
+func canonicalLayerPresent(value model.Observations, layer model.Layer) bool {
+	switch layer {
+	case model.LayerDNS:
+		return value.NameResolution.RequestedName != "" || value.NameResolution.FailureReason != "" || len(value.NameResolution.EvidenceIDs) != 0 || nameResolutionSucceeded(value.NameResolution)
+	case model.LayerRoute, model.LayerInterface, model.LayerIPConfiguration:
+		return value.NetworkContext.RequestedIdentity != "" || value.NetworkContext.EffectiveRoute != "" && value.NetworkContext.EffectiveRoute != model.RouteDispositionUnknown || value.NetworkContext.FailureReason != "" || len(value.NetworkContext.EvidenceIDs) != 0
+	case model.LayerTCP:
+		return transportHasObservation(value.Transport) || len(value.PacketFlows) != 0 || len(value.Paths) != 0 || value.Endpoint.TestedEndpoint != nil || len(value.Endpoint.CandidateAttempts) != 0
+	case model.LayerTLS:
+		return securityHasObservation(value.Security) || value.EnterprisePolicy.TLS.PossibleInterception
+	case model.LayerHTTP:
+		return applicationHasObservation(value.Application)
+	default:
+		return false
+	}
+}
+
+func compatibilitySuccessCanFillGap(value model.Observations, layer model.Layer) bool {
+	if layer != model.LayerDNS {
+		return false
+	}
+	return len(value.NameResolution.EvidenceIDs) == 0 && !nameResolutionSucceeded(value.NameResolution)
+}
+
+func hasCanonicalObservations(value model.Observations) bool {
+	return value.Endpoint.RequestedIdentity != "" || value.Endpoint.Port != 0 || len(value.Endpoint.ResolvedCandidates) != 0 || len(value.Endpoint.CandidateAttempts) != 0 || value.NameResolution.RequestedName != "" || len(value.NameResolution.EvidenceIDs) != 0 || value.NetworkContext.RequestedIdentity != "" || value.NetworkContext.EffectiveRoute != "" && value.NetworkContext.EffectiveRoute != model.RouteDispositionUnknown || len(value.NetworkContext.EvidenceIDs) != 0 || activeReason(value.Transport.FailureReason) || value.Transport.ConnectionOutcome != "" && value.Transport.ConnectionOutcome != model.TransportConnectionOutcomeUnknown || value.Security.FailureReason != "" || value.Security.Attempted || value.Application.FailureReason != "" || value.Application.RequestAttempted || value.EnterprisePolicy.State != "" && value.EnterprisePolicy.State != model.EnterpriseObservationStateUnknown || len(value.Paths) != 0 || len(value.PacketFlows) != 0
+}
+
+func enterpriseConflictEvidenceIDs(value model.EnterprisePolicyObservation) []string {
+	result := make([]string, 0)
+	for _, conflict := range value.Conflicts {
+		result = append(result, conflict.EvidenceIDs...)
+	}
+	return sortedUnique(result)
 }
