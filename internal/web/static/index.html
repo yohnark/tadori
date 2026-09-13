@@ -160,23 +160,122 @@
             <div id="name-resolution-empty" class="empty-state" hidden>No normalized name-resolution observation is available.</div>
           </section>
 
-          <section class="panel section-panel path-panel">
+          <section id="observed-path-panel" class="panel section-panel path-panel">
             <div class="section-heading">
               <div>
                 <p class="eyebrow">Observed path</p>
-                <h2>Forwarding observations</h2>
+                <h2>Responder path visibility</h2>
               </div>
-              <span class="not-topology">Observed responses, not physical topology</span>
+              <span class="not-topology">Observed responders, not physical topology</span>
             </div>
-            <div class="path-legend" aria-label="Path legend">
-              <span><i class="legend-dot observed"></i>Responder</span>
-              <span><i class="legend-dot inferred"></i>Inferred range</span>
-              <span><i class="legend-dot unobservable"></i>Unobservable</span>
-              <span><i class="legend-dot failed"></i>Failed observation</span>
+            <p class="section-note observed-path-explanation">This workbench shows responders and unobservable ranges observed from the diagnostic vantage. It describes responder/path visibility, not physical topology or inferred device identity.</p>
+            <div class="path-view-toolbar">
+              <div class="path-view-context">
+                <span class="eyebrow">Projection</span>
+                <span id="path-view-status" class="path-view-status">Graph layout shell</span>
+              </div>
+              <div class="path-view-switch" role="tablist" aria-label="Observed Path projection">
+                <button id="path-graph-tab" class="path-view-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="path-graph-view" data-path-view="graph">Graph</button>
+                <button id="path-table-tab" class="path-view-tab" type="button" role="tab" aria-selected="false" aria-controls="path-table-view" data-path-view="table">Table</button>
+              </div>
             </div>
-            <p class="section-note">A missing TTL response is unobservable evidence, not a packet-loss claim.</p>
-            <div id="paths" class="path-list"></div>
-            <div id="path-empty" class="empty-state" hidden>No structured path observation is available in this report.</div>
+
+            <div id="path-graph-view" class="path-view path-graph-view" role="tabpanel" aria-labelledby="path-graph-tab">
+              <div class="path-graph-header">
+                <div>
+                  <h3>Observed responder sequence</h3>
+                  <p id="path-graph-description">A horizontal layout is reserved for canonical path data.</p>
+                </div>
+                <span id="path-graph-count" class="count-label">Awaiting report</span>
+              </div>
+              <div id="path-graph-viewport" class="path-graph-viewport" tabindex="0" aria-label="Observed Path graph viewport">
+                <div id="path-graph-loading" class="path-graph-state" hidden>
+                  <span class="path-state-mark" aria-hidden="true">…</span>
+                  <div>
+                    <strong>Loading observed path</strong>
+                    <p>Waiting for the diagnostic report to provide canonical path observations.</p>
+                  </div>
+                </div>
+                <div id="path-graph-empty" class="path-graph-state" hidden>
+                  <span class="path-state-mark" aria-hidden="true">—</span>
+                  <div>
+                    <strong>No observed path in this report</strong>
+                    <p>The graph stays available for a run that exposes responder/path visibility. Review the other evidence lanes for retained observations.</p>
+                  </div>
+                </div>
+                <div id="path-graph-unsupported" class="path-graph-state" hidden>
+                  <span class="path-state-mark" aria-hidden="true">!</span>
+                  <div>
+                    <strong>Graph projection unavailable</strong>
+                    <p>This report does not expose a graph-compatible path observation. The canonical Table projection remains the supported view.</p>
+                  </div>
+                </div>
+                <div id="path-graph-reserved" class="path-graph-reserved">
+                  <div class="path-graph-scaffold" aria-hidden="true">
+                    <div class="graph-scaffold-guide graph-guide-top">
+                      <span>sequence</span>
+                      <span>responder visibility</span>
+                      <span>destination check</span>
+                    </div>
+                    <div class="graph-scaffold-track">
+                      <div class="graph-scaffold-column graph-scaffold-origin">
+                        <span class="graph-column-label">START</span>
+                        <span class="graph-scaffold-slot">Probe vantage</span>
+                        <span class="graph-scaffold-caption">local source</span>
+                      </div>
+                      <div class="graph-scaffold-connector"></div>
+                      <div class="graph-scaffold-column graph-scaffold-hop">
+                        <span class="graph-column-label">ORDERED HOPS</span>
+                        <span class="graph-scaffold-slot">TTL responder slots</span>
+                        <span class="graph-scaffold-caption">one or more responders at a TTL</span>
+                      </div>
+                      <div class="graph-scaffold-connector graph-scaffold-gap"></div>
+                      <div class="graph-scaffold-column graph-scaffold-range">
+                        <span class="graph-column-label">UNOBSERVABLE RANGE</span>
+                        <span class="graph-scaffold-slot">No response interval</span>
+                        <span class="graph-scaffold-caption">not a packet-loss claim</span>
+                      </div>
+                      <div class="graph-scaffold-connector"></div>
+                      <div class="graph-scaffold-column graph-scaffold-destination">
+                        <span class="graph-column-label">DESTINATION</span>
+                        <span class="graph-scaffold-slot">Confirmation slot</span>
+                        <span class="graph-scaffold-caption">reachability and port state</span>
+                      </div>
+                    </div>
+                    <div class="graph-scaffold-guide graph-guide-bottom">
+                      <span>canonical ordering</span>
+                      <span>multiple responders remain distinct</span>
+                      <span>selection target reserved</span>
+                    </div>
+                  </div>
+                  <div class="path-graph-reservation">
+                    <span class="reservation-mark" aria-hidden="true">↳</span>
+                    <div>
+                      <strong>Node selection → Evidence inspector</strong>
+                      <p>Future canonical graph nodes will focus their retained evidence here. This shell intentionally contains no reconstructed or illustrative path data.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="path-graph-footer">
+                <div class="path-legend" aria-label="Path legend">
+                  <span><i class="legend-dot observed"></i>Observed responder</span>
+                  <span><i class="legend-dot inferred"></i>Unobservable range</span>
+                  <span><i class="legend-dot failed"></i>Failed observation</span>
+                </div>
+                <span class="path-overflow-hint">Wide paths scroll horizontally</span>
+              </div>
+              <div class="path-mobile-fallback">
+                <strong>Narrow-screen fallback:</strong> Table view keeps the full path details readable on small screens.
+                <button class="inline-path-action" type="button" data-path-view="table">Open Table view</button>
+              </div>
+            </div>
+
+            <div id="path-table-view" class="path-view path-table-view" role="tabpanel" aria-labelledby="path-table-tab" hidden>
+              <p class="section-note path-table-note">Canonical path observations remain available as rows. A missing TTL response is unobservable evidence, not a packet-loss claim.</p>
+              <div id="paths" class="path-list"></div>
+              <div id="path-empty" class="empty-state" hidden>No structured path observation is available in this report.</div>
+            </div>
           </section>
 
           <section class="panel section-panel">
@@ -220,7 +319,7 @@
                 <h2 id="evidence-heading">Structured evidence</h2>
               </div>
             </div>
-            <p class="section-note">Select a path element or finding to focus its evidence. Raw evidence remains available in the inspector.</p>
+            <p class="section-note">Select a path row or finding to focus its evidence. Future graph-node selection will use this same inspector; Raw evidence remains available here.</p>
             <div id="evidence" class="evidence-list"></div>
           </section>
 
