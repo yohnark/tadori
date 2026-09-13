@@ -109,6 +109,49 @@ func RenderHuman(report model.DiagnosticReport) string {
 		out.WriteString("  (none)\n")
 	}
 
+	out.WriteString("Path:\n")
+	out.WriteString("  note: observed responders and inferred segments are not exact physical topology\n")
+	pathCount := 0
+	for _, probe := range report.Probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind != model.EvidenceKindPathObservation {
+				continue
+			}
+			observation, err := model.DecodePathObservation(evidence)
+			if err != nil {
+				continue
+			}
+			pathCount++
+			fmt.Fprintf(&out, "  - protocol=%s destination=%s port_aware=%t destination_reached=%t\n",
+				observation.Protocol,
+				formatPathDestination(observation.Destination, observation.DestinationPort),
+				observation.PortAware,
+				observation.DestinationReached,
+			)
+			for _, hop := range observation.Hops {
+				fmt.Fprintf(&out, "    ttl=%d state=%s", hop.TTL, hop.State)
+				if len(hop.Responders) > 0 {
+					responders := make([]string, 0, len(hop.Responders))
+					for _, responder := range hop.Responders {
+						value := responder.Address
+						if responder.Response != "" {
+							value += ":" + responder.Response
+						}
+						responders = append(responders, value)
+					}
+					fmt.Fprintf(&out, " responders=%s", strings.Join(responders, ","))
+				}
+				out.WriteByte('\n')
+			}
+			for _, segment := range observation.Segments {
+				fmt.Fprintf(&out, "    segment=%s ttl=%d-%d\n", segment.Kind, segment.FromTTL, segment.ToTTL)
+			}
+		}
+	}
+	if pathCount == 0 {
+		out.WriteString("  (none)\n")
+	}
+
 	out.WriteString("Findings:\n")
 	if len(report.Findings) == 0 {
 		out.WriteString("  (none)\n")
@@ -177,6 +220,23 @@ func formatTarget(target model.Target) string {
 		return host
 	}
 	return "(unspecified)"
+}
+
+func formatPathDestination(host string, port uint16) string {
+	if host == "" {
+		return "(unspecified)"
+	}
+	if port == 0 {
+		return host
+	}
+	return netJoinHostPort(host, port)
+}
+
+func netJoinHostPort(host string, port uint16) string {
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+	return fmt.Sprintf("%s:%d", host, port)
 }
 
 func formatTiming(timing model.Timing) string {

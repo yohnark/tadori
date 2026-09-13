@@ -85,6 +85,8 @@ const (
 	FailureReasonHTTPFailure                  FailureReason = "http_failure"
 	FailureReasonHTTPStatusCode               FailureReason = "http_status_code"
 	FailureReasonICMPFailure                  FailureReason = "icmp_failure"
+	FailureReasonPathObservation              FailureReason = "path_observation_failure"
+	FailureReasonPathCancellation             FailureReason = "path_cancellation"
 )
 
 // FaultDomain identifies the component or boundary most closely associated
@@ -146,6 +148,7 @@ const (
 	EvidenceKindTLSHandshake        EvidenceKind = "tls_handshake"
 	EvidenceKindCertificate         EvidenceKind = "certificate"
 	EvidenceKindHTTPResponse        EvidenceKind = "http_response"
+	EvidenceKindPathObservation     EvidenceKind = "path_observation"
 	EvidenceKindProxyConfiguration  EvidenceKind = "proxy_configuration"
 	EvidenceKindWinHTTPProxy        EvidenceKind = "winhttp_proxy"
 	EvidenceKindWinINETProxy        EvidenceKind = "wininet_proxy"
