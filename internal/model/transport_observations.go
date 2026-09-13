@@ -125,43 +125,117 @@ type SecurityObservation struct {
 	Conflicts               []ObservationConflict       `json:"conflicts,omitempty"`
 }
 
-// ApplicationObservation is the canonical projection of HTTP response and
-// request-failure evidence.  ResponseReceived is deliberately separate from
-// Result so status failures remain successful transport/application
-// observations rather than being confused with client-side failures.
+// ApplicationObservation is the canonical projection of application response
+// and request-failure evidence. ResponseReceived is deliberately separate
+// from Result so protocol responses such as DNS REFUSED remain distinguishable
+// from client-side transport failures. HTTP fields remain populated for HTTP;
+// DNS service details use DNS.
 type ApplicationObservation struct {
-	Applicability     ObservationApplicability  `json:"applicability"`
-	RequestAttempted  bool                      `json:"request_attempted"`
-	ResponseReceived  bool                      `json:"response_received"`
-	HTTPVersion       string                    `json:"http_version,omitempty"`
-	StatusCode        int                       `json:"status_code,omitempty"`
-	Status            string                    `json:"status,omitempty"`
-	Result            HTTPResult                `json:"result"`
-	Timing            Timing                    `json:"timing"`
-	RequestedResource string                    `json:"requested_resource,omitempty"`
-	EndpointUsed      *Endpoint                 `json:"endpoint_used,omitempty"`
-	URL               string                    `json:"url,omitempty"`
-	Redirects         []HTTPRedirectObservation `json:"redirects,omitempty"`
-	FailureReason     FailureReason             `json:"failure_reason"`
-	FaultDomain       FaultDomain               `json:"fault_domain"`
-	Provenance        []string                  `json:"provenance,omitempty"`
-	Certainty         ObservationCertainty      `json:"certainty"`
-	ProbeNames        []string                  `json:"probe_names,omitempty"`
-	EvidenceIDs       []string                  `json:"evidence_ids,omitempty"`
-	Limitations       []string                  `json:"limitations,omitempty"`
-	Conflicts         []ObservationConflict     `json:"conflicts,omitempty"`
+	Applicability     ObservationApplicability   `json:"applicability"`
+	RequestAttempted  bool                       `json:"request_attempted"`
+	ResponseReceived  bool                       `json:"response_received"`
+	HTTPVersion       string                     `json:"http_version,omitempty"`
+	StatusCode        int                        `json:"status_code,omitempty"`
+	Status            string                     `json:"status,omitempty"`
+	Result            ApplicationResult          `json:"result"`
+	Timing            Timing                     `json:"timing"`
+	RequestedResource string                     `json:"requested_resource,omitempty"`
+	EndpointUsed      *Endpoint                  `json:"endpoint_used,omitempty"`
+	URL               string                     `json:"url,omitempty"`
+	Redirects         []HTTPRedirectObservation  `json:"redirects,omitempty"`
+	DNS               *DNSApplicationObservation `json:"dns,omitempty"`
+	FailureReason     FailureReason              `json:"failure_reason"`
+	FaultDomain       FaultDomain                `json:"fault_domain"`
+	Provenance        []string                   `json:"provenance,omitempty"`
+	Certainty         ObservationCertainty       `json:"certainty"`
+	ProbeNames        []string                   `json:"probe_names,omitempty"`
+	EvidenceIDs       []string                   `json:"evidence_ids,omitempty"`
+	Limitations       []string                   `json:"limitations,omitempty"`
+	Conflicts         []ObservationConflict      `json:"conflicts,omitempty"`
 }
 
-type HTTPResult string
+// ApplicationResult is shared by application protocols. HTTPResult remains a
+// type alias for source compatibility with the #54 contract.
+type ApplicationResult string
+
+type HTTPResult = ApplicationResult
 
 const (
-	HTTPResultUnknown        HTTPResult = "unknown"
-	HTTPResultSuccess        HTTPResult = "success"
-	HTTPResultStatusFailure  HTTPResult = "status_failure"
-	HTTPResultRequestFailure HTTPResult = "request_failure"
-	HTTPResultNotAttempted   HTTPResult = "not_attempted"
-	HTTPResultUnsupported    HTTPResult = "unsupported"
+	HTTPResultUnknown        ApplicationResult = "unknown"
+	HTTPResultSuccess        ApplicationResult = "success"
+	HTTPResultStatusFailure  ApplicationResult = "status_failure"
+	HTTPResultRequestFailure ApplicationResult = "request_failure"
+	HTTPResultNotAttempted   ApplicationResult = "not_attempted"
+	HTTPResultUnsupported    ApplicationResult = "unsupported"
+	HTTPResultPartial        ApplicationResult = "partial"
 )
+
+// DNSApplicationResult summarizes the two independent DNS service lanes.
+// Partial is an intentional transport divergence, not proof that the
+// destination service is unavailable.
+type DNSApplicationResult string
+
+const (
+	DNSApplicationResultUnknown      DNSApplicationResult = "unknown"
+	DNSApplicationResultSuccess      DNSApplicationResult = "success"
+	DNSApplicationResultPartial      DNSApplicationResult = "partial"
+	DNSApplicationResultFailure      DNSApplicationResult = "failure"
+	DNSApplicationResultNotAttempted DNSApplicationResult = "not_attempted"
+)
+
+// DNSApplicationTransportObservation is the normalized, metadata-only view
+// of one DNS service transport. The wire payload is intentionally absent.
+type DNSApplicationTransportObservation struct {
+	Transport        string               `json:"transport"`
+	Attempted        bool                 `json:"attempted"`
+	ResponseReceived bool                 `json:"response_received"`
+	Outcome          string               `json:"outcome"`
+	RCode            int                  `json:"rcode,omitempty"`
+	RCodeName        string               `json:"rcode_name,omitempty"`
+	TransactionID    uint16               `json:"transaction_id,omitempty"`
+	Truncated        bool                 `json:"truncated,omitempty"`
+	QueryBytes       int                  `json:"query_bytes,omitempty"`
+	ResponseBytes    int                  `json:"response_bytes,omitempty"`
+	QuestionCount    int                  `json:"question_count,omitempty"`
+	AnswerCount      int                  `json:"answer_count,omitempty"`
+	AuthorityCount   int                  `json:"authority_count,omitempty"`
+	AdditionalCount  int                  `json:"additional_count,omitempty"`
+	Attempts         int                  `json:"attempts,omitempty"`
+	EndpointUsed     *Endpoint            `json:"endpoint_used,omitempty"`
+	Fallback         bool                 `json:"fallback,omitempty"`
+	FallbackReason   string               `json:"fallback_reason,omitempty"`
+	ErrorKind        string               `json:"error_kind,omitempty"`
+	Timing           Timing               `json:"timing"`
+	FailureReason    FailureReason        `json:"failure_reason"`
+	FaultDomain      FaultDomain          `json:"fault_domain"`
+	Provenance       []string             `json:"provenance,omitempty"`
+	Certainty        ObservationCertainty `json:"certainty"`
+	ProbeNames       []string             `json:"probe_names,omitempty"`
+	EvidenceIDs      []string             `json:"evidence_ids,omitempty"`
+	Limitations      []string             `json:"limitations,omitempty"`
+}
+
+// DNSApplicationObservation is the canonical DNS service projection. UDP
+// and TCP are retained as separate lanes even when they agree.
+type DNSApplicationObservation struct {
+	RequestedEndpoint string                             `json:"requested_endpoint,omitempty"`
+	QueryName         string                             `json:"query_name"`
+	QueryType         string                             `json:"query_type"`
+	Result            DNSApplicationResult               `json:"result"`
+	UDP               DNSApplicationTransportObservation `json:"udp"`
+	TCP               DNSApplicationTransportObservation `json:"tcp"`
+	Divergence        bool                               `json:"divergence,omitempty"`
+	RequestAttempted  bool                               `json:"request_attempted"`
+	ResponseReceived  bool                               `json:"response_received"`
+	Timing            Timing                             `json:"timing"`
+	FailureReason     FailureReason                      `json:"failure_reason"`
+	FaultDomain       FaultDomain                        `json:"fault_domain"`
+	Provenance        []string                           `json:"provenance,omitempty"`
+	Certainty         ObservationCertainty               `json:"certainty"`
+	ProbeNames        []string                           `json:"probe_names,omitempty"`
+	EvidenceIDs       []string                           `json:"evidence_ids,omitempty"`
+	Limitations       []string                           `json:"limitations,omitempty"`
+}
 
 type HTTPRedirectObservation struct {
 	URL        string `json:"url"`
@@ -224,6 +298,28 @@ func NormalizeApplicationObservation(value ApplicationObservation) ApplicationOb
 	value.Limitations = append([]string(nil), value.Limitations...)
 	value.Conflicts = cloneObservationConflicts(value.Conflicts)
 	value.Redirects = append([]HTTPRedirectObservation(nil), value.Redirects...)
+	if value.EndpointUsed != nil {
+		endpoint := cloneEndpoint(*value.EndpointUsed)
+		value.EndpointUsed = &endpoint
+	}
+	if value.DNS != nil {
+		dns := *value.DNS
+		dns.Provenance = append([]string(nil), dns.Provenance...)
+		dns.ProbeNames = append([]string(nil), dns.ProbeNames...)
+		dns.EvidenceIDs = append([]string(nil), dns.EvidenceIDs...)
+		dns.Limitations = append([]string(nil), dns.Limitations...)
+		dns.UDP = normalizeDNSApplicationTransportObservation(dns.UDP)
+		dns.TCP = normalizeDNSApplicationTransportObservation(dns.TCP)
+		value.DNS = &dns
+	}
+	return value
+}
+
+func normalizeDNSApplicationTransportObservation(value DNSApplicationTransportObservation) DNSApplicationTransportObservation {
+	value.Provenance = append([]string(nil), value.Provenance...)
+	value.ProbeNames = append([]string(nil), value.ProbeNames...)
+	value.EvidenceIDs = append([]string(nil), value.EvidenceIDs...)
+	value.Limitations = append([]string(nil), value.Limitations...)
 	if value.EndpointUsed != nil {
 		endpoint := cloneEndpoint(*value.EndpointUsed)
 		value.EndpointUsed = &endpoint

@@ -244,6 +244,11 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 			}},
 		)
 	}
+	if target.Service.ID == model.ServiceProfileDNS || target.ApplicationProtocol == model.ApplicationProtocolDNS {
+		jobs = append(jobs, job{name: dns.ServiceProbeName, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
+			return dns.NewDNSServiceProbe(dns.WithServiceTimeout(timeout)).Run(runCtx, execution)
+		}})
+	}
 
 	results := make([]model.ProbeResult, len(jobs))
 
@@ -651,7 +656,7 @@ func enrichTargetEndpoints(target model.Target, results []model.ProbeResult) mod
 	}
 
 	for _, result := range results {
-		if result.Name != "tcp" {
+		if result.Name != "tcp" && result.Name != dns.ServiceProbeName {
 			continue
 		}
 		if result.Target.CandidateAttempts != nil {

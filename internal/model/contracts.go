@@ -140,6 +140,7 @@ const (
 	EvidenceKindGatewayReachability EvidenceKind = "gateway_reachability"
 	EvidenceKindDNSConfiguration    EvidenceKind = "dns_configuration"
 	EvidenceKindDNSResolution       EvidenceKind = "dns_resolution"
+	EvidenceKindDNSService          EvidenceKind = "dns_service"
 	EvidenceKindTCPConnection       EvidenceKind = "tcp_connection"
 	EvidenceKindTLSHandshake        EvidenceKind = "tls_handshake"
 	EvidenceKindCertificate         EvidenceKind = "certificate"
