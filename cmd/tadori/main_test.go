@@ -87,6 +87,20 @@ func TestRunUsageWithNoArgs(t *testing.T) {
 	}
 }
 
+func TestRunServeRejectsNonLoopbackAddress(t *testing.T) {
+	stdout, stderr := captureFiles(t)
+	code := run([]string{"serve", "-addr", "0.0.0.0:0"}, stdout.w, stderr.w)
+	stdout.close()
+	stderr.close()
+
+	if code != 2 {
+		t.Fatalf("run() exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.read(t), "loopback") {
+		t.Errorf("expected loopback validation error, got %q", stderr.read(t))
+	}
+}
+
 type capturedFile struct {
 	w    *os.File
 	path string

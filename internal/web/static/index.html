@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tadori diagnose</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <main>
+    <h1>tadori diagnose</h1>
+    <form id="diagnose-form">
+      <label for="target">Target</label>
+      <div class="target-row">
+        <input id="target" name="target" type="url" placeholder="https://example.com" required autocomplete="url">
+        <button type="submit">Diagnose</button>
+      </div>
+    </form>
+
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <section id="report" hidden>
+      <p class="summary">Overall status: <strong id="overall-status"></strong></p>
+      <p>Target: <code id="report-target"></code></p>
+
+      <h2>Probes</h2>
+      <ol id="probes"></ol>
+
+      <h2>Findings</h2>
+      <ul id="findings"></ul>
+
+      <h2>Raw evidence</h2>
+      <div id="evidence"></div>
+
+      <h2>Canonical JSON</h2>
+      <pre id="canonical-json"></pre>
+    </section>
+  </main>
+</body>
+</html>
