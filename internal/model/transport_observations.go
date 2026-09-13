@@ -130,26 +130,28 @@ type SecurityObservation struct {
 // Result so status failures remain successful transport/application
 // observations rather than being confused with client-side failures.
 type ApplicationObservation struct {
-	Applicability     ObservationApplicability  `json:"applicability"`
-	RequestAttempted  bool                      `json:"request_attempted"`
-	ResponseReceived  bool                      `json:"response_received"`
-	HTTPVersion       string                    `json:"http_version,omitempty"`
-	StatusCode        int                       `json:"status_code,omitempty"`
-	Status            string                    `json:"status,omitempty"`
-	Result            HTTPResult                `json:"result"`
-	Timing            Timing                    `json:"timing"`
-	RequestedResource string                    `json:"requested_resource,omitempty"`
-	EndpointUsed      *Endpoint                 `json:"endpoint_used,omitempty"`
-	URL               string                    `json:"url,omitempty"`
-	Redirects         []HTTPRedirectObservation `json:"redirects,omitempty"`
-	FailureReason     FailureReason             `json:"failure_reason"`
-	FaultDomain       FaultDomain               `json:"fault_domain"`
-	Provenance        []string                  `json:"provenance,omitempty"`
-	Certainty         ObservationCertainty      `json:"certainty"`
-	ProbeNames        []string                  `json:"probe_names,omitempty"`
-	EvidenceIDs       []string                  `json:"evidence_ids,omitempty"`
-	Limitations       []string                  `json:"limitations,omitempty"`
-	Conflicts         []ObservationConflict     `json:"conflicts,omitempty"`
+	Protocol          ApplicationProtocol        `json:"protocol,omitempty"`
+	Applicability     ObservationApplicability   `json:"applicability"`
+	RequestAttempted  bool                       `json:"request_attempted"`
+	ResponseReceived  bool                       `json:"response_received"`
+	HTTPVersion       string                     `json:"http_version,omitempty"`
+	StatusCode        int                        `json:"status_code,omitempty"`
+	Status            string                     `json:"status,omitempty"`
+	Result            HTTPResult                 `json:"result"`
+	Timing            Timing                     `json:"timing"`
+	RequestedResource string                     `json:"requested_resource,omitempty"`
+	EndpointUsed      *Endpoint                  `json:"endpoint_used,omitempty"`
+	URL               string                     `json:"url,omitempty"`
+	Redirects         []HTTPRedirectObservation  `json:"redirects,omitempty"`
+	FailureReason     FailureReason              `json:"failure_reason"`
+	FaultDomain       FaultDomain                `json:"fault_domain"`
+	Provenance        []string                   `json:"provenance,omitempty"`
+	Certainty         ObservationCertainty       `json:"certainty"`
+	ProbeNames        []string                   `json:"probe_names,omitempty"`
+	EvidenceIDs       []string                   `json:"evidence_ids,omitempty"`
+	Limitations       []string                   `json:"limitations,omitempty"`
+	Conflicts         []ObservationConflict      `json:"conflicts,omitempty"`
+	SMB               *SMBApplicationObservation `json:"smb,omitempty"`
 }
 
 type HTTPResult string
@@ -227,6 +229,11 @@ func NormalizeApplicationObservation(value ApplicationObservation) ApplicationOb
 	if value.EndpointUsed != nil {
 		endpoint := cloneEndpoint(*value.EndpointUsed)
 		value.EndpointUsed = &endpoint
+	}
+	if value.SMB != nil {
+		smb := *value.SMB
+		smb.Capabilities = append([]string(nil), smb.Capabilities...)
+		value.SMB = &smb
 	}
 	return value
 }
