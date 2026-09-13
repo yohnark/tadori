@@ -55,6 +55,7 @@ func TestRunAgainstLocalFixture(t *testing.T) {
 		"gateway_reachability": false,
 		"proxy_discovery":      false,
 		"tcp":                  false,
+		"path":                 false,
 		"tls":                  false,
 		"http":                 false,
 	}
@@ -122,8 +123,54 @@ func TestRunPreservesPartialResultsOnUnreachableTarget(t *testing.T) {
 		t.Errorf("interface_state probe status = %s, want passed even though HTTP failed", interfaceResult.Status)
 	}
 
-	if len(got.Probes) != 10 {
-		t.Errorf("len(Probes) = %d, want 10 even with a failing probe", len(got.Probes))
+	if len(got.Probes) != 11 {
+		t.Errorf("len(Probes) = %d, want 11 even with a failing probe", len(got.Probes))
+	}
+}
+
+func TestRunHostPortTargetUsesTCPEndpointAndSkipsURLLanes(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	port := uint16(listener.Addr().(*net.TCPAddr).Port)
+	target, err := ParseTarget("127.0.0.1:" + strconv.Itoa(int(port)))
+	if err != nil {
+		t.Fatalf("ParseTarget: %v", err)
+	}
+	if target.URL != "" || target.Host != "127.0.0.1" || target.Port != port {
+		t.Fatalf("host:port target = %#v", target)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got := Run(ctx, target, Options{ProbeTimeout: time.Second})
+	if got.Status != model.ReportStatusComplete {
+		t.Fatalf("report status = %s, want complete from TCP endpoint evidence", got.Status)
+	}
+	if tcpResult := findProbe(t, got.Probes, "tcp"); tcpResult.Status != model.ProbeStatusPassed {
+		t.Fatalf("TCP result = %#v, want passed", tcpResult)
+	}
+	for _, name := range []string{"tls", "http"} {
+		result := findProbe(t, got.Probes, name)
+		if result.Status != model.ProbeStatusSkipped {
+			t.Errorf("%s status = %s, want skipped for host:port target", name, result.Status)
+		}
+	}
+	pathResult := findProbe(t, got.Probes, "path")
+	if len(pathResult.Evidence) == 0 {
+		t.Fatal("host:port run did not retain path evidence")
 	}
 }
 

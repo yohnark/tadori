@@ -43,7 +43,7 @@ func run(args []string, stdout, stderr *os.File) int {
 }
 
 func printUsage(w *os.File) {
-	fmt.Fprintln(w, "usage: tadori diagnose <url> [--json]")
+	fmt.Fprintln(w, "usage: tadori diagnose <url|host:port> [--json]")
 	fmt.Fprintln(w, "       tadori serve [-addr 127.0.0.1:8080]")
 }
 
@@ -119,7 +119,7 @@ func runDiagnose(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 	if len(positional) != 1 {
-		fmt.Fprintln(stderr, "usage: tadori diagnose <url> [--json]")
+		printUsage(stderr)
 		return 2
 	}
 

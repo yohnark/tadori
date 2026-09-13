@@ -14,6 +14,7 @@ import (
 	"github.com/yohnark/tadori/internal/probe/dns"
 	"github.com/yohnark/tadori/internal/probe/http"
 	"github.com/yohnark/tadori/internal/probe/interfacecfg"
+	pathprobe "github.com/yohnark/tadori/internal/probe/path"
 	"github.com/yohnark/tadori/internal/probe/proxy"
 	"github.com/yohnark/tadori/internal/probe/route"
 	"github.com/yohnark/tadori/internal/probe/tcp"
@@ -124,12 +125,31 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration) 
 		{name: "tcp", run: func(runCtx context.Context) model.ProbeResult {
 			return tcp.New(timeout).Run(runCtx, execution)
 		}},
-		{name: "tls", run: func(runCtx context.Context) model.ProbeResult {
-			return tls.New(tls.Config{}).Run(runCtx, execution)
+		{name: pathprobe.PathProbeName, run: func(runCtx context.Context) model.ProbeResult {
+			return pathprobe.New(pathprobe.Config{Timeout: timeout}).Run(runCtx, execution)
 		}},
-		{name: "http", run: func(runCtx context.Context) model.ProbeResult {
-			return http.New().Run(runCtx, execution)
-		}},
+	}
+	if target.URL == "" {
+		// A host:port target has no URL semantics. Preserve explicit skipped
+		// lanes in the report so consumers can distinguish them from an
+		// attempted TLS/HTTP failure.
+		jobs = append(jobs,
+			job{name: "tls", run: func(runCtx context.Context) model.ProbeResult {
+				return skippedURLProbe(runCtx, target, "tls", model.LayerTLS, model.FaultDomainTLS)
+			}},
+			job{name: "http", run: func(runCtx context.Context) model.ProbeResult {
+				return skippedURLProbe(runCtx, target, "http", model.LayerHTTP, model.FaultDomainHTTP)
+			}},
+		)
+	} else {
+		jobs = append(jobs,
+			job{name: "tls", run: func(runCtx context.Context) model.ProbeResult {
+				return tls.New(tls.Config{}).Run(runCtx, execution)
+			}},
+			job{name: "http", run: func(runCtx context.Context) model.ProbeResult {
+				return http.New().Run(runCtx, execution)
+			}},
+		)
 	}
 
 	results := make([]model.ProbeResult, len(jobs))
@@ -215,13 +235,14 @@ func reportStatus(results []model.ProbeResult) model.ReportStatus {
 		return model.ReportStatusUnknown
 	}
 
-	// A successful HTTP observation establishes the end-to-end result. In
-	// particular, a successful response must not be downgraded because a
-	// weaker supporting probe could not run. Only a canonical successful
+	// A successful HTTP or TCP observation establishes the requested endpoint
+	// boundary. TCP is included because host:port targets intentionally have no
+	// HTTP semantics, and a destination TCP success proves reachability even
+	// when path hops are unobservable. Only a canonical successful
 	// interpretation has this early-dominance rule; an actual failure still
 	// participates in the incomplete-evidence check below.
 	for _, result := range results {
-		if result.Interpretation.Layer == model.LayerHTTP &&
+		if (result.Interpretation.Layer == model.LayerHTTP || result.Interpretation.Layer == model.LayerTCP) &&
 			result.Status == model.ProbeStatusPassed &&
 			result.Interpretation.FailureReason == model.FailureReasonNone {
 			return model.ReportStatusComplete
@@ -245,9 +266,30 @@ func nonFatalUnavailable(result model.ProbeResult) bool {
 		return false
 	}
 	switch result.Interpretation.Layer {
-	case model.LayerGateway, model.LayerICMP, model.LayerProxy:
+	case model.LayerGateway, model.LayerICMP, model.LayerNetwork, model.LayerProxy:
 		return true
+	case model.LayerTLS, model.LayerHTTP:
+		return result.Status == model.ProbeStatusSkipped
 	default:
 		return false
+	}
+}
+
+func skippedURLProbe(ctx context.Context, target model.Target, name string, layer model.Layer, domain model.FaultDomain) model.ProbeResult {
+	started := time.Now().UTC()
+	completed := started
+	if ctx != nil && ctx.Err() != nil {
+		completed = time.Now().UTC()
+	}
+	return model.ProbeResult{
+		Name:   name,
+		Target: target,
+		Status: model.ProbeStatusSkipped,
+		Timing: model.Timing{StartedAt: &started, CompletedAt: &completed, DurationMS: completed.Sub(started).Milliseconds()},
+		Interpretation: model.ProbeInterpretation{
+			FailureReason: model.FailureReasonUnsupported,
+			Layer:         layer,
+			FaultDomain:   domain,
+		},
 	}
 }

@@ -371,3 +371,40 @@ func TestWriteHumanAndTerminalAlias(t *testing.T) {
 		t.Fatalf("WriteTerminal differs from RenderHuman")
 	}
 }
+
+func TestRenderHumanIncludesStructuredPathObservation(t *testing.T) {
+	raw, err := json.Marshal(model.PathObservation{
+		Status:             model.PathObservationStatusObserved,
+		Protocol:           model.PathProtocolTCP,
+		Destination:        "2001:db8::10",
+		DestinationPort:    8443,
+		PortAware:          true,
+		MaxTTL:             3,
+		AttemptsPerTTL:     1,
+		Hops:               []model.PathHop{{TTL: 1, State: model.PathHopStateUnobservable}, {TTL: 2, State: model.PathHopStateObserved, Responders: []model.PathResponder{{Address: "2001:db8::1", Response: "tcp_time_exceeded"}}}},
+		Segments:           []model.PathSegment{{Kind: model.PathSegmentUnobservable, FromTTL: 1, ToTTL: 1}, {Kind: model.PathSegmentObservedResponder, FromTTL: 2, ToTTL: 2}},
+		DestinationReached: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := RenderHuman(model.DiagnosticReport{Probes: []model.ProbeResult{{
+		Name: "path",
+		Evidence: []model.Evidence{{
+			ID:   "path/tcp",
+			Kind: model.EvidenceKindPathObservation,
+			Raw:  raw,
+		}},
+	}}})
+	for _, want := range []string{
+		"Path:",
+		"protocol=tcp destination=[2001:db8::10]:8443 port_aware=true destination_reached=false",
+		"ttl=1 state=unobservable",
+		"ttl=2 state=observed_responder responders=2001:db8::1:tcp_time_exceeded",
+		"segment=unobservable ttl=1-1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("path output missing %q:\n%s", want, got)
+		}
+	}
+}

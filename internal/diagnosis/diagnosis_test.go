@@ -1,6 +1,7 @@
 package diagnosis
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -284,5 +285,121 @@ func TestDiagnoseUsesCanonicalReasonAndStableReferences(t *testing.T) {
 
 	if got := DiagnoseReport(model.DiagnosticReport{Probes: probes}); len(got.Findings) != 1 || got.Findings[0].FailureReason != model.FailureReasonTCPConnectionReset {
 		t.Fatalf("report application failed: %#v", got)
+	}
+}
+
+func TestDiagnoseCorrelatesTCPPathDestinationSuccessWithRequestedPort(t *testing.T) {
+	raw, err := json.Marshal(model.PathObservation{
+		Status:                  model.PathObservationStatusObserved,
+		Protocol:                model.PathProtocolTCP,
+		Destination:             "198.51.100.10",
+		DestinationPort:         8443,
+		PortAware:               true,
+		MaxTTL:                  3,
+		AttemptsPerTTL:          1,
+		Hops:                    []model.PathHop{{TTL: 1, State: model.PathHopStateUnobservable}, {TTL: 2, State: model.PathHopStateUnobservable}, {TTL: 3, State: model.PathHopStateObserved, Responders: []model.PathResponder{{Address: "198.51.100.10", DestinationReached: true}}}},
+		Segments:                []model.PathSegment{{Kind: model.PathSegmentUnobservable, FromTTL: 1, ToTTL: 2}},
+		DestinationReached:      true,
+		DestinationTCPConnected: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pathResult := model.ProbeResult{
+		Name:   "path",
+		Target: model.Target{Host: "198.51.100.10", Port: 8443},
+		Status: model.ProbeStatusPassed,
+		Evidence: []model.Evidence{{
+			ID:   "path/tcp",
+			Kind: model.EvidenceKindPathObservation,
+			Raw:  raw,
+		}},
+		Interpretation: model.ProbeInterpretation{
+			FailureReason: model.FailureReasonNone,
+			Layer:         model.LayerNetwork,
+			FaultDomain:   model.FaultDomainNetwork,
+		},
+	}
+	got := Diagnose([]model.ProbeResult{
+		failed("tcp", model.FailureReasonTCPTimeout, model.LayerTCP, model.FaultDomainTransport, "tcp-1"),
+		pathResult,
+	})
+	if got != nil {
+		t.Fatalf("TCP path destination success was not used to contradict timeout: %#v", got)
+	}
+
+	// A response for another port cannot be correlated to this endpoint.
+	otherPort := pathResult
+	otherPort.Evidence = append([]model.Evidence(nil), pathResult.Evidence...)
+	otherObservation := model.PathObservation{}
+	if err := json.Unmarshal(raw, &otherObservation); err != nil {
+		t.Fatal(err)
+	}
+	otherObservation.DestinationPort = 9443
+	otherRaw, err := json.Marshal(otherObservation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPort.Evidence[0].Raw = otherRaw
+	got = Diagnose([]model.ProbeResult{
+		failed("tcp", model.FailureReasonTCPTimeout, model.LayerTCP, model.FaultDomainTransport, "tcp-1"),
+		otherPort,
+	})
+	if len(got) != 1 || got[0].FailureReason != model.FailureReasonTCPTimeout {
+		t.Fatalf("different TCP destination port was incorrectly correlated: %#v", got)
+	}
+}
+
+func TestDiagnosePathICMPFailureNeverBecomesApplicationFailure(t *testing.T) {
+	got := Diagnose([]model.ProbeResult{failed("path", model.FailureReasonICMPFailure, model.LayerICMP, model.FaultDomainICMP, "path/icmp")})
+	if got != nil {
+		t.Fatalf("ICMP path failure became a connectivity finding: %#v", got)
+	}
+}
+
+func TestDiagnoseKeepsTCPRefusalFindingDespitePathDestinationResponse(t *testing.T) {
+	raw, err := json.Marshal(model.PathObservation{
+		Status:                  model.PathObservationStatusObserved,
+		Protocol:                model.PathProtocolTCP,
+		Destination:             "198.51.100.10",
+		DestinationPort:         8443,
+		PortAware:               true,
+		MaxTTL:                  1,
+		AttemptsPerTTL:          1,
+		Hops:                    []model.PathHop{{TTL: 1, State: model.PathHopStateObserved, Responders: []model.PathResponder{{Address: "198.51.100.10", Response: "tcp_refused", DestinationReached: true}}}},
+		Segments:                []model.PathSegment{{Kind: model.PathSegmentObservedResponder, FromTTL: 1, ToTTL: 1}},
+		DestinationReached:      true,
+		DestinationTCPConnected: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathResult := model.ProbeResult{
+		Name:     "path",
+		Target:   model.Target{Host: "198.51.100.10", Port: 8443},
+		Status:   model.ProbeStatusPassed,
+		Evidence: []model.Evidence{{ID: "path/tcp", Kind: model.EvidenceKindPathObservation, Raw: raw}},
+		Interpretation: model.ProbeInterpretation{
+			FailureReason: model.FailureReasonNone,
+			Layer:         model.LayerNetwork,
+			FaultDomain:   model.FaultDomainNetwork,
+		},
+	}
+	got := Diagnose([]model.ProbeResult{failed("tcp", model.FailureReasonTCPConnectionRefused, model.LayerTCP, model.FaultDomainTransport), pathResult})
+	if len(got) != 1 || got[0].FailureReason != model.FailureReasonTCPConnectionRefused {
+		t.Fatalf("TCP refusal was incorrectly suppressed by path response: %#v", got)
+	}
+}
+
+func TestDiagnoseDoesNotCrossSuppressDifferentTCPPorts(t *testing.T) {
+	failedPort := failed("tcp-22", model.FailureReasonTCPTimeout, model.LayerTCP, model.FaultDomainTransport)
+	failedPort.Target = model.Target{Host: "db.example", Port: 22}
+	successPort := passed("tcp-443", model.LayerTCP)
+	successPort.Target = model.Target{Host: "db.example", Port: 443}
+
+	got := Diagnose([]model.ProbeResult{failedPort, successPort})
+	if len(got) != 1 || got[0].FailureReason != model.FailureReasonTCPTimeout {
+		t.Fatalf("TCP success on another port suppressed the failure: %#v", got)
 	}
 }

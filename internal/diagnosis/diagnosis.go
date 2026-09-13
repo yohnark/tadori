@@ -1,7 +1,9 @@
 package diagnosis
 
 import (
+	"net/netip"
 	"sort"
+	"strings"
 
 	"github.com/yohnark/tadori/internal/model"
 )
@@ -13,7 +15,9 @@ import (
 //
 // A result's normalized FailureReason is authoritative. Status and Layer are
 // used to recognize successful observations and to resolve contradictory
-// observations; raw evidence is intentionally never decoded.
+// observations. Path evidence is the one intentionally structured exception:
+// its protocol/port fields are decoded so a TCP destination response can be
+// correlated with the requested endpoint without promoting ICMP evidence.
 func Diagnose(probes []model.ProbeResult) []model.DiagnosticFinding {
 	observations := normalize(probes)
 	if len(observations) == 0 {
@@ -28,10 +32,19 @@ func Diagnose(probes []model.ProbeResult) []model.DiagnosticFinding {
 	var builtIn *builtInCandidate
 	for _, rule := range rules {
 		matches := matching(observations, rule.reason)
-		if len(matches) == 0 || contradicted(matches[0].reason, observations) {
+		if len(matches) == 0 {
 			continue
 		}
-		candidate := builtInCandidate{reason: rule.reason, matches: matches}
+		viable := make([]observation, 0, len(matches))
+		for _, match := range matches {
+			if !contradicted(match, observations) {
+				viable = append(viable, match)
+			}
+		}
+		if len(viable) == 0 {
+			continue
+		}
+		candidate := builtInCandidate{reason: rule.reason, matches: viable}
 		builtIn = &candidate
 		break
 	}
@@ -49,7 +62,7 @@ func Diagnose(probes []model.ProbeResult) []model.DiagnosticFinding {
 
 	// A gateway result is supporting evidence and can still be useful when no
 	// decisive layer produced a finding.
-	if gateway := matching(observations, model.FailureReasonGatewayUnreachable); len(gateway) != 0 && !contradicted(gateway[0].reason, observations) {
+	if gateway := matching(observations, model.FailureReasonGatewayUnreachable); len(gateway) != 0 && !contradicted(gateway[0], observations) {
 		return []model.DiagnosticFinding{makeFinding(model.FailureReasonGatewayUnreachable, gateway)}
 	}
 
@@ -61,7 +74,7 @@ func withGatewaySupport(finding model.DiagnosticFinding, observations []observat
 	// the gateway is necessarily the root cause. Preserve it as a second
 	// machine-readable finding when a decisive failure exists.
 	gateway := matching(observations, model.FailureReasonGatewayUnreachable)
-	if len(gateway) != 0 && !contradicted(gateway[0].reason, observations) {
+	if len(gateway) != 0 && !contradicted(gateway[0], observations) {
 		return []model.DiagnosticFinding{finding, makeFinding(model.FailureReasonGatewayUnreachable, gateway)}
 	}
 	return []model.DiagnosticFinding{finding}
@@ -153,8 +166,39 @@ func normalize(probes []model.ProbeResult) []observation {
 			}
 		}
 		observations = append(observations, observation{result: result, reason: reason})
+		observations = append(observations, pathDestinationSuccesses(result)...)
 	}
 	return observations
+}
+
+func pathDestinationSuccesses(result model.ProbeResult) []observation {
+	if result.Name == "" {
+		return nil
+	}
+	derived := make([]observation, 0)
+	for _, evidence := range result.Evidence {
+		pathObservation, err := model.DecodePathObservation(evidence)
+		if err != nil || pathObservation.Status != model.PathObservationStatusObserved || pathObservation.Protocol != model.PathProtocolTCP || !pathObservation.PortAware || !pathObservation.DestinationReached || !pathObservation.DestinationTCPConnected {
+			continue
+		}
+		if result.Target.Port == 0 || !pathObservation.MatchesTarget(result.Target) {
+			continue
+		}
+		// A TCP path response at the requested destination port is a
+		// successful transport observation even when every earlier TTL is
+		// unobservable. Keep the original path evidence as the reference.
+		synthetic := result
+		synthetic.Name = result.Name + "/tcp-destination"
+		synthetic.Status = model.ProbeStatusPassed
+		synthetic.Evidence = []model.Evidence{evidence}
+		synthetic.Interpretation = model.ProbeInterpretation{
+			FailureReason: model.FailureReasonNone,
+			Layer:         model.LayerTCP,
+			FaultDomain:   model.FaultDomainTransport,
+		}
+		derived = append(derived, observation{result: synthetic, reason: model.FailureReasonNone})
+	}
+	return derived
 }
 
 func matching(observations []observation, reason model.FailureReason) []observation {
@@ -209,7 +253,7 @@ func makeExtensionFinding(candidate observation, observations []observation) mod
 		if other.result.Interpretation.Layer == model.LayerICMP || other.result.Interpretation.FaultDomain == model.FaultDomainICMP || other.reason == model.FailureReasonICMPFailure {
 			continue
 		}
-		if other.reason == candidate.reason && other.result.Interpretation.Layer == candidate.result.Interpretation.Layer && other.result.Interpretation.FaultDomain == candidate.result.Interpretation.FaultDomain {
+		if other.reason == candidate.reason && other.result.Interpretation.Layer == candidate.result.Interpretation.Layer && other.result.Interpretation.FaultDomain == candidate.result.Interpretation.FaultDomain && targetsCorrelate(candidate.result.Target, other.result.Target, candidate.result.Interpretation.Layer) {
 			matches = append(matches, other)
 		}
 	}
@@ -265,7 +309,8 @@ func isGenericFailure(observation observation) bool {
 	}
 	switch observation.reason {
 	case "", model.FailureReasonNone, model.FailureReasonUnknown,
-		model.FailureReasonICMPFailure:
+		model.FailureReasonICMPFailure, model.FailureReasonUnsupported,
+		model.FailureReasonPathObservation, model.FailureReasonPathCancellation:
 		return false
 	}
 	for _, rule := range rules {
@@ -312,6 +357,9 @@ func layerRank(layer model.Layer) int {
 func contradictedExtension(candidate observation, observations []observation) bool {
 	for _, observation := range observations {
 		if observation.result.Status != model.ProbeStatusPassed || observation.reason != model.FailureReasonNone {
+			continue
+		}
+		if !targetsCorrelate(candidate.result.Target, observation.result.Target, candidate.result.Interpretation.Layer) {
 			continue
 		}
 		if successfulLayerContradicts(candidate.result.Interpretation.Layer, observation.result.Interpretation.Layer) {
@@ -392,13 +440,17 @@ func semantics(reason model.FailureReason) (model.Layer, model.FaultDomain) {
 	}
 }
 
-func contradicted(reason model.FailureReason, observations []observation) bool {
+func contradicted(candidate observation, observations []observation) bool {
+	reason := candidate.reason
 	// A normalized success at the same or a later boundary is stronger than a
 	// contradictory failed observation. DNS is intentionally treated as its
 	// own branch: a successful TCP connection does not prove hostname lookup
 	// succeeded, and vice versa.
 	for _, observation := range observations {
 		if observation.result.Status != model.ProbeStatusPassed || observation.reason != model.FailureReasonNone {
+			continue
+		}
+		if !targetsCorrelate(candidate.result.Target, observation.result.Target, candidate.result.Interpretation.Layer) {
 			continue
 		}
 		layer := observation.result.Interpretation.Layer
@@ -445,4 +497,31 @@ func contradicted(reason model.FailureReason, observations []observation) bool {
 		}
 	}
 	return false
+}
+
+func targetsCorrelate(left, right model.Target, layer model.Layer) bool {
+	if left.Host != "" && right.Host != "" && canonicalHost(left.Host) != canonicalHost(right.Host) {
+		return false
+	}
+	if transportEndpointLayer(layer) && left.Port != 0 && right.Port != 0 && left.Port != right.Port {
+		return false
+	}
+	return true
+}
+
+func transportEndpointLayer(layer model.Layer) bool {
+	switch layer {
+	case model.LayerTCP, model.LayerTLS, model.LayerHTTP, model.LayerDestination:
+		return true
+	default:
+		return false
+	}
+}
+
+func canonicalHost(host string) string {
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if address, err := netip.ParseAddr(host); err == nil {
+		return model.NormalizeAddr(address).String()
+	}
+	return strings.ToLower(host)
 }

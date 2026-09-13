@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -56,6 +58,42 @@ func TestRunDiagnoseHuman(t *testing.T) {
 	out := stdout.read(t)
 	if !strings.Contains(out, "Status:") || !strings.Contains(out, "Target: "+server.URL) {
 		t.Errorf("human output missing expected sections:\n%s", out)
+	}
+}
+
+func TestRunDiagnoseHostPortJSON(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	target := "127.0.0.1:" + strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	stdout, stderr := captureFiles(t)
+	code := run([]string{"diagnose", target, "--json"}, stdout.w, stderr.w)
+	stdout.close()
+	stderr.close()
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, want 0; stderr=%s", code, stderr.read(t))
+	}
+	var report model.DiagnosticReport
+	if err := json.Unmarshal([]byte(stdout.read(t)), &report); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v", err)
+	}
+	if report.Target.URL != "" || report.Target.Host != "127.0.0.1" || report.Target.Port != uint16(listener.Addr().(*net.TCPAddr).Port) {
+		t.Fatalf("host:port target was not preserved: %#v", report.Target)
+	}
+	if !strings.Contains(stdout.read(t), `"kind":"path_observation"`) {
+		t.Fatalf("JSON report did not include path evidence: %s", stdout.read(t))
 	}
 }
 
