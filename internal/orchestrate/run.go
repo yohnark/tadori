@@ -316,13 +316,22 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 					CorrelationID: sessionID + "/" + item.job.name,
 				}
 				probeTarget := target
-				result := runBounded(ctx, timeout, item.job.name, func(runCtx context.Context) model.ProbeResult {
+				result := runProbeWithDependencies(ctx, timeout, item.job.name, func(waitCtx context.Context) (model.Target, bool) {
 					if item.job.name != "dns" && item.job.name != "interface_state" && item.job.name != "dns_configuration" {
-						probeTarget = targetWithResolvedCandidates(runCtx, resolvedReady, selection, target)
+						var ready bool
+						probeTarget, ready = resolvedCandidatesForProbe(waitCtx, resolvedReady, selection, probeTarget)
+						if !ready {
+							return probeTarget, false
+						}
 						if waitsForTransportEndpoint(item.job.name) {
-							probeTarget = targetWithTransportEndpoint(runCtx, transportReady, selection, probeTarget)
+							probeTarget, ready = transportEndpointForProbe(waitCtx, transportReady, selection, probeTarget)
+							if !ready {
+								return probeTarget, false
+							}
 						}
 					}
+					return probeTarget, true
+				}, func(runCtx context.Context, probeTarget model.Target) model.ProbeResult {
 					execution := probe.ExecutionContext{Target: probeTarget, SessionID: identity.SessionID, ProbeID: identity.ProbeID, CorrelationID: identity.CorrelationID}
 					if item.job.packetType == "" {
 						return item.job.run(runCtx, execution)
@@ -479,18 +488,23 @@ func endpointForCandidate(candidate model.EndpointCandidate, port uint16, reason
 }
 
 func targetWithResolvedCandidates(ctx context.Context, ready <-chan struct{}, state *endpointSelectionState, target model.Target) model.Target {
+	target, _ = resolvedCandidatesForProbe(ctx, ready, state, target)
+	return target
+}
+
+func resolvedCandidatesForProbe(ctx context.Context, ready <-chan struct{}, state *endpointSelectionState, target model.Target) (model.Target, bool) {
 	target = model.NormalizeTarget(target)
 	if target.LiteralIP != "" {
 		candidates := target.ProbeEndpointCandidates()
 		if len(candidates) > 0 {
 			applyCandidates(&target, candidates)
 		}
-		return target
+		return target, true
 	}
 	select {
 	case <-ready:
 	case <-ctx.Done():
-		return target
+		return target, false
 	}
 	candidates := state.candidatesSnapshot()
 	if len(candidates) == 0 {
@@ -499,10 +513,15 @@ func targetWithResolvedCandidates(ctx context.Context, ready <-chan struct{}, st
 	if len(candidates) > 0 {
 		applyCandidates(&target, candidates)
 	}
-	return target
+	return target, true
 }
 
 func targetWithTransportEndpoint(ctx context.Context, ready <-chan struct{}, state *endpointSelectionState, target model.Target) model.Target {
+	target, _ = transportEndpointForProbe(ctx, ready, state, target)
+	return target
+}
+
+func transportEndpointForProbe(ctx context.Context, ready <-chan struct{}, state *endpointSelectionState, target model.Target) (model.Target, bool) {
 	select {
 	case <-ready:
 		if tested := state.testedSnapshot(); tested != nil {
@@ -511,8 +530,9 @@ func targetWithTransportEndpoint(ctx context.Context, ready <-chan struct{}, sta
 			target.SelectedEndpoint = &selected
 		}
 	case <-ctx.Done():
+		return target, false
 	}
-	return target
+	return target, true
 }
 
 func applyCandidates(target *model.Target, candidates []model.EndpointCandidate) {
@@ -626,6 +646,36 @@ func runBounded(ctx context.Context, timeout time.Duration, name string, fn func
 		}
 	}()
 	return fn(runCtx)
+}
+
+// runProbeWithDependencies waits for shared probe state under the overall
+// diagnostic context, then starts the probe's own timeout. A dependency that
+// cannot become ready before cancellation still gets a terminal result slot;
+// the downstream probe itself is not invoked with an already-spent budget.
+func runProbeWithDependencies(ctx context.Context, timeout time.Duration, name string, prepare func(context.Context) (model.Target, bool), run func(context.Context, model.Target) model.ProbeResult) model.ProbeResult {
+	target, ready := prepare(ctx)
+	return runBounded(ctx, timeout, name, func(runCtx context.Context) model.ProbeResult {
+		if !ready {
+			return dependencyWaitFailure(name, target)
+		}
+		return run(runCtx, target)
+	})
+}
+
+func dependencyWaitFailure(name string, target model.Target) model.ProbeResult {
+	started := time.Now().UTC()
+	completed := started
+	return model.ProbeResult{
+		Name:   name,
+		Target: target,
+		Status: model.ProbeStatusError,
+		Timing: model.Timing{StartedAt: &started, CompletedAt: &completed, DurationMS: 0},
+		Interpretation: model.ProbeInterpretation{
+			FailureReason: model.FailureReasonProbeExecution,
+			Layer:         model.LayerUnknown,
+			FaultDomain:   model.FaultDomainUnknown,
+		},
+	}
 }
 
 // resolvedAddress extracts the first usable address observed by the DNS
@@ -756,26 +806,47 @@ func reportStatus(results []model.ProbeResult) model.ReportStatus {
 		return model.ReportStatusUnknown
 	}
 
-	// A successful HTTP, SMB, or TCP observation establishes the requested endpoint
-	// boundary. TCP is included because host:port targets intentionally have no
-	// HTTP semantics, and a destination TCP success proves reachability even
-	// when path hops are unobservable. Only a canonical successful
-	// interpretation has this early-dominance rule; an actual failure still
-	// participates in the incomplete-evidence check below.
+	destinationEvidence := hasDestinationEvidence(results)
+
+	// Endpoint/service success is evidence about the destination, not proof
+	// that every required diagnostic lane completed. Unexpected execution
+	// errors therefore participate before the endpoint-success rule below.
+	for _, result := range results {
+		if requiredExecutionIncomplete(result, destinationEvidence) {
+			return model.ReportStatusIncomplete
+		}
+	}
+
+	return model.ReportStatusComplete
+}
+
+func hasDestinationEvidence(results []model.ProbeResult) bool {
 	for _, result := range results {
 		if (result.Interpretation.Layer == model.LayerHTTP || result.Interpretation.Layer == model.LayerSMB || result.Interpretation.Layer == model.LayerTCP || result.Interpretation.Layer == model.LayerSSH || result.Interpretation.Layer == model.LayerRDP) &&
 			result.Status == model.ProbeStatusPassed &&
 			result.Interpretation.FailureReason == model.FailureReasonNone {
-			return model.ReportStatusComplete
+			return true
 		}
 	}
+	return false
+}
 
-	for _, result := range results {
-		if (result.Status == model.ProbeStatusError || result.Status == model.ProbeStatusSkipped) && !nonFatalUnavailable(result) {
-			return model.ReportStatusIncomplete
-		}
+func requiredExecutionIncomplete(result model.ProbeResult, destinationEvidence bool) bool {
+	if nonFatalUnavailable(result) {
+		return false
 	}
-	return model.ReportStatusComplete
+	switch result.Status {
+	case model.ProbeStatusSkipped:
+		return true
+	case model.ProbeStatusError:
+		// An HTTP protocol failure is a completed negative observation. It
+		// remains compatible with destination evidence from another service
+		// lane only when another lane established the destination. Without
+		// that evidence it is an incomplete observation.
+		return result.Interpretation.FailureReason != model.FailureReasonHTTPFailure || !destinationEvidence
+	default:
+		return false
+	}
 }
 
 // nonFatalUnavailable identifies probes whose absence is expected on some

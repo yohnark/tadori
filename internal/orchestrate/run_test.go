@@ -466,6 +466,168 @@ func TestReportStatusAggregatesCanonicalProbeOutcomes(t *testing.T) {
 			t.Fatalf("report status = %s, want incomplete", got)
 		}
 	})
+
+	t.Run("service success does not mask an unexpected execution error", func(t *testing.T) {
+		got := reportStatus([]model.ProbeResult{
+			{
+				Name:   "tcp",
+				Status: model.ProbeStatusPassed,
+				Interpretation: model.ProbeInterpretation{
+					FailureReason: model.FailureReasonNone,
+					Layer:         model.LayerTCP,
+					FaultDomain:   model.FaultDomainTransport,
+				},
+			},
+			{
+				Name:   "dns_configuration",
+				Status: model.ProbeStatusError,
+				Interpretation: model.ProbeInterpretation{
+					FailureReason: model.FailureReasonProbeExecution,
+					Layer:         model.LayerDNS,
+					FaultDomain:   model.FaultDomainDNS,
+				},
+			},
+		})
+		if got != model.ReportStatusIncomplete {
+			t.Fatalf("report status = %s, want incomplete", got)
+		}
+	})
+}
+
+func TestRunProbeWithDependenciesSlowDNSThenSuccessfulTCP(t *testing.T) {
+	ready := make(chan struct{})
+	prepared := make(chan struct{})
+	invoked := make(chan error, 1)
+	timeout := 20 * time.Millisecond
+
+	done := make(chan model.ProbeResult, 1)
+	go func() {
+		done <- runProbeWithDependencies(context.Background(), timeout, "tcp", func(ctx context.Context) (model.Target, bool) {
+			close(prepared)
+			select {
+			case <-ready:
+				return model.NewTarget("slow-dns.example", 443), true
+			case <-ctx.Done():
+				return model.NewTarget("slow-dns.example", 443), false
+			}
+		}, func(ctx context.Context, _ model.Target) model.ProbeResult {
+			invoked <- ctx.Err()
+			return testPassedProbe("tcp", model.LayerTCP)
+		})
+	}()
+	<-prepared
+	time.Sleep(timeout * 2)
+	close(ready)
+
+	result := <-done
+	if err := <-invoked; err != nil {
+		t.Fatalf("TCP started with spent execution context: %v", err)
+	}
+	if result.Status != model.ProbeStatusPassed {
+		t.Fatalf("TCP result status = %s, want passed", result.Status)
+	}
+}
+
+func TestRunProbeWithDependenciesSlowTransportThenDownstreamProbe(t *testing.T) {
+	resolvedReady := make(chan struct{})
+	transportReady := make(chan struct{})
+	prepared := make(chan struct{})
+	invoked := make(chan error, 1)
+	timeout := 20 * time.Millisecond
+
+	done := make(chan model.ProbeResult, 1)
+	go func() {
+		done <- runProbeWithDependencies(context.Background(), timeout, "http", func(ctx context.Context) (model.Target, bool) {
+			close(prepared)
+			target := model.NewTarget("slow-transport.example", 443)
+			var ready bool
+			target, ready = resolvedCandidatesForProbe(ctx, resolvedReady, &endpointSelectionState{}, target)
+			if !ready {
+				return target, false
+			}
+			return transportEndpointForProbe(ctx, transportReady, &endpointSelectionState{}, target)
+		}, func(ctx context.Context, _ model.Target) model.ProbeResult {
+			invoked <- ctx.Err()
+			return testPassedProbe("http", model.LayerHTTP)
+		})
+	}()
+	close(resolvedReady)
+	<-prepared
+	time.Sleep(timeout * 2)
+	close(transportReady)
+
+	result := <-done
+	if err := <-invoked; err != nil {
+		t.Fatalf("downstream probe started with spent execution context: %v", err)
+	}
+	if result.Status != model.ProbeStatusPassed {
+		t.Fatalf("downstream result status = %s, want passed", result.Status)
+	}
+}
+
+func TestRunProbeWithDependenciesOverallDeadlineDuringWait(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	invoked := false
+
+	result := runProbeWithDependencies(ctx, time.Second, "http", func(waitCtx context.Context) (model.Target, bool) {
+		<-waitCtx.Done()
+		return model.NewTarget("deadline.example", 443), false
+	}, func(context.Context, model.Target) model.ProbeResult {
+		invoked = true
+		return testPassedProbe("http", model.LayerHTTP)
+	})
+	if invoked {
+		t.Fatal("downstream probe ran after the overall deadline")
+	}
+	if result.Status != model.ProbeStatusError || result.Interpretation.FailureReason != model.FailureReasonProbeExecution {
+		t.Fatalf("dependency deadline result = %#v", result)
+	}
+}
+
+func TestRunProbeWithDependenciesCancellationDuringWait(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	invoked := make(chan struct{})
+	done := make(chan model.ProbeResult, 1)
+
+	go func() {
+		done <- runProbeWithDependencies(ctx, time.Second, "http", func(waitCtx context.Context) (model.Target, bool) {
+			close(started)
+			<-waitCtx.Done()
+			return model.NewTarget("cancel.example", 443), false
+		}, func(context.Context, model.Target) model.ProbeResult {
+			close(invoked)
+			return testPassedProbe("http", model.LayerHTTP)
+		})
+	}()
+	<-started
+	cancel()
+
+	select {
+	case result := <-done:
+		select {
+		case <-invoked:
+			t.Fatal("downstream probe ran after cancellation")
+		default:
+		}
+		if result.Status != model.ProbeStatusError {
+			t.Fatalf("cancellation result status = %s, want error", result.Status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dependency wait did not observe cancellation")
+	}
+}
+
+func testPassedProbe(name string, layer model.Layer) model.ProbeResult {
+	return model.ProbeResult{
+		Name:   name,
+		Status: model.ProbeStatusPassed,
+		Interpretation: model.ProbeInterpretation{
+			FailureReason: model.FailureReasonNone,
+			Layer:         layer,
+		},
+	}
 }
 
 func findProbe(t *testing.T, probes []model.ProbeResult, name string) model.ProbeResult {
