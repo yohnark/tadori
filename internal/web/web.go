@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,7 +154,198 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'")
+	if admissionErr := admitRequest(r); admissionErr != nil {
+		writeError(w, admissionErr.status, admissionErr.message)
+		return
+	}
 	h.mux.ServeHTTP(w, r)
+}
+
+type requestAdmissionError struct {
+	status  int
+	message string
+}
+
+// admitRequest is the single admission policy for endpoints that can start or
+// cancel diagnostic activity. A request with no browser metadata is the
+// explicit non-browser policy: it is accepted for a literal loopback Host so
+// CLI and other local HTTP clients remain usable. Browser-signaled requests
+// must identify this server as their same-origin destination.
+func admitRequest(r *http.Request) *requestAdmissionError {
+	if !requiresRequestAdmission(r) {
+		return nil
+	}
+
+	requestAuthority, err := parseLocalAuthority(r.Host)
+	if err != nil {
+		return &requestAdmissionError{
+			status:  http.StatusForbidden,
+			message: "request Host must be a literal loopback address",
+		}
+	}
+
+	if err := validateFetchSite(r); err != nil {
+		return &requestAdmissionError{status: http.StatusForbidden, message: err.Error()}
+	}
+	if err := validateOrigin(r, requestAuthority); err != nil {
+		return &requestAdmissionError{status: http.StatusForbidden, message: err.Error()}
+	}
+	if r.Method == http.MethodPost {
+		if err := requireJSONContentType(r); err != nil {
+			return &requestAdmissionError{status: http.StatusUnsupportedMediaType, message: err.Error()}
+		}
+	}
+	return nil
+}
+
+func requiresRequestAdmission(r *http.Request) bool {
+	switch {
+	case r.Method == http.MethodPost && (r.URL.Path == "/api/diagnoses" ||
+		r.URL.Path == "/api/diagnose" || r.URL.Path == "/api/diagnose/view"):
+		return true
+	case r.Method == http.MethodDelete:
+		_, events, ok := parseDiagnosisPath(r.URL.Path)
+		return ok && !events
+	default:
+		return false
+	}
+}
+
+func validateFetchSite(r *http.Request) error {
+	values := r.Header.Values("Sec-Fetch-Site")
+	if len(values) == 0 {
+		return nil
+	}
+	if len(values) != 1 || values[0] != "same-origin" {
+		return errors.New("request fetch site is not same-origin")
+	}
+	return nil
+}
+
+func validateOrigin(r *http.Request, requestAuthority localAuthority) error {
+	values := r.Header.Values("Origin")
+	if len(values) == 0 {
+		return nil
+	}
+	if len(values) != 1 || values[0] == "" || values[0] == "null" {
+		return errors.New("request Origin is not allowed")
+	}
+
+	origin, err := url.Parse(values[0])
+	if err != nil || origin.User != nil || origin.Opaque != "" || origin.Host == "" ||
+		origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" {
+		return errors.New("request Origin is not allowed")
+	}
+	originScheme := strings.ToLower(origin.Scheme)
+	if originScheme != "http" && originScheme != "https" {
+		return errors.New("request Origin is not allowed")
+	}
+	originAuthority, err := parseLocalAuthority(origin.Host)
+	if err != nil || originAuthority.identity != requestAuthority.identity {
+		return errors.New("request Origin is not same-origin")
+	}
+
+	requestScheme := "http"
+	if r.TLS != nil {
+		requestScheme = "https"
+	}
+	if originScheme != requestScheme {
+		return errors.New("request Origin is not same-origin")
+	}
+	if effectiveOriginPort(originScheme, originAuthority.port, originAuthority.hasPort) !=
+		effectiveOriginPort(requestScheme, requestAuthority.port, requestAuthority.hasPort) {
+		return errors.New("request Origin is not same-origin")
+	}
+	return nil
+}
+
+func requireJSONContentType(r *http.Request) error {
+	values := r.Header.Values("Content-Type")
+	if len(values) != 1 {
+		return errors.New("request Content-Type must be application/json")
+	}
+	mediaType, _, err := mime.ParseMediaType(values[0])
+	if err != nil || strings.ToLower(mediaType) != "application/json" {
+		return errors.New("request Content-Type must be application/json")
+	}
+	return nil
+}
+
+func effectiveOriginPort(scheme string, port uint16, hasPort bool) uint16 {
+	if hasPort {
+		return port
+	}
+	if scheme == "https" {
+		return 443
+	}
+	return 80
+}
+
+type localAuthority struct {
+	identity string
+	port     uint16
+	hasPort  bool
+}
+
+// parseLocalAuthority parses Host or Origin authority text. Apart from the
+// conventional localhost name, hostnames are intentionally not resolved:
+// accepting only literal loopback IPs prevents a rebinding-controlled
+// hostname from being treated as local.
+func parseLocalAuthority(authority string) (localAuthority, error) {
+	if authority == "" || strings.TrimSpace(authority) != authority ||
+		strings.ContainsAny(authority, "/?#@") {
+		return localAuthority{}, errors.New("invalid authority")
+	}
+
+	host := authority
+	portText := ""
+	hasPort := false
+	if strings.HasPrefix(authority, "[") {
+		end := strings.IndexByte(authority, ']')
+		if end < 0 {
+			return localAuthority{}, errors.New("invalid authority")
+		}
+		host = authority[1:end]
+		rest := authority[end+1:]
+		if rest != "" {
+			if !strings.HasPrefix(rest, ":") || len(rest) == 1 {
+				return localAuthority{}, errors.New("invalid authority")
+			}
+			portText = rest[1:]
+			hasPort = true
+		}
+	} else {
+		switch strings.Count(authority, ":") {
+		case 0:
+		case 1:
+			parts := strings.SplitN(authority, ":", 2)
+			host, portText, hasPort = parts[0], parts[1], true
+			if portText == "" {
+				return localAuthority{}, errors.New("invalid authority")
+			}
+		default:
+			return localAuthority{}, errors.New("IPv6 authority must be bracketed")
+		}
+	}
+
+	identity := ""
+	if strings.EqualFold(host, "localhost") {
+		identity = "localhost"
+	} else {
+		addr, err := netip.ParseAddr(host)
+		if err != nil || addr.Zone() != "" || !addr.IsLoopback() {
+			return localAuthority{}, errors.New("authority is not loopback")
+		}
+		identity = addr.String()
+	}
+	if !hasPort {
+		return localAuthority{identity: identity}, nil
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil {
+		return localAuthority{}, errors.New("invalid authority port")
+	}
+	return localAuthority{identity: identity, port: uint16(port), hasPort: true}, nil
 }
 
 func (h *Handler) staticIndex(w http.ResponseWriter, r *http.Request) {
