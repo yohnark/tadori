@@ -5,12 +5,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"time"
 
 	"github.com/yohnark/tadori/internal/orchestrate"
 	"github.com/yohnark/tadori/internal/report"
+	"github.com/yohnark/tadori/internal/web"
 )
 
 // overallTimeout bounds the complete diagnostic run, independent of the
@@ -23,17 +26,76 @@ func main() {
 
 func run(args []string, stdout, stderr *os.File) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: tadori diagnose <url> [--json]")
+		printUsage(stderr)
 		return 2
 	}
 
 	switch args[0] {
 	case "diagnose":
 		return runDiagnose(args[1:], stdout, stderr)
+	case "serve":
+		return runServe(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", args[0])
-		fmt.Fprintln(stderr, "usage: tadori diagnose <url> [--json]")
+		printUsage(stderr)
 		return 2
+	}
+}
+
+func printUsage(w *os.File) {
+	fmt.Fprintln(w, "usage: tadori diagnose <url> [--json]")
+	fmt.Fprintln(w, "       tadori serve [-addr 127.0.0.1:8080]")
+}
+
+func runServe(args []string, stdout, stderr *os.File) int {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	address := fs.String("addr", "127.0.0.1:8080", "loopback address for the local UI")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "usage: tadori serve [-addr 127.0.0.1:8080]")
+		return 2
+	}
+	if err := web.ValidateLoopbackAddress(*address); err != nil {
+		fmt.Fprintf(stderr, "tadori: %v\n", err)
+		return 2
+	}
+
+	listener, err := net.Listen("tcp", *address)
+	if err != nil {
+		fmt.Fprintf(stderr, "tadori: listen on %s: %v\n", *address, err)
+		return 1
+	}
+
+	server := &http.Server{
+		Handler:           web.NewHandler(web.HandlerOptions{}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	serveErrors := make(chan error, 1)
+	go func() {
+		serveErrors <- server.Serve(listener)
+	}()
+	fmt.Fprintf(stdout, "tadori: serving diagnose UI at http://%s/\n", listener.Addr())
+
+	select {
+	case err := <-serveErrors:
+		if err == http.ErrServerClosed {
+			return 0
+		}
+		fmt.Fprintf(stderr, "tadori: serve: %v\n", err)
+		return 1
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			fmt.Fprintf(stderr, "tadori: shutdown: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 }
 

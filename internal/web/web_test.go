@@ -1,0 +1,269 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/yohnark/tadori/internal/model"
+	"github.com/yohnark/tadori/internal/orchestrate"
+)
+
+func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
+	var called bool
+	var gotTarget model.Target
+	runner := func(_ context.Context, target model.Target) model.DiagnosticReport {
+		called = true
+		gotTarget = target
+		return fixtureReport(target)
+	}
+	server := httptest.NewServer(NewHandler(HandlerOptions{Run: runner}))
+	defer server.Close()
+
+	client := server.Client()
+	page := getBody(t, client, server.URL+"/")
+	if !strings.Contains(page, "<form id=\"diagnose-form\">") {
+		t.Errorf("UI page does not contain the diagnose form")
+	}
+	if !strings.Contains(page, "Raw evidence") || !strings.Contains(page, "Canonical JSON") {
+		t.Errorf("UI page is missing required report sections")
+	}
+
+	style := getBody(t, client, server.URL+"/style.css")
+	if !strings.Contains(style, ".target-row") {
+		t.Errorf("style.css was not served")
+	}
+	script := getBody(t, client, server.URL+"/app.js")
+	if !strings.Contains(script, "raw.textContent") {
+		t.Errorf("app.js does not render raw evidence as text")
+	}
+	if strings.Contains(script, "innerHTML") {
+		t.Errorf("app.js must not render evidence with innerHTML")
+	}
+
+	targetURL := "https://example.com:8443/diagnose"
+	body := `{"target":"` + targetURL + `"}`
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/diagnose", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequest: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("POST /api/diagnose: %v", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read diagnose response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/diagnose status = %d, want 200: %s", response.StatusCode, responseBody)
+	}
+	if got := response.Header.Get("Content-Type"); got != "application/json; charset=utf-8" {
+		t.Errorf("diagnose Content-Type = %q", got)
+	}
+
+	parsedTarget, err := orchestrate.ParseTarget(targetURL)
+	if err != nil {
+		t.Fatalf("parse expected target: %v", err)
+	}
+	expected := fixtureReport(parsedTarget)
+	wantJSON, err := json.Marshal(expected)
+	if err != nil {
+		t.Fatalf("marshal expected report: %v", err)
+	}
+	if string(responseBody) != string(wantJSON) {
+		t.Fatalf("diagnose response is not canonical JSON\n got: %s\nwant: %s", responseBody, wantJSON)
+	}
+	if !called {
+		t.Fatal("diagnostic runner was not invoked")
+	}
+	if gotTarget != parsedTarget {
+		t.Errorf("runner target = %+v, want %+v", gotTarget, parsedTarget)
+	}
+}
+
+func TestDiagnoseHandlerRejectsInvalidTargetWithoutRunning(t *testing.T) {
+	called := false
+	handler := NewHandler(HandlerOptions{Run: func(context.Context, model.Target) model.DiagnosticReport {
+		called = true
+		return model.DiagnosticReport{}
+	}})
+	request := httptest.NewRequest(http.MethodPost, "/api/diagnose", strings.NewReader(`{"target":"javascript:alert(1)"}`))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", recorder.Code)
+	}
+	if called {
+		t.Fatal("runner was invoked for an invalid target")
+	}
+	if !strings.Contains(recorder.Body.String(), "unsupported diagnose target scheme") {
+		t.Errorf("error response = %q", recorder.Body.String())
+	}
+}
+
+func TestDiagnoseHandlerForwardsRequestCancellation(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	handler := NewHandler(HandlerOptions{
+		Run: func(ctx context.Context, target model.Target) model.DiagnosticReport {
+			close(started)
+			<-ctx.Done()
+			close(canceled)
+			return fixtureReport(target)
+		},
+		OverallTimeout: time.Minute,
+	})
+	requestContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodPost, "/api/diagnose", strings.NewReader(`{"target":"http://example.com"}`)).WithContext(requestContext)
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(recorder, request)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("diagnostic runner did not start")
+	}
+	cancel()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("diagnostic runner did not receive request cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not return after request cancellation")
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 partial report", recorder.Code)
+	}
+}
+
+func TestValidateLoopbackAddress(t *testing.T) {
+	cases := []struct {
+		address string
+		valid   bool
+	}{
+		{address: "127.0.0.1:8080", valid: true},
+		{address: "[::1]:8080", valid: true},
+		{address: "127.0.0.1:0", valid: true},
+		{address: ":8080", valid: false},
+		{address: "localhost:8080", valid: false},
+		{address: "0.0.0.0:8080", valid: false},
+		{address: "192.0.2.1:8080", valid: false},
+		{address: "127.0.0.1", valid: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.address, func(t *testing.T) {
+			err := ValidateLoopbackAddress(tc.address)
+			if tc.valid && err != nil {
+				t.Fatalf("ValidateLoopbackAddress(%q): %v", tc.address, err)
+			}
+			if !tc.valid && err == nil {
+				t.Fatalf("ValidateLoopbackAddress(%q) unexpectedly succeeded", tc.address)
+			}
+		})
+	}
+}
+
+func TestHandlerMethodAndPathBoundaries(t *testing.T) {
+	handler := NewHandler(HandlerOptions{Run: func(context.Context, model.Target) model.DiagnosticReport {
+		return model.DiagnosticReport{}
+	}})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/diagnose", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /api/diagnose status = %d, want 405", recorder.Code)
+	}
+	if recorder.Header().Get("Allow") != http.MethodPost {
+		t.Errorf("GET /api/diagnose Allow = %q, want POST", recorder.Header().Get("Allow"))
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/not-a-static-file", nil)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Errorf("GET unknown path status = %d, want 404", recorder.Code)
+	}
+}
+
+func getBody(t *testing.T, client *http.Client, url string) string {
+	t.Helper()
+	response, err := client.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200", url, response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	return string(body)
+}
+
+func fixtureReport(target model.Target) model.DiagnosticReport {
+	started := time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("fixture", 9*60*60))
+	completed := started.Add(250 * time.Millisecond)
+	return model.DiagnosticReport{
+		SchemaVersion: model.DiagnosticSchemaVersion,
+		Target:        target,
+		Status:        model.ReportStatusComplete,
+		StartedAt:     &started,
+		CompletedAt:   &completed,
+		Probes: []model.ProbeResult{
+			{
+				Name:   "dns",
+				Target: target,
+				Status: model.ProbeStatusPassed,
+				Timing: model.Timing{DurationMS: 10},
+				Evidence: []model.Evidence{
+					{ID: "dns-1", Kind: model.EvidenceKindDNSResolution, Raw: json.RawMessage(`"<script>alert(1)</script>"`)},
+				},
+				Interpretation: model.ProbeInterpretation{
+					FailureReason: model.FailureReasonNone,
+					Layer:         model.LayerDNS,
+					FaultDomain:   model.FaultDomainDNS,
+				},
+			},
+			{
+				Name:   "http",
+				Target: target,
+				Status: model.ProbeStatusFailed,
+				Timing: model.Timing{DurationMS: 20},
+				Interpretation: model.ProbeInterpretation{
+					FailureReason: model.FailureReasonHTTPStatusCode,
+					Layer:         model.LayerHTTP,
+					FaultDomain:   model.FaultDomainHTTP,
+				},
+			},
+		},
+		Findings: []model.DiagnosticFinding{
+			{
+				FailureReason: model.FailureReasonHTTPStatusCode,
+				Layer:         model.LayerHTTP,
+				FaultDomain:   model.FaultDomainHTTP,
+				ProbeNames:    []string{"http"},
+				EvidenceIDs:   []string{"http-1"},
+			},
+		},
+	}
+}
