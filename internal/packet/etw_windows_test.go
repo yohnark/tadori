@@ -23,10 +23,10 @@ func TestETWSocketAddressDecoding(t *testing.T) {
 		t.Fatalf("IPv4 address = %q:%d", address, port)
 	}
 
-	ipv6 := make([]byte, 24)
+	ipv6 := make([]byte, 28)
 	binary.LittleEndian.PutUint16(ipv6[0:2], 23)
 	binary.BigEndian.PutUint16(ipv6[2:4], 8443)
-	ipv6[8], ipv6[9], ipv6[10], ipv6[11], ipv6[12], ipv6[13], ipv6[14], ipv6[15] = 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1
+	copy(ipv6[8:24], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
 	address, port = etwSocketAddress(ipv6)
 	if address != "2001:db8::1" || port != 8443 {
 		t.Fatalf("IPv6 address = %q:%d", address, port)

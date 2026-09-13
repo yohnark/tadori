@@ -179,21 +179,28 @@ func windowsTextSuggestsVPN(value string) bool {
 }
 
 func readConfiguredDNSServers(ctx context.Context, path string) ([]netip.Addr, string, error) {
+	source := "GetAdaptersAddresses"
+	if path != "" {
+		source = "resolver-fixture"
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, source, err
+	}
 	if path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				return nil, "resolver-fixture", nil
+				return nil, source, nil
 			}
-			return nil, "resolver-fixture", err
+			return nil, source, err
 		}
-		return parseResolverFileAddresses(data), "resolver-fixture", nil
+		return parseResolverFileAddresses(data), source, nil
 	}
 	interfaces, err := collectInterfaceStates(ctx)
 	if err != nil {
-		return nil, "GetAdaptersAddresses", err
+		return nil, source, err
 	}
-	return configuredServersFromInterfaces(interfaces), "GetAdaptersAddresses", nil
+	return configuredServersFromInterfaces(interfaces), source, nil
 }
 
 func parseResolverFileAddresses(data []byte) []netip.Addr {

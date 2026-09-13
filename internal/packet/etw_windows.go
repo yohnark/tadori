@@ -252,7 +252,7 @@ func etwRecordCallback(record *etwRecord) uintptr {
 }
 
 func (capture *etwCapture) consume(record *etwRecord) {
-	if record.EventHeader.ProviderID != etwTCPIPGUID || record.UserData == 0 || record.UserDataLength == 0 {
+	if record.EventHeader.ProviderID != etwTCPIPGUID || record.UserData == nil || record.UserDataLength == 0 {
 		return
 	}
 	capture.mu.Lock()
@@ -261,7 +261,7 @@ func (capture *etwCapture) consume(record *etwRecord) {
 		capture.eventsLost++
 		return
 	}
-	payload := unsafe.Slice((*byte)(unsafe.Pointer(record.UserData)), int(record.UserDataLength))
+	payload := unsafe.Slice(record.UserData, int(record.UserDataLength))
 	eventID := record.EventHeader.EventDescriptor.ID
 	var observations []model.PacketObservation
 	var parseErr bool
@@ -733,7 +733,7 @@ type etwRecord struct {
 	ExtendedDataCount uint16
 	UserDataLength    uint16
 	ExtendedData      uintptr
-	UserData          uintptr
+	UserData          *byte
 	UserContext       uintptr
 }
 
