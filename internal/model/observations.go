@@ -35,6 +35,21 @@ type ObservationConflict struct {
 	EvidenceIDs []string `json:"evidence_ids,omitempty"`
 }
 
+// ObservationDivergence records facts that are different because they were
+// measured by distinct observation lanes.  A divergence is not a malformed
+// observation and has no implicit winner: path responders describe the
+// responder visibility of a bounded path probe, while packet-flow evidence
+// describes packets observed at the local capture point.
+type ObservationDivergence struct {
+	Field                 string   `json:"field"`
+	PathValues            []string `json:"path_values,omitempty"`
+	PacketFlowValues      []string `json:"packet_flow_values,omitempty"`
+	PathProvenance        []string `json:"path_provenance,omitempty"`
+	PacketFlowProvenance  []string `json:"packet_flow_provenance,omitempty"`
+	PathEvidenceIDs       []string `json:"path_evidence_ids,omitempty"`
+	PacketFlowEvidenceIDs []string `json:"packet_flow_evidence_ids,omitempty"`
+}
+
 // EndpointObservation is the report-level normalized endpoint view.  The
 // selected endpoint is Tadori's probe candidate; TestedEndpoint is concrete
 // transport evidence.  They are intentionally separate from the requested
@@ -66,10 +81,20 @@ type EndpointObservation struct {
 // should read this envelope rather than reconstructing facts from Target or
 // ProbeResult fields.
 type Observations struct {
-	Endpoint         EndpointObservation         `json:"endpoint"`
-	NameResolution   NameResolutionObservation   `json:"name_resolution"`
-	NetworkContext   NetworkContext              `json:"network_context"`
-	EnterprisePolicy EnterprisePolicyObservation `json:"enterprise_policy"`
+	Endpoint             EndpointObservation         `json:"endpoint"`
+	NameResolution       NameResolutionObservation   `json:"name_resolution"`
+	NetworkContext       NetworkContext              `json:"network_context"`
+	EnterprisePolicy     EnterprisePolicyObservation `json:"enterprise_policy"`
+	Transport            TransportObservation        `json:"transport"`
+	Security             SecurityObservation         `json:"security"`
+	Application          ApplicationObservation      `json:"application"`
+	Paths                []PathObservation           `json:"paths,omitempty"`
+	PacketFlows          []PacketFlowEvidence        `json:"packet_flows,omitempty"`
+	PathProvenance       []ObservationProvenance     `json:"path_provenance,omitempty"`
+	PacketFlowProvenance []ObservationProvenance     `json:"packet_flow_provenance,omitempty"`
+	PathCorrelations     []PathCorrelation           `json:"path_correlations,omitempty"`
+	Conflicts            []ObservationConflict       `json:"conflicts,omitempty"`
+	Divergences          []ObservationDivergence     `json:"divergences,omitempty"`
 }
 
 // NormalizeObservations returns a detached, stable copy of an observation
@@ -101,7 +126,102 @@ func NormalizeObservations(observations Observations) Observations {
 
 	network := cloneNetworkContext(observations.NetworkContext)
 	enterprise := NormalizeEnterprisePolicyObservation(observations.EnterprisePolicy)
-	return Observations{Endpoint: endpoint, NameResolution: name, NetworkContext: network, EnterprisePolicy: enterprise}
+	paths := clonePathObservations(observations.Paths)
+	packetFlows := clonePacketFlows(observations.PacketFlows)
+	pathProvenance := cloneObservationProvenance(observations.PathProvenance)
+	packetFlowProvenance := cloneObservationProvenance(observations.PacketFlowProvenance)
+	pathCorrelations := clonePathCorrelations(observations.PathCorrelations)
+	conflicts := cloneObservationConflicts(observations.Conflicts)
+	divergences := cloneObservationDivergences(observations.Divergences)
+	return Observations{
+		Endpoint:             endpoint,
+		NameResolution:       name,
+		NetworkContext:       network,
+		EnterprisePolicy:     enterprise,
+		Transport:            NormalizeTransportObservation(observations.Transport),
+		Security:             NormalizeSecurityObservation(observations.Security),
+		Application:          NormalizeApplicationObservation(observations.Application),
+		Paths:                paths,
+		PacketFlows:          packetFlows,
+		PathProvenance:       pathProvenance,
+		PacketFlowProvenance: packetFlowProvenance,
+		PathCorrelations:     pathCorrelations,
+		Conflicts:            conflicts,
+		Divergences:          divergences,
+	}
+}
+
+func cloneObservationProvenance(values []ObservationProvenance) []ObservationProvenance {
+	if values == nil {
+		return nil
+	}
+	result := make([]ObservationProvenance, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].EvidenceIDs = append([]string(nil), value.EvidenceIDs...)
+	}
+	return result
+}
+
+func clonePathObservations(values []PathObservation) []PathObservation {
+	if values == nil {
+		return nil
+	}
+	result := make([]PathObservation, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].Hops = append([]PathHop(nil), value.Hops...)
+		for hopIndex := range result[index].Hops {
+			result[index].Hops[hopIndex].Responders = append([]PathResponder(nil), value.Hops[hopIndex].Responders...)
+		}
+		result[index].Segments = append([]PathSegment(nil), value.Segments...)
+		for segmentIndex := range result[index].Segments {
+			result[index].Segments[segmentIndex].Responders = append([]PathResponder(nil), value.Segments[segmentIndex].Responders...)
+		}
+	}
+	return result
+}
+
+func clonePacketFlows(values []PacketFlowEvidence) []PacketFlowEvidence {
+	if values == nil {
+		return nil
+	}
+	result := make([]PacketFlowEvidence, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].MatchedObservationIDs = append([]string(nil), value.MatchedObservationIDs...)
+		result[index].Observations = append([]PacketObservation(nil), value.Observations...)
+	}
+	return result
+}
+
+func clonePathCorrelations(values []PathCorrelation) []PathCorrelation {
+	if values == nil {
+		return nil
+	}
+	result := make([]PathCorrelation, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].Observations = clonePathObservations(value.Observations)
+	}
+	return result
+}
+
+func cloneObservationDivergences(values []ObservationDivergence) []ObservationDivergence {
+	if values == nil {
+		return nil
+	}
+	result := make([]ObservationDivergence, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].PathValues = append([]string(nil), value.PathValues...)
+		result[index].PacketFlowValues = append([]string(nil), value.PacketFlowValues...)
+		result[index].PathProvenance = append([]string(nil), value.PathProvenance...)
+		result[index].PacketFlowProvenance = append([]string(nil), value.PacketFlowProvenance...)
+		result[index].PathEvidenceIDs = append([]string(nil), value.PathEvidenceIDs...)
+		result[index].PacketFlowEvidenceIDs = append([]string(nil), value.PacketFlowEvidenceIDs...)
+	}
+	return result
 }
 
 func cloneEndpoint(value Endpoint) Endpoint {
