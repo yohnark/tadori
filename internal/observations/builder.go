@@ -13,7 +13,9 @@ import (
 
 	"github.com/yohnark/tadori/internal/model"
 	"github.com/yohnark/tadori/internal/probe/dns"
+	enterpriseprobe "github.com/yohnark/tadori/internal/probe/enterprise"
 	"github.com/yohnark/tadori/internal/probe/interfacecfg"
+	proxyprobe "github.com/yohnark/tadori/internal/probe/proxy"
 	"github.com/yohnark/tadori/internal/probe/route"
 )
 
@@ -33,11 +35,13 @@ func Build(target model.Target, probes []model.ProbeResult) model.Observations {
 	// remains an intent object for new consumers.
 	runtimeTarget := targetWithEndpointObservation(target, endpoint)
 	networkContext := buildNetworkObservation(runtimeTarget, ordered)
+	enterprisePolicy := buildEnterprisePolicyObservation(runtimeTarget, ordered, networkContext)
 
 	return model.NormalizeObservations(model.Observations{
-		Endpoint:       endpoint,
-		NameResolution: nameResolution,
-		NetworkContext: networkContext,
+		Endpoint:         endpoint,
+		NameResolution:   nameResolution,
+		NetworkContext:   networkContext,
+		EnterprisePolicy: enterprisePolicy,
 	})
 }
 
@@ -592,6 +596,678 @@ func detectRouteConflicts(context *model.NetworkContext, probes []model.ProbeRes
 	}
 	if values := distinctSourceValues(sources); len(values) > 1 {
 		context.Conflicts = append(context.Conflicts, conflict("network_context.effective_route", values, sources))
+	}
+}
+
+type enterpriseConnectivityEvidence struct {
+	EffectiveProxy []enterpriseprobe.EffectiveProxy  `json:"effective_proxy"`
+	Paths          []enterpriseprobe.PathObservation `json:"paths"`
+}
+
+type enterpriseTLSEvidence struct {
+	Comparison   enterpriseprobe.TLSComparison                      `json:"comparison"`
+	TrustStore   enterpriseprobe.TrustStoreObservation              `json:"trust_store"`
+	Certificates map[string]*enterpriseprobe.CertificateObservation `json:"certificates"`
+}
+
+type enterpriseRoutingEvidence struct {
+	Adapters []enterpriseprobe.AdapterObservation `json:"adapters"`
+	Routes   []enterpriseprobe.RouteObservation   `json:"routes"`
+}
+
+type enterpriseCorrelationEvidence struct {
+	EffectiveRouteDiffers     bool `json:"effective_route_differs"`
+	IntentionalPolicyPossible bool `json:"intentional_policy_possible"`
+}
+
+type enterprisePACEvidence struct {
+	Configured bool   `json:"configured"`
+	URL        string `json:"url"`
+	AutoDetect bool   `json:"auto_detect"`
+	Executed   bool   `json:"executed"`
+}
+
+// buildEnterprisePolicyObservation projects only the enterprise probe. The
+// route probe remains authoritative for NetworkContext; this function keeps
+// only adapter participation and route/path correlation references here.
+func buildEnterprisePolicyObservation(target model.Target, probes []model.ProbeResult, network model.NetworkContext) model.EnterprisePolicyObservation {
+	observation := model.EnterprisePolicyObservation{
+		RequestedIdentity: target.RequestedIdentity,
+		State:             model.EnterpriseObservationStateUnknown,
+		Certainty:         model.ObservationCertaintyUnknown,
+		WinHTTP:           emptyEnterpriseProxySource("winhttp"),
+		WinINET:           emptyEnterpriseProxySource("wininet"),
+		DirectVsProxy:     model.EnterprisePathComparisonObservation{State: model.EnterprisePathComparisonUnknown, Certainty: model.ObservationCertaintyUnknown},
+		Firewall:          model.EnterpriseFirewallObservation{State: model.EnterpriseObservationStateUnknown, BlockCausality: model.EnterpriseFirewallCausalityNotEstablished, Certainty: model.ObservationCertaintyUnknown},
+		TLS:               model.EnterpriseTLSPolicyObservation{State: model.EnterpriseObservationStateUnknown, InterceptionSuspicion: model.EnterpriseInterceptionSuspicionNotEstablished, Certainty: model.ObservationCertaintyUnknown},
+	}
+	var configEvidence = map[string]model.Evidence{}
+	var pathEvidence *model.Evidence
+	var firewallEvidence *model.Evidence
+	var routingEvidence *model.Evidence
+	var tlsEvidence *model.Evidence
+	var correlationEvidence *model.Evidence
+	var sawEnterprise bool
+	var sawUnsupported bool
+
+	for _, probe := range probes {
+		if probe.Name != enterpriseprobe.Name {
+			continue
+		}
+		sawEnterprise = true
+		observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
+		if probe.Interpretation.FailureReason == model.FailureReasonUnsupported || probe.Status == model.ProbeStatusSkipped {
+			sawUnsupported = true
+			observation.Unsupported = true
+			observation.Limitations = appendUnique(observation.Limitations, "windows enterprise subsystem unsupported")
+		}
+		for index := range probe.Evidence {
+			evidence := probe.Evidence[index]
+			observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
+			observation.Provenance = appendUnique(observation.Provenance, enterpriseEvidenceProvenance(probe, evidence)...)
+			switch evidence.Kind {
+			case model.EvidenceKindWinHTTPProxy:
+				if value, err := decodeEnterpriseProxyConfiguration(evidence); err == nil {
+					previous := observation.WinHTTP.Configuration
+					observation.WinHTTP.Configuration = projectEnterpriseProxyConfiguration(value, probe, evidence)
+					observation.WinHTTP.Configuration.PACConfigured = observation.WinHTTP.Configuration.PACConfigured || previous.PACConfigured
+					observation.WinHTTP.Configuration.AutoDetect = observation.WinHTTP.Configuration.AutoDetect || previous.AutoDetect
+					syncEnterprisePACConfiguration(&observation.WinHTTP)
+					markEnterpriseProxySource(&observation.WinHTTP, probe, evidence, model.ObservationCertaintyConfigured)
+					configEvidence["winhttp"] = evidence
+				} else {
+					observation.WinHTTP.Limitations = appendUnique(observation.WinHTTP.Limitations, "configuration evidence decode: "+err.Error())
+				}
+			case model.EvidenceKindWinINETProxy:
+				if value, err := decodeEnterpriseProxyConfiguration(evidence); err == nil {
+					previous := observation.WinINET.Configuration
+					observation.WinINET.Configuration = projectEnterpriseProxyConfiguration(value, probe, evidence)
+					observation.WinINET.Configuration.PACConfigured = observation.WinINET.Configuration.PACConfigured || previous.PACConfigured
+					observation.WinINET.Configuration.AutoDetect = observation.WinINET.Configuration.AutoDetect || previous.AutoDetect
+					syncEnterprisePACConfiguration(&observation.WinINET)
+					markEnterpriseProxySource(&observation.WinINET, probe, evidence, model.ObservationCertaintyConfigured)
+					configEvidence["wininet"] = evidence
+				} else {
+					observation.WinINET.Limitations = appendUnique(observation.WinINET.Limitations, "configuration evidence decode: "+err.Error())
+				}
+			case model.EvidenceKindPAC:
+				if value, err := decodeEnterprisePacevidence(evidence); err == nil {
+					projectEnterprisePAC(&observation, value, probe, evidence)
+				} else {
+					observation.Limitations = appendUnique(observation.Limitations, "PAC evidence decode: "+err.Error())
+				}
+			case model.EvidenceKindProxyConnectivity:
+				var value enterpriseConnectivityEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err == nil {
+					projectEnterpriseConnectivity(&observation, value, probe, evidence)
+					evidenceCopy := evidence
+					pathEvidence = &evidenceCopy
+				} else {
+					observation.Limitations = appendUnique(observation.Limitations, "connectivity evidence decode: "+err.Error())
+				}
+			case model.EvidenceKindFirewallProfile:
+				var value enterpriseprobe.FirewallObservation
+				if err := json.Unmarshal(evidence.Raw, &value); err == nil {
+					projectEnterpriseFirewall(&observation, value, probe, evidence)
+					evidenceCopy := evidence
+					firewallEvidence = &evidenceCopy
+				} else {
+					observation.Limitations = appendUnique(observation.Limitations, "firewall evidence decode: "+err.Error())
+				}
+			case model.EvidenceKindAdapterRouting:
+				var value enterpriseRoutingEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err == nil {
+					projectEnterpriseRouting(&observation, value, probe, evidence, network)
+					evidenceCopy := evidence
+					routingEvidence = &evidenceCopy
+				} else {
+					observation.Limitations = appendUnique(observation.Limitations, "routing evidence decode: "+err.Error())
+				}
+			case model.EvidenceKindTLSTrust:
+				var value enterpriseTLSEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err == nil {
+					projectEnterpriseTLS(&observation, value, probe, evidence)
+					evidenceCopy := evidence
+					tlsEvidence = &evidenceCopy
+				} else {
+					observation.Limitations = appendUnique(observation.Limitations, "TLS evidence decode: "+err.Error())
+				}
+			case model.EvidenceKindRouteComparison:
+				var value enterpriseCorrelationEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err == nil {
+					if value.IntentionalPolicyPossible && !observation.DirectVsProxy.PolicyPossible {
+						observation.DirectVsProxy.PolicyPossible = true
+						observation.DirectVsProxy.Certainty = model.ObservationCertaintyInferred
+						observation.DirectVsProxy.Provenance = appendUnique(observation.DirectVsProxy.Provenance, "enterprise correlation")
+						observation.DirectVsProxy.EvidenceIDs = appendUnique(observation.DirectVsProxy.EvidenceIDs, evidence.ID)
+					}
+					if value.EffectiveRouteDiffers {
+						observation.Network.RouteDifference = true
+						observation.Network.RouteDifferenceKnown = true
+					}
+					evidenceCopy := evidence
+					correlationEvidence = &evidenceCopy
+				} else {
+					observation.Limitations = appendUnique(observation.Limitations, "correlation evidence decode: "+err.Error())
+				}
+			case model.EvidenceKindProxyConfiguration:
+				// Collection and platform evidence are handled below by their
+				// stable payload fields. Other proxy-configuration values are
+				// intentionally retained only as raw probe evidence.
+				var value struct {
+					State  string                             `json:"state"`
+					Issues []enterpriseprobe.ObservationIssue `json:"issues"`
+				}
+				if err := json.Unmarshal(evidence.Raw, &value); err == nil && len(value.Issues) > 0 {
+					appendEnterpriseIssues(&observation, value.Issues)
+				}
+			}
+		}
+	}
+
+	if sawEnterprise {
+		if sawUnsupported && len(observation.EvidenceIDs) == 1 {
+			observation.State = model.EnterpriseObservationStateUnsupported
+			observation.Certainty = model.ObservationCertaintyUnsupported
+		} else {
+			observation.State = model.EnterpriseObservationStateObserved
+			observation.Certainty = model.ObservationCertaintyObserved
+		}
+	}
+	if len(observation.Limitations) > 0 && observation.State == model.EnterpriseObservationStateObserved {
+		observation.State = model.EnterpriseObservationStatePartial
+	}
+	if sawUnsupported {
+		observation.Unsupported = true
+		if observation.State == model.EnterpriseObservationStateUnknown {
+			observation.State = model.EnterpriseObservationStateUnsupported
+			observation.Certainty = model.ObservationCertaintyUnsupported
+		}
+	}
+	if configEvidence["winhttp"].ID != "" && configEvidence["wininet"].ID != "" {
+		observation.ProxyConfigurationKnown = true
+		observation.ProxyConfigurationDiverges = !sameEnterpriseProxyConfiguration(observation.WinHTTP.Configuration, observation.WinINET.Configuration)
+		if observation.ProxyConfigurationDiverges {
+			left := enterpriseConfigurationFingerprint(observation.WinHTTP.Configuration)
+			right := enterpriseConfigurationFingerprint(observation.WinINET.Configuration)
+			observation.Conflicts = append(observation.Conflicts, model.ObservationConflict{
+				Field:       "enterprise_policy.proxy_configuration",
+				Values:      []string{left, right},
+				Provenance:  []string{"source:winhttp", "source:wininet"},
+				EvidenceIDs: []string{configEvidence["winhttp"].ID, configEvidence["wininet"].ID},
+			})
+		}
+	}
+	if pathEvidence != nil {
+		observation.DirectVsProxy = compareEnterprisePaths(observation.Paths)
+		observation.DirectVsProxy.EvidenceIDs = appendUnique(observation.DirectVsProxy.EvidenceIDs, pathEvidence.ID)
+	}
+	if firewallEvidence != nil {
+		observation.Firewall.EvidenceIDs = appendUnique(observation.Firewall.EvidenceIDs, firewallEvidence.ID)
+	}
+	if routingEvidence != nil {
+		observation.Network.EvidenceIDs = appendUnique(observation.Network.EvidenceIDs, routingEvidence.ID)
+	}
+	if tlsEvidence != nil {
+		observation.TLS.EvidenceIDs = appendUnique(observation.TLS.EvidenceIDs, tlsEvidence.ID)
+	}
+	if correlationEvidence != nil {
+		observation.Network.EvidenceIDs = appendUnique(observation.Network.EvidenceIDs, correlationEvidence.ID)
+	}
+	finalizeEnterpriseNetwork(&observation.Network, network)
+	finalizeEnterpriseCertainty(&observation)
+	return observation
+}
+
+func emptyEnterpriseProxySource(source string) model.EnterpriseProxySourceObservation {
+	return model.EnterpriseProxySourceObservation{
+		Source:        source,
+		Configuration: model.EnterpriseProxyConfigurationObservation{Certainty: model.ObservationCertaintyUnknown},
+		Effective:     model.EnterpriseProxyEffectiveObservation{Mode: model.EnterpriseProxyModeUnknown, Certainty: model.ObservationCertaintyUnknown},
+		PAC:           model.EnterprisePACObservation{Mode: model.EnterpriseProxyModeUnknown, Certainty: model.ObservationCertaintyUnknown},
+		Certainty:     model.ObservationCertaintyUnknown,
+	}
+}
+
+func enterpriseEvidenceProvenance(probe model.ProbeResult, evidence model.Evidence) []string {
+	values := []string{"probe:" + probe.Name}
+	if evidence.Source != "" {
+		values = append(values, "source:"+evidence.Source)
+	}
+	return values
+}
+
+func decodeEnterpriseProxyConfiguration(evidence model.Evidence) (proxyprobe.ConfigurationObservation, error) {
+	var value proxyprobe.ConfigurationObservation
+	if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+		return proxyprobe.ConfigurationObservation{}, err
+	}
+	return value, nil
+}
+
+func projectEnterpriseProxyConfiguration(value proxyprobe.ConfigurationObservation, probe model.ProbeResult, evidence model.Evidence) model.EnterpriseProxyConfigurationObservation {
+	return model.EnterpriseProxyConfigurationObservation{
+		State: string(value.State), Direct: value.Direct, StaticProxyConfigured: value.StaticProxyConfigured,
+		ProxyEndpoints: append([]string(nil), value.ProxyEndpoints...), ProxyBypass: append([]string(nil), value.ProxyBypass...),
+		PACConfigured: value.PACConfigured, PACURL: value.PACURL, AutoDetect: value.AutoDetect, Error: value.Error,
+		Certainty: model.ObservationCertaintyConfigured, Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
+	}
+}
+
+func syncEnterprisePACConfiguration(source *model.EnterpriseProxySourceObservation) {
+	if !source.Configuration.PACConfigured && !source.Configuration.AutoDetect {
+		return
+	}
+	if !source.PAC.Configured {
+		source.PAC.Configured = source.Configuration.PACConfigured
+		source.PAC.AutoDetect = source.Configuration.AutoDetect
+		source.PAC.URL = source.Configuration.PACURL
+		source.PAC.Certainty = model.ObservationCertaintyConfigured
+		source.PAC.Provenance = appendUnique(source.PAC.Provenance, source.Configuration.Provenance...)
+		source.PAC.EvidenceIDs = appendUnique(source.PAC.EvidenceIDs, source.Configuration.EvidenceIDs...)
+	}
+}
+
+func decodeEnterprisePacevidence(evidence model.Evidence) (enterprisePACEvidence, error) {
+	var value enterprisePACEvidence
+	err := json.Unmarshal(evidence.Raw, &value)
+	return value, err
+}
+
+func projectEnterprisePAC(observation *model.EnterprisePolicyObservation, value enterprisePACEvidence, probe model.ProbeResult, evidence model.Evidence) {
+	source := strings.ToLower(strings.TrimSpace(evidence.Source))
+	if source != "winhttp" && source != "wininet" {
+		return
+	}
+	destination := enterpriseProxySource(observation, source)
+	destination.PAC.Configured = value.Configured
+	destination.PAC.AutoDetect = value.AutoDetect
+	destination.PAC.URL = value.URL
+	destination.PAC.Certainty = model.ObservationCertaintyConfigured
+	destination.PAC.Provenance = appendUnique(destination.PAC.Provenance, enterpriseEvidenceProvenance(probe, evidence)...)
+	destination.PAC.EvidenceIDs = appendUnique(destination.PAC.EvidenceIDs, evidence.ID)
+	markEnterpriseProxySource(destination, probe, evidence, model.ObservationCertaintyConfigured)
+	destination.Configuration.PACConfigured = destination.Configuration.PACConfigured || value.Configured
+	destination.Configuration.AutoDetect = destination.Configuration.AutoDetect || value.AutoDetect
+}
+
+func projectEnterpriseConnectivity(observation *model.EnterprisePolicyObservation, value enterpriseConnectivityEvidence, probe model.ProbeResult, evidence model.Evidence) {
+	sources := append([]enterpriseprobe.EffectiveProxy(nil), value.EffectiveProxy...)
+	sort.SliceStable(sources, func(i, j int) bool {
+		if sources[i].Source != sources[j].Source {
+			return sources[i].Source < sources[j].Source
+		}
+		return sources[i].Endpoint < sources[j].Endpoint
+	})
+	for _, effective := range sources {
+		destination := enterpriseProxySource(observation, effective.Source)
+		if destination == nil {
+			continue
+		}
+		markEnterpriseProxySource(destination, probe, evidence, model.ObservationCertaintyObserved)
+		destination.Effective = model.EnterpriseProxyEffectiveObservation{
+			Observed: true, Mode: effective.Mode, Endpoint: effective.Endpoint, Bypass: append([]string(nil), effective.Bypass...),
+			PACUsed: effective.PACUsed, AutoDetect: effective.AutoDetect, ResolutionOK: effective.ResolutionOK, Error: effective.Error,
+			Certainty: model.ObservationCertaintyObserved, Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
+		}
+		if effective.PACUsed || effective.AutoDetect {
+			destination.PAC.ResolutionObserved = true
+			destination.PAC.ResolutionOK = effective.ResolutionOK
+			destination.PAC.Used = effective.PACUsed
+			destination.PAC.AutoDetect = destination.PAC.AutoDetect || effective.AutoDetect
+			destination.PAC.Mode = effective.Mode
+			destination.PAC.Endpoint = effective.Endpoint
+			destination.PAC.Bypass = append([]string(nil), effective.Bypass...)
+			destination.PAC.Certainty = model.ObservationCertaintyObserved
+			destination.PAC.Provenance = appendUnique(destination.PAC.Provenance, enterpriseEvidenceProvenance(probe, evidence)...)
+			destination.PAC.EvidenceIDs = appendUnique(destination.PAC.EvidenceIDs, evidence.ID)
+		}
+	}
+	paths := append([]enterpriseprobe.PathObservation(nil), value.Paths...)
+	sort.SliceStable(paths, func(i, j int) bool {
+		if paths[i].Name != paths[j].Name {
+			return paths[i].Name < paths[j].Name
+		}
+		if paths[i].Source != paths[j].Source {
+			return paths[i].Source < paths[j].Source
+		}
+		return paths[i].Endpoint < paths[j].Endpoint
+	})
+	for _, path := range paths {
+		observation.Paths = append(observation.Paths, projectEnterprisePath(path, probe, evidence))
+		if path.Endpoint != "" && (path.Mode == enterpriseprobe.PathModeProxy || path.Mode == enterpriseprobe.PathModePAC) {
+			source := enterpriseProxySource(observation, path.Source)
+			if source != nil {
+				source.EndpointReachability = append(source.EndpointReachability, projectEnterpriseEndpoint(path, probe, evidence))
+			}
+		}
+	}
+}
+
+func enterpriseProxySource(observation *model.EnterprisePolicyObservation, source string) *model.EnterpriseProxySourceObservation {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "winhttp":
+		return &observation.WinHTTP
+	case "wininet":
+		return &observation.WinINET
+	default:
+		return nil
+	}
+}
+
+func markEnterpriseProxySource(destination *model.EnterpriseProxySourceObservation, probe model.ProbeResult, evidence model.Evidence, certainty model.ObservationCertainty) {
+	destination.Provenance = appendUnique(destination.Provenance, enterpriseEvidenceProvenance(probe, evidence)...)
+	destination.EvidenceIDs = appendUnique(destination.EvidenceIDs, evidence.ID)
+	if enterpriseCertaintyRank(certainty) > enterpriseCertaintyRank(destination.Certainty) {
+		destination.Certainty = certainty
+	}
+}
+
+func enterpriseCertaintyRank(value model.ObservationCertainty) int {
+	switch value {
+	case model.ObservationCertaintyConfigured:
+		return 1
+	case model.ObservationCertaintyObserved:
+		return 2
+	case model.ObservationCertaintyDerived:
+		return 3
+	case model.ObservationCertaintyInferred:
+		return 4
+	case model.ObservationCertaintyUnsupported:
+		return 5
+	default:
+		return 0
+	}
+}
+
+func projectEnterprisePath(value enterpriseprobe.PathObservation, probe model.ProbeResult, evidence model.Evidence) model.EnterprisePathObservation {
+	result := model.EnterprisePathObservation{
+		Name: value.Name, Source: value.Source, Mode: value.Mode, Endpoint: value.Endpoint,
+		RequestAttempted: value.RequestAttempted, TCPConnected: value.TCPConnected, ConnectOutcome: value.ConnectOutcome,
+		ConnectStatusCode: value.ConnectStatusCode, ProxyAuthenticationHint: value.ProxyAuthenticationHint,
+		HTTPResponse: value.HTTPResponse, HTTPStatusCode: value.HTTPStatusCode, TLSHandshake: value.TLSHandshake,
+		TLSAttempted: value.TLSAttempted, CertificateTrusted: value.CertificateTrusted, HostnameVerified: value.HostnameVerified,
+		FailureReason: value.FailureReason, Error: value.Error, Certainty: model.ObservationCertaintyObserved,
+		Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
+	}
+	if value.Certificate != nil {
+		result.CertificateSHA256 = value.Certificate.SHA256
+	}
+	return result
+}
+
+func projectEnterpriseEndpoint(value enterpriseprobe.PathObservation, probe model.ProbeResult, evidence model.Evidence) model.EnterpriseProxyEndpointObservation {
+	reachability := model.EnterpriseEndpointUnknown
+	if value.TCPConnected {
+		reachability = model.EnterpriseEndpointReachable
+	} else if value.ConnectOutcome == enterpriseprobe.ConnectTimeout {
+		reachability = model.EnterpriseEndpointTimeout
+	} else if value.ConnectOutcome == enterpriseprobe.ConnectUnavailable || value.FailureReason == model.FailureReasonProxyUnavailable {
+		reachability = model.EnterpriseEndpointUnavailable
+	} else if value.ConnectOutcome == enterpriseprobe.ConnectNotTested {
+		reachability = model.EnterpriseEndpointNotTested
+	}
+	return model.EnterpriseProxyEndpointObservation{
+		Endpoint: value.Endpoint, Reachability: reachability, TCPConnected: value.TCPConnected,
+		ConnectOutcome: value.ConnectOutcome, StatusCode: value.ConnectStatusCode, Certainty: model.ObservationCertaintyObserved,
+		Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
+	}
+}
+
+func compareEnterprisePaths(paths []model.EnterprisePathObservation) model.EnterprisePathComparisonObservation {
+	comparison := model.EnterprisePathComparisonObservation{State: model.EnterprisePathComparisonUnknown, Certainty: model.ObservationCertaintyUnknown, DirectPath: enterpriseprobe.PathApplicationDirect}
+	var direct *model.EnterprisePathObservation
+	for index := range paths {
+		path := &paths[index]
+		if path.Name == enterpriseprobe.PathApplicationDirect && direct == nil {
+			direct = path
+		}
+		if path.Name == enterpriseprobe.PathBrowserWinINET || path.Name == enterpriseprobe.PathServiceWinHTTP {
+			comparison.ProxyPaths = appendUnique(comparison.ProxyPaths, path.Name)
+			if pathWorksEnterprise(path) {
+				comparison.ProxyWorks = true
+				comparison.ProxyWorksKnown = true
+			} else if !comparison.ProxyWorksKnown {
+				comparison.ProxyWorksKnown = true
+			}
+			comparison.EvidenceIDs = appendUnique(comparison.EvidenceIDs, path.EvidenceIDs...)
+		}
+	}
+	if direct != nil {
+		comparison.DirectWorks = pathWorksEnterprise(direct)
+		comparison.DirectWorksKnown = true
+		comparison.EvidenceIDs = appendUnique(comparison.EvidenceIDs, direct.EvidenceIDs...)
+	}
+	comparison.Provenance = []string{"comparison:enterprise_paths"}
+	comparison.Certainty = model.ObservationCertaintyDerived
+	switch {
+	case comparison.DirectWorksKnown && comparison.ProxyWorksKnown && comparison.DirectWorks && comparison.ProxyWorks:
+		comparison.State = model.EnterprisePathComparisonBothWork
+	case comparison.DirectWorksKnown && comparison.ProxyWorksKnown && !comparison.DirectWorks && comparison.ProxyWorks:
+		comparison.State = model.EnterprisePathComparisonDirectFailureProxyWorks
+		comparison.PolicyPossible = true
+		comparison.Certainty = model.ObservationCertaintyInferred
+	case comparison.DirectWorksKnown && comparison.ProxyWorksKnown && comparison.DirectWorks && !comparison.ProxyWorks:
+		comparison.State = model.EnterprisePathComparisonDirectWorksProxyFailure
+	case comparison.DirectWorksKnown && comparison.ProxyWorksKnown:
+		comparison.State = model.EnterprisePathComparisonBothFail
+	case comparison.DirectWorksKnown || comparison.ProxyWorksKnown:
+		comparison.State = "partial"
+	}
+	return comparison
+}
+
+func pathWorksEnterprise(path *model.EnterprisePathObservation) bool {
+	if path == nil {
+		return false
+	}
+	if path.FailureReason != "" && path.FailureReason != model.FailureReasonNone {
+		return false
+	}
+	return path.HTTPResponse && path.HTTPStatusCode >= 200 && path.HTTPStatusCode < 400 || path.TLSHandshake && path.CertificateTrusted && path.HostnameVerified
+}
+
+func projectEnterpriseFirewall(observation *model.EnterprisePolicyObservation, value enterpriseprobe.FirewallObservation, probe model.ProbeResult, evidence model.Evidence) {
+	state := model.EnterpriseObservationStateObserved
+	certainty := model.ObservationCertaintyObserved
+	if !value.Available {
+		state = model.EnterpriseObservationStateUnavailable
+		certainty = model.ObservationCertaintyUnknown
+	}
+	if value.Insufficient {
+		state = model.EnterpriseObservationStatePartial
+		certainty = model.ObservationCertaintyUnsupported
+	}
+	result := model.EnterpriseFirewallObservation{
+		State: state, Available: value.Available, Error: value.Error, Insufficient: value.Insufficient,
+		BlockCausality: model.EnterpriseFirewallCausalityNotEstablished, Certainty: certainty,
+		Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
+	}
+	for _, profile := range value.Profiles {
+		result.Profiles = append(result.Profiles, model.EnterpriseFirewallProfileObservation{
+			Name: profile.Name, FirewallEnabled: cloneBool(profile.FirewallEnabled), BlockInboundExceptions: cloneBool(profile.BlockInboundExceptions),
+			PolicyPresent: profile.PolicyPresent, EffectiveState: firewallEffectiveState(profile.FirewallEnabled),
+			BlockCausality: model.EnterpriseFirewallCausalityNotEstablished, Certainty: model.ObservationCertaintyObserved,
+			Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
+		})
+	}
+	observation.Firewall = result
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copyValue := *value
+	return &copyValue
+}
+
+func firewallEffectiveState(value *bool) string {
+	if value == nil {
+		return string(model.EnterpriseObservationStateUnknown)
+	}
+	if *value {
+		return "enabled"
+	}
+	return "disabled"
+}
+
+func projectEnterpriseRouting(observation *model.EnterprisePolicyObservation, value enterpriseRoutingEvidence, probe model.ProbeResult, evidence model.Evidence, network model.NetworkContext) {
+	for _, adapter := range value.Adapters {
+		vpn := adapter.VPN || strings.EqualFold(adapter.Type, "vpn") || strings.EqualFold(adapter.Type, "tunnel")
+		virtual := adapter.Virtual || vpn || strings.EqualFold(adapter.Type, "virtual")
+		if !vpn && !virtual {
+			continue
+		}
+		observation.Network.AdapterParticipation = append(observation.Network.AdapterParticipation, model.EnterpriseAdapterParticipationObservation{
+			Index: adapter.Index, Name: adapter.Name, Type: adapter.Type, IfType: adapter.IfType, Operational: adapter.Operational,
+			VPN: vpn, Virtual: virtual, Certainty: model.ObservationCertaintyObserved,
+			Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
+		})
+	}
+	observation.Network.VPNAdapterPresentKnown = true
+	observation.Network.VirtualAdapterPresentKnown = true
+	for _, adapter := range observation.Network.AdapterParticipation {
+		observation.Network.VPNAdapterPresent = observation.Network.VPNAdapterPresent || adapter.VPN
+		observation.Network.VirtualAdapterPresent = observation.Network.VirtualAdapterPresent || adapter.Virtual
+	}
+	observation.Network.RouteDifference, observation.Network.RouteDifferenceKnown = enterpriseRoutesDiffer(value.Routes)
+	if observation.Network.RouteDifferenceKnown {
+		observation.Network.Certainty = model.ObservationCertaintyDerived
+		observation.Network.Provenance = appendUnique(observation.Network.Provenance, "comparison:enterprise_routes")
+	}
+	observation.Network.Provenance = appendUnique(observation.Network.Provenance, enterpriseEvidenceProvenance(probe, evidence)...)
+	_ = network
+}
+
+func enterpriseRoutesDiffer(routes []enterpriseprobe.RouteObservation) (bool, bool) {
+	var direct, proxy *enterpriseprobe.RouteObservation
+	ordered := append([]enterpriseprobe.RouteObservation(nil), routes...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Path < ordered[j].Path })
+	for index := range ordered {
+		value := &ordered[index]
+		if value.Path == enterpriseprobe.PathApplicationDirect && direct == nil {
+			direct = value
+		}
+		if (value.Path == enterpriseprobe.PathBrowserWinINET || value.Path == enterpriseprobe.PathServiceWinHTTP) && proxy == nil {
+			proxy = value
+		}
+	}
+	if direct == nil || proxy == nil || !direct.Available || !proxy.Available || direct.InterfaceIndex == 0 || proxy.InterfaceIndex == 0 {
+		return false, false
+	}
+	return direct.InterfaceIndex != proxy.InterfaceIndex || direct.NextHop != proxy.NextHop, true
+}
+
+func finalizeEnterpriseNetwork(destination *model.EnterpriseNetworkCorrelationObservation, network model.NetworkContext) {
+	hasEnterpriseNetworkFacts := len(destination.EvidenceIDs) > 0 || len(destination.AdapterParticipation) > 0 || destination.RouteDifferenceKnown
+	if hasEnterpriseNetworkFacts {
+		destination.NetworkContextReferenced = true
+		destination.NetworkContextCertainty = network.Certainty
+		destination.NetworkContextEvidenceIDs = appendUnique(destination.NetworkContextEvidenceIDs, network.EvidenceIDs...)
+		destination.Provenance = appendUnique(destination.Provenance, "reference:network_context")
+	}
+	if hasEnterpriseNetworkFacts && (network.EffectiveRoute != model.RouteDispositionUnknown || network.SelectedDestinationAddress != "") {
+		destination.SelectedRouteUsesVPNKnown = true
+		destination.SelectedRouteUsesVPN = network.VPNOrTunnelInvolvement
+		destination.SelectedRouteUsesVirtualKnown = true
+		destination.SelectedRouteUsesVirtual = network.VirtualAdapterInvolvement
+	}
+	if destination.Certainty == "" || destination.Certainty == model.ObservationCertaintyUnknown {
+		if destination.NetworkContextReferenced || destination.RouteDifferenceKnown {
+			destination.Certainty = model.ObservationCertaintyDerived
+		}
+	}
+}
+
+func projectEnterpriseTLS(observation *model.EnterprisePolicyObservation, value enterpriseTLSEvidence, probe model.ProbeResult, evidence model.Evidence) {
+	comparison := value.Comparison
+	certainty := model.ObservationCertaintyDerived
+	result := model.EnterpriseTLSPolicyObservation{
+		State: model.EnterpriseObservationStateObserved, TrustStoreAvailable: value.TrustStore.Available,
+		TrustStoreRootCount: value.TrustStore.RootCount, TrustStoreInsufficient: value.TrustStore.Insufficient,
+		DirectCertificateSHA256: comparison.DirectCertificateSHA256, ProxyCertificateSHA256: comparison.ProxyCertificateSHA256,
+		CertificatesDiffer: comparison.CertificatesDiffer, CertificatesDifferKnown: true,
+		BothTrusted: comparison.BothTrusted, BothTrustedKnown: true, BothHostnameVerified: comparison.BothHostnameVerified, BothHostnameKnown: true,
+		PossibleInterception: comparison.PossibleInterception, InterceptionSuspicion: model.EnterpriseInterceptionSuspicionNotEstablished,
+		TrustMismatch: comparison.TrustMismatch, TrustMismatchKnown: true, Certainty: certainty,
+		Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
+	}
+	if comparison.PossibleInterception {
+		result.InterceptionSuspicion = model.EnterpriseInterceptionSuspicionPossible
+		result.InterceptionBasis = comparison.InterceptionBasis
+		result.Certainty = model.ObservationCertaintyInferred
+	}
+	if value.TrustStore.Insufficient {
+		result.Certainty = model.ObservationCertaintyUnsupported
+		result.Limitations = append(result.Limitations, "Windows trust-store inspection has insufficient privilege")
+	}
+	if value.TrustStore.Error != "" {
+		result.Limitations = append(result.Limitations, "trust store: "+value.TrustStore.Error)
+	}
+	observation.TLS = result
+}
+
+func appendEnterpriseIssues(observation *model.EnterprisePolicyObservation, issues []enterpriseprobe.ObservationIssue) {
+	for _, issue := range issues {
+		value := strings.TrimSpace(issue.Subsystem + ": " + issue.Kind)
+		if issue.Error != "" {
+			value += ": " + issue.Error
+		}
+		observation.Limitations = appendUnique(observation.Limitations, value)
+	}
+}
+
+func sameEnterpriseProxyConfiguration(left, right model.EnterpriseProxyConfigurationObservation) bool {
+	return left.State == right.State && left.Direct == right.Direct && left.StaticProxyConfigured == right.StaticProxyConfigured &&
+		left.PACConfigured == right.PACConfigured && left.PACURL == right.PACURL && left.AutoDetect == right.AutoDetect &&
+		sameStrings(left.ProxyEndpoints, right.ProxyEndpoints) && sameStrings(left.ProxyBypass, right.ProxyBypass)
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func enterpriseConfigurationFingerprint(value model.EnterpriseProxyConfigurationObservation) string {
+	raw, err := json.Marshal(struct {
+		State     string   `json:"state"`
+		Direct    bool     `json:"direct"`
+		Static    bool     `json:"static_proxy_configured"`
+		Endpoints []string `json:"proxy_endpoints"`
+		Bypass    []string `json:"proxy_bypass"`
+		PAC       bool     `json:"pac_configured"`
+		PACURL    string   `json:"pac_url"`
+		Auto      bool     `json:"auto_detect"`
+	}{value.State, value.Direct, value.StaticProxyConfigured, value.ProxyEndpoints, value.ProxyBypass, value.PACConfigured, value.PACURL, value.AutoDetect})
+	if err != nil {
+		return value.State
+	}
+	return string(raw)
+}
+
+func finalizeEnterpriseCertainty(observation *model.EnterprisePolicyObservation) {
+	if observation.State == model.EnterpriseObservationStateUnsupported {
+		observation.Certainty = model.ObservationCertaintyUnsupported
+		return
+	}
+	if observation.DirectVsProxy.PolicyPossible || observation.TLS.PossibleInterception {
+		observation.Certainty = model.ObservationCertaintyInferred
+		return
+	}
+	if observation.State == model.EnterpriseObservationStatePartial {
+		observation.Certainty = model.ObservationCertaintyDerived
+		return
+	}
+	if observation.State == model.EnterpriseObservationStateObserved {
+		observation.Certainty = model.ObservationCertaintyObserved
 	}
 }
 

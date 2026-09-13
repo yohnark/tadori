@@ -8,6 +8,7 @@ type ObservationCertainty string
 
 const (
 	ObservationCertaintyObserved    ObservationCertainty = "observed"
+	ObservationCertaintyConfigured  ObservationCertainty = "configured"
 	ObservationCertaintyDerived     ObservationCertainty = "derived"
 	ObservationCertaintyInferred    ObservationCertainty = "inferred"
 	ObservationCertaintyUnknown     ObservationCertainty = "unknown"
@@ -65,9 +66,10 @@ type EndpointObservation struct {
 // should read this envelope rather than reconstructing facts from Target or
 // ProbeResult fields.
 type Observations struct {
-	Endpoint       EndpointObservation       `json:"endpoint"`
-	NameResolution NameResolutionObservation `json:"name_resolution"`
-	NetworkContext NetworkContext            `json:"network_context"`
+	Endpoint         EndpointObservation         `json:"endpoint"`
+	NameResolution   NameResolutionObservation   `json:"name_resolution"`
+	NetworkContext   NetworkContext              `json:"network_context"`
+	EnterprisePolicy EnterprisePolicyObservation `json:"enterprise_policy"`
 }
 
 // NormalizeObservations returns a detached, stable copy of an observation
@@ -98,7 +100,8 @@ func NormalizeObservations(observations Observations) Observations {
 	name.Conflicts = cloneObservationConflicts(name.Conflicts)
 
 	network := cloneNetworkContext(observations.NetworkContext)
-	return Observations{Endpoint: endpoint, NameResolution: name, NetworkContext: network}
+	enterprise := NormalizeEnterprisePolicyObservation(observations.EnterprisePolicy)
+	return Observations{Endpoint: endpoint, NameResolution: name, NetworkContext: network, EnterprisePolicy: enterprise}
 }
 
 func cloneEndpoint(value Endpoint) Endpoint {
