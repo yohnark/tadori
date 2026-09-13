@@ -34,14 +34,14 @@ func Diagnose(probes []model.ProbeResult) []model.DiagnosticFinding {
 			return []model.DiagnosticFinding{finding}
 		}
 
-		// Gateway reachability is supporting evidence rather than a claim that
-		// the gateway is necessarily the root cause. Preserve it as a second
-		// machine-readable finding when a later decisive failure exists.
-		gateway := matching(observations, model.FailureReasonGatewayUnreachable)
-		if len(gateway) != 0 && !contradicted(gateway[0].reason, observations) {
-			return []model.DiagnosticFinding{finding, makeFinding(model.FailureReasonGatewayUnreachable, gateway)}
-		}
-		return []model.DiagnosticFinding{finding}
+		return withGatewaySupport(finding, observations)
+	}
+
+	// Probe-specific reasons may be added to model.FailureReason without
+	// changing this package. They are not interpreted by their text: the
+	// canonical layer and fault domain supplied by the probe are retained.
+	if extension := genericFailure(observations); extension != nil {
+		return withGatewaySupport(makeExtensionFinding(*extension, observations), observations)
 	}
 
 	// A gateway result is supporting evidence and can still be useful when no
@@ -51,6 +51,17 @@ func Diagnose(probes []model.ProbeResult) []model.DiagnosticFinding {
 	}
 
 	return nil
+}
+
+func withGatewaySupport(finding model.DiagnosticFinding, observations []observation) []model.DiagnosticFinding {
+	// Gateway reachability is supporting evidence rather than a claim that
+	// the gateway is necessarily the root cause. Preserve it as a second
+	// machine-readable finding when a decisive failure exists.
+	gateway := matching(observations, model.FailureReasonGatewayUnreachable)
+	if len(gateway) != 0 && !contradicted(gateway[0].reason, observations) {
+		return []model.DiagnosticFinding{finding, makeFinding(model.FailureReasonGatewayUnreachable, gateway)}
+	}
+	return []model.DiagnosticFinding{finding}
 }
 
 // Findings is an explicit alias for callers that prefer the output-oriented
@@ -165,6 +176,153 @@ func makeFinding(reason model.FailureReason, matches []observation) model.Diagno
 		FaultDomain:   domain,
 		ProbeNames:    unique(probeNames),
 		EvidenceIDs:   unique(evidenceIDs),
+	}
+}
+
+func makeExtensionFinding(candidate observation, observations []observation) model.DiagnosticFinding {
+	layer := candidate.result.Interpretation.Layer
+	if layer == "" {
+		layer = model.LayerUnknown
+	}
+	domain := candidate.result.Interpretation.FaultDomain
+	if domain == "" {
+		domain = model.FaultDomainUnknown
+	}
+	matches := make([]observation, 0, 1)
+	for _, other := range observations {
+		if !isGenericFailure(other) {
+			continue
+		}
+		if other.result.Interpretation.Layer == model.LayerICMP || other.result.Interpretation.FaultDomain == model.FaultDomainICMP || other.reason == model.FailureReasonICMPFailure {
+			continue
+		}
+		if other.reason == candidate.reason && other.result.Interpretation.Layer == candidate.result.Interpretation.Layer && other.result.Interpretation.FaultDomain == candidate.result.Interpretation.FaultDomain {
+			matches = append(matches, other)
+		}
+	}
+	finding := makeFinding(candidate.reason, matches)
+	finding.Layer = layer
+	finding.FaultDomain = domain
+	return finding
+}
+
+// genericFailure selects an extension reason without assigning semantics to
+// its value. Layer order is fixed so a collector's input ordering cannot
+// change the primary finding. Reason/name are only stable tie-breakers when
+// two opaque extensions occupy the same layer.
+func genericFailure(observations []observation) *observation {
+	candidates := make([]observation, 0)
+	for _, observation := range observations {
+		if !isGenericFailure(observation) {
+			continue
+		}
+		if observation.result.Interpretation.Layer == model.LayerICMP || observation.result.Interpretation.FaultDomain == model.FaultDomainICMP || observation.reason == model.FailureReasonICMPFailure {
+			continue
+		}
+		candidates = append(candidates, observation)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		if layerRank(left.result.Interpretation.Layer) != layerRank(right.result.Interpretation.Layer) {
+			return layerRank(left.result.Interpretation.Layer) < layerRank(right.result.Interpretation.Layer)
+		}
+		if left.reason != right.reason {
+			return left.reason < right.reason
+		}
+		if left.result.Interpretation.Layer != right.result.Interpretation.Layer {
+			return left.result.Interpretation.Layer < right.result.Interpretation.Layer
+		}
+		if left.result.Interpretation.FaultDomain != right.result.Interpretation.FaultDomain {
+			return left.result.Interpretation.FaultDomain < right.result.Interpretation.FaultDomain
+		}
+		return left.result.Name < right.result.Name
+	})
+	for _, candidate := range candidates {
+		if !contradictedExtension(candidate, observations) {
+			selected := candidate
+			return &selected
+		}
+	}
+	return nil
+}
+
+func isGenericFailure(observation observation) bool {
+	if observation.result.Status != model.ProbeStatusFailed && observation.result.Status != model.ProbeStatusError {
+		return false
+	}
+	switch observation.reason {
+	case "", model.FailureReasonNone, model.FailureReasonUnknown,
+		model.FailureReasonICMPFailure:
+		return false
+	}
+	for _, rule := range rules {
+		if observation.reason == rule.reason {
+			return false
+		}
+	}
+	// Gateway is intentionally not in rules because it is supporting-only,
+	// but it is not an extension reason and must not be duplicated here.
+	return observation.reason != model.FailureReasonGatewayUnreachable
+}
+
+func layerRank(layer model.Layer) int {
+	switch layer {
+	case model.LayerInterface, model.LayerIPConfiguration:
+		return 10
+	case model.LayerRoute:
+		return 20
+	case model.LayerGateway:
+		return 30
+	case model.LayerDNS:
+		return 40
+	case model.LayerProxy:
+		return 50
+	case model.LayerNetwork:
+		return 60
+	case model.LayerTCP:
+		return 70
+	case model.LayerTLS:
+		return 80
+	case model.LayerHTTP:
+		return 90
+	case model.LayerDestination:
+		return 100
+	case model.LayerUnknown, "":
+		return 1000
+	case model.LayerICMP:
+		return 2000
+	default:
+		return 1100
+	}
+}
+
+func contradictedExtension(candidate observation, observations []observation) bool {
+	for _, observation := range observations {
+		if observation.result.Status != model.ProbeStatusPassed || observation.reason != model.FailureReasonNone {
+			continue
+		}
+		if successfulLayerContradicts(candidate.result.Interpretation.Layer, observation.result.Interpretation.Layer) {
+			return true
+		}
+	}
+	return false
+}
+
+func successfulLayerContradicts(failedLayer, successfulLayer model.Layer) bool {
+	switch failedLayer {
+	case model.LayerInterface, model.LayerIPConfiguration, model.LayerRoute,
+		model.LayerGateway, model.LayerNetwork:
+		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
+	case model.LayerDNS, model.LayerProxy:
+		return successfulLayer == failedLayer
+	case model.LayerTCP:
+		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
+	case model.LayerTLS:
+		return successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
+	case model.LayerHTTP:
+		return successfulLayer == model.LayerHTTP
+	default:
+		return false
 	}
 }
 

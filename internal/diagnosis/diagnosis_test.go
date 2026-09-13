@@ -197,6 +197,57 @@ func TestDiagnoseIgnoresICMPOnlyFailure(t *testing.T) {
 	if got != nil {
 		t.Fatalf("ICMP-only failure became a connectivity diagnosis: %#v", got)
 	}
+
+	got = Diagnose([]model.ProbeResult{
+		failed("icmp-extension", model.FailureReason("icmp_vendor_detail"), model.LayerICMP, model.FaultDomainICMP),
+	})
+	if got != nil {
+		t.Fatalf("ICMP extension failure became a connectivity diagnosis: %#v", got)
+	}
+}
+
+func TestDiagnoseRetainsProbeSpecificExtensionReasons(t *testing.T) {
+	tlsExpired := model.FailureReason("tls_certificate_expired")
+	routeExtension := model.FailureReason("route_scope_mismatch")
+	probes := []model.ProbeResult{
+		failed("tls", tlsExpired, model.LayerTLS, model.FaultDomainTLS, "tls-evidence"),
+		failed("route", routeExtension, model.LayerRoute, model.FaultDomainRouting, "route-evidence"),
+	}
+
+	got := Diagnose(probes)
+	if len(got) != 1 {
+		t.Fatalf("unexpected extension findings: %#v", got)
+	}
+	if got[0].FailureReason != routeExtension || got[0].Layer != model.LayerRoute || got[0].FaultDomain != model.FaultDomainRouting {
+		t.Fatalf("extension reason was interpreted by text or input order: %#v", got[0])
+	}
+	if !reflect.DeepEqual(got[0].ProbeNames, []string{"route"}) || !reflect.DeepEqual(got[0].EvidenceIDs, []string{"route-evidence"}) {
+		t.Fatalf("extension references were not retained: %#v", got[0])
+	}
+
+	// Layer precedence is independent of collector ordering. With no route
+	// extension, the opaque TLS reason is retained verbatim and its canonical
+	// interpretation is used unchanged.
+	got = Diagnose([]model.ProbeResult{probes[0]})
+	if len(got) != 1 || got[0].FailureReason != tlsExpired || got[0].Layer != model.LayerTLS || got[0].FaultDomain != model.FaultDomainTLS {
+		t.Fatalf("TLS extension reason was not retained: %#v", got)
+	}
+	got = Diagnose([]model.ProbeResult{
+		probes[0],
+		func() model.ProbeResult {
+			result := failed("tls-retry", tlsExpired, model.LayerTLS, model.FaultDomainTLS, "tls-evidence-2")
+			result.Status = model.ProbeStatusError
+			return result
+		}(),
+	})
+	if len(got) != 1 || !reflect.DeepEqual(got[0].ProbeNames, []string{"tls", "tls-retry"}) || !reflect.DeepEqual(got[0].EvidenceIDs, []string{"tls-evidence", "tls-evidence-2"}) {
+		t.Fatalf("extension references were not aggregated: %#v", got)
+	}
+
+	reversed := Diagnose([]model.ProbeResult{probes[1], probes[0]})
+	if len(reversed) != 1 || reversed[0].FailureReason != routeExtension {
+		t.Fatalf("extension precedence was not deterministic: %#v", reversed)
+	}
 }
 
 func TestDiagnoseUsesCanonicalReasonAndStableReferences(t *testing.T) {
