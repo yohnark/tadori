@@ -475,6 +475,8 @@ func layerRank(layer model.Layer) int {
 		return 80
 	case model.LayerHTTP:
 		return 90
+	case model.LayerSMB:
+		return 90
 	case model.LayerDestination:
 		return 100
 	case model.LayerUnknown, "":
@@ -505,15 +507,17 @@ func successfulLayerContradicts(failedLayer, successfulLayer model.Layer) bool {
 	switch failedLayer {
 	case model.LayerInterface, model.LayerIPConfiguration, model.LayerRoute,
 		model.LayerGateway, model.LayerNetwork:
-		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
+		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP || successfulLayer == model.LayerSMB
 	case model.LayerDNS, model.LayerProxy:
 		return successfulLayer == failedLayer
 	case model.LayerTCP:
-		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
+		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP || successfulLayer == model.LayerSMB
 	case model.LayerTLS:
 		return successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
 	case model.LayerHTTP:
 		return successfulLayer == model.LayerHTTP
+	case model.LayerSMB:
+		return successfulLayer == model.LayerSMB
 	default:
 		return false
 	}
@@ -573,6 +577,12 @@ func semantics(reason model.FailureReason) (model.Layer, model.FaultDomain) {
 		return model.LayerTLS, model.FaultDomainTLS
 	case model.FailureReasonHTTPStatusCode, model.FailureReasonHTTPFailure:
 		return model.LayerHTTP, model.FaultDomainHTTP
+	case model.FailureReasonSMBTimeout,
+		model.FailureReasonSMBProtocolRejection,
+		model.FailureReasonSMBMalformedResponse:
+		return model.LayerSMB, model.FaultDomainSMB
+	case model.FailureReasonSMBConnectionRefused:
+		return model.LayerTCP, model.FaultDomainTransport
 	case model.FailureReasonProbeExecution:
 		return model.LayerUnknown, model.FaultDomainUnknown
 	default:
