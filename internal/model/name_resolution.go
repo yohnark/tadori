@@ -111,6 +111,8 @@ type NameResolutionObservation struct {
 	Certainty        ObservationCertainty      `json:"certainty"`
 	Provenance       []string                  `json:"provenance,omitempty"`
 	ProbeNames       []string                  `json:"probe_names,omitempty"`
+	FailureReason    FailureReason             `json:"failure_reason"`
+	FaultDomain      FaultDomain               `json:"fault_domain"`
 	Conflicts        []ObservationConflict     `json:"conflicts,omitempty"`
 }
 
