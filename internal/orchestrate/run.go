@@ -26,6 +26,17 @@ import (
 // this timeout is the orchestration-level backstop shared by every probe.
 const DefaultProbeTimeout = 15 * time.Second
 
+// DefaultProbeConcurrency bounds the number of probes executing in one
+// diagnostic run. The value is intentionally small for the local runtime:
+// it keeps resource use predictable while preserving useful parallelism.
+const DefaultProbeConcurrency = 4
+
+// ProbeStartedFunc and ProbeCompletedFunc are optional progress hooks. Hooks
+// are notifications only; they do not alter the report or probe scheduling.
+// A hook may be called from a worker goroutine.
+type ProbeStartedFunc func(name string)
+type ProbeCompletedFunc func(result model.ProbeResult)
+
 // Options controls one diagnostic run.
 type Options struct {
 	// ProbeTimeout bounds each individual probe invocation. A non-positive
@@ -34,6 +45,14 @@ type Options struct {
 	// Now supplies the clock used for report timestamps. It defaults to
 	// time.Now and exists for deterministic tests.
 	Now func() time.Time
+	// ProbeConcurrency bounds concurrently executing probes. A non-positive
+	// value selects DefaultProbeConcurrency.
+	ProbeConcurrency int
+	// OnProbeStarted is called immediately before a probe is invoked.
+	OnProbeStarted ProbeStartedFunc
+	// OnProbeCompleted is called after a probe returns a result (including an
+	// execution error or timeout result).
+	OnProbeCompleted ProbeCompletedFunc
 }
 
 // Run resolves target, invokes every wired probe concurrently under bounded
@@ -52,10 +71,14 @@ func Run(ctx context.Context, target model.Target, opts Options) model.Diagnosti
 	if timeout <= 0 {
 		timeout = DefaultProbeTimeout
 	}
+	probeConcurrency := opts.ProbeConcurrency
+	if probeConcurrency <= 0 {
+		probeConcurrency = DefaultProbeConcurrency
+	}
 
 	started := now().UTC()
 
-	results := runProbes(ctx, target, timeout)
+	results := runProbes(ctx, target, timeout, probeConcurrency, opts.OnProbeStarted, opts.OnProbeCompleted)
 
 	sort.Slice(results, func(i, j int) bool { return results[i].Name < results[j].Name })
 
@@ -78,7 +101,10 @@ func Run(ctx context.Context, target model.Target, opts Options) model.Diagnosti
 // deadline still enforced) rather than the batch waiting on DNS in serial.
 // A probe that panics, errors, or times out still yields a result for its
 // slot, so a single failing probe cannot drop the others.
-func runProbes(ctx context.Context, target model.Target, timeout time.Duration) []model.ProbeResult {
+func runProbes(ctx context.Context, target model.Target, timeout time.Duration, concurrency int, onStarted ProbeStartedFunc, onCompleted ProbeCompletedFunc) []model.ProbeResult {
+	if concurrency <= 0 {
+		concurrency = DefaultProbeConcurrency
+	}
 	execution := probe.ExecutionContext{Target: target}
 
 	var resolvedAddr netip.Addr
@@ -91,9 +117,9 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration) 
 
 	jobs := []job{
 		{name: "dns", run: func(runCtx context.Context) model.ProbeResult {
+			defer close(resolvedReady)
 			result := dns.New().Run(runCtx, execution)
 			resolvedAddr = resolvedAddress(result)
-			close(resolvedReady)
 			return result
 		}},
 		{name: "interface_state", run: func(runCtx context.Context) model.ProbeResult {
@@ -154,18 +180,63 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration) 
 
 	results := make([]model.ProbeResult, len(jobs))
 
-	var wg sync.WaitGroup
-	wg.Add(len(jobs))
+	if concurrency > len(jobs) {
+		concurrency = len(jobs)
+	}
+
+	// The jobs channel is finite and the worker count is explicit. Every job
+	// is drained even after cancellation so the report retains one result slot
+	// per wired probe and progress consumers see terminal probe events.
+	jobsCh := make(chan struct {
+		index int
+		job   job
+	}, len(jobs))
 	for i, j := range jobs {
-		i, j := i, j
+		jobsCh <- struct {
+			index int
+			job   job
+		}{index: i, job: j}
+	}
+	close(jobsCh)
+
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for worker := 0; worker < concurrency; worker++ {
 		go func() {
 			defer wg.Done()
-			results[i] = runBounded(ctx, timeout, j.run)
+			for item := range jobsCh {
+				notifyProbeStarted(onStarted, item.job.name)
+				result := runBounded(ctx, timeout, item.job.name, item.job.run)
+				if result.Name == "" {
+					result.Name = item.job.name
+				}
+				if result.Target == (model.Target{}) {
+					result.Target = target
+				}
+				results[item.index] = result
+				notifyProbeCompleted(onCompleted, result)
+			}
 		}()
 	}
 	wg.Wait()
 
 	return results
+}
+
+func notifyProbeStarted(callback ProbeStartedFunc, name string) {
+	if callback == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	callback(name)
+}
+
+func notifyProbeCompleted(callback ProbeCompletedFunc, result model.ProbeResult) {
+	if callback == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	callback(result)
 }
 
 // waitForAddress blocks until the DNS probe publishes its resolved address by
@@ -185,13 +256,14 @@ func waitForAddress(runCtx context.Context, ready <-chan struct{}, addr *netip.A
 // runBounded applies a per-probe deadline on top of ctx and recovers a panic
 // from a probe implementation so it cannot take down the whole diagnostic
 // run; a recovered panic is reported as an execution error result.
-func runBounded(ctx context.Context, timeout time.Duration, fn func(context.Context) model.ProbeResult) (result model.ProbeResult) {
+func runBounded(ctx context.Context, timeout time.Duration, name string, fn func(context.Context) model.ProbeResult) (result model.ProbeResult) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	defer func() {
 		if r := recover(); r != nil {
 			result = model.ProbeResult{
+				Name:   name,
 				Status: model.ProbeStatusError,
 				Interpretation: model.ProbeInterpretation{
 					FailureReason: model.FailureReasonProbeExecution,

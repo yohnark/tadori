@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yohnark/tadori/internal/model"
 )
@@ -136,6 +138,51 @@ func TestRunServeRejectsNonLoopbackAddress(t *testing.T) {
 	}
 	if !strings.Contains(stderr.read(t), "loopback") {
 		t.Errorf("expected loopback validation error, got %q", stderr.read(t))
+	}
+}
+
+func TestRunServeContextSelectsFreePortAndOpensBrowserByDefault(t *testing.T) {
+	stdout, stderr := captureFiles(t)
+	defer stdout.close()
+	defer stderr.close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var openedURL string
+	code := runServeContext(ctx, []string{"--port", "0"}, stdout.w, stderr.w, func(rawURL string) error {
+		openedURL = rawURL
+		cancel()
+		return nil
+	})
+	if code != 0 {
+		t.Fatalf("runServeContext() exit code = %d; stderr=%s", code, stderr.read(t))
+	}
+	if !strings.HasPrefix(openedURL, "http://127.0.0.1:") || !strings.HasSuffix(openedURL, "/") {
+		t.Fatalf("browser URL = %q, want loopback URL with selected port", openedURL)
+	}
+	if !strings.Contains(stdout.read(t), openedURL) {
+		t.Fatalf("stdout does not report browser URL %q: %s", openedURL, stdout.read(t))
+	}
+}
+
+func TestRunServeContextNoOpenOptOut(t *testing.T) {
+	stdout, stderr := captureFiles(t)
+	defer stdout.close()
+	defer stderr.close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	timer := time.AfterFunc(100*time.Millisecond, cancel)
+	defer timer.Stop()
+	opened := false
+	code := runServeContext(ctx, []string{"--port", "0", "--no-open"}, stdout.w, stderr.w, func(string) error {
+		opened = true
+		return nil
+	})
+	if code != 0 {
+		t.Fatalf("runServeContext() exit code = %d; stderr=%s", code, stderr.read(t))
+	}
+	if opened {
+		t.Fatal("browser opener was called with --no-open")
 	}
 }
 

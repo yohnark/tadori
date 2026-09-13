@@ -3,18 +3,41 @@
 
   const form = document.querySelector("#diagnose-form");
   const targetInput = document.querySelector("#target");
-  const button = form.querySelector("button");
+  const diagnoseButton = form.querySelector("button");
+  const cancelButton = document.querySelector("#cancel-button");
   const error = document.querySelector("#error");
+  const sessionSection = document.querySelector("#session");
+  const sessionState = document.querySelector("#session-state");
+  const sessionID = document.querySelector("#session-id");
+  const sessionTarget = document.querySelector("#session-target");
+  const progress = document.querySelector("#progress");
   const reportSection = document.querySelector("#report");
-  const status = document.querySelector("#overall-status");
+  const overallStatus = document.querySelector("#overall-status");
   const reportTarget = document.querySelector("#report-target");
   const probes = document.querySelector("#probes");
   const findings = document.querySelector("#findings");
   const evidence = document.querySelector("#evidence");
   const canonicalJSON = document.querySelector("#canonical-json");
 
+  let activeID = "";
+  let eventSource = null;
+  const probeItems = new Map();
+
   function text(value) {
     return value === undefined || value === null ? "" : String(value);
+  }
+
+  function targetText(target) {
+    if (target?.url) {
+      return text(target.url);
+    }
+    const host = text(target?.host);
+    if (!host) {
+      return "";
+    }
+    const port = Number(target?.port || 0);
+    const formattedHost = host.includes(":") ? `[${host}]` : host;
+    return port > 0 ? `${formattedHost}:${port}` : formattedHost;
   }
 
   function jsonText(value) {
@@ -25,10 +48,53 @@
     }
   }
 
+  function showError(message) {
+    error.textContent = text(message);
+    error.hidden = false;
+  }
+
+  function clearError() {
+    error.textContent = "";
+    error.hidden = true;
+  }
+
+  function setSessionState(value) {
+    sessionState.textContent = text(value);
+    const cancellable = value === "running" || value === "cancelling";
+    cancelButton.hidden = !cancellable;
+    cancelButton.disabled = value === "cancelling";
+  }
+
+  function renderSession(snapshot) {
+    activeID = text(snapshot.id);
+    sessionID.textContent = activeID;
+    sessionTarget.textContent = targetText(snapshot.target);
+    setSessionState(snapshot.state);
+    sessionSection.hidden = false;
+    if (snapshot.report) {
+      renderReport(snapshot.report);
+    }
+  }
+
   function addEmptyMessage(container) {
     const item = document.createElement("li");
     item.textContent = "(none)";
     container.appendChild(item);
+  }
+
+  function renderProgress(name, value) {
+    const key = text(name);
+    if (!key) {
+      return;
+    }
+    let item = probeItems.get(key);
+    if (!item) {
+      item = document.createElement("li");
+      item.dataset.probeName = key;
+      progress.appendChild(item);
+      probeItems.set(key, item);
+    }
+    item.textContent = `${key}: ${text(value)}`;
   }
 
   function renderProbe(probe, index) {
@@ -85,8 +151,8 @@
   }
 
   function renderReport(report) {
-    status.textContent = text(report.status);
-    reportTarget.textContent = text(report.target?.url || report.target?.host);
+    overallStatus.textContent = text(report.status);
+    reportTarget.textContent = targetText(report.target);
     probes.replaceChildren();
     findings.replaceChildren();
     evidence.replaceChildren();
@@ -113,30 +179,138 @@
     reportSection.hidden = false;
   }
 
+  function closeEvents() {
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+  }
+
+  function finishSession(state, report) {
+    setSessionState(state);
+    if (report) {
+      renderReport(report);
+    }
+    diagnoseButton.disabled = false;
+    diagnoseButton.textContent = "Diagnose";
+    if (state !== "running" && state !== "cancelling") {
+      activeID = "";
+    }
+  }
+
+  function handleEvent(event) {
+    let body;
+    try {
+      body = JSON.parse(event.data);
+    } catch (_) {
+      showError("received invalid progress data");
+      return;
+    }
+
+    switch (body.type) {
+      case "diagnosis_started":
+        setSessionState("running");
+        break;
+      case "probe_started":
+        renderProgress(body.probe_name, "running");
+        break;
+      case "probe_completed":
+      case "result_updated":
+        renderProgress(body.probe_name || body.result?.name, body.result?.status);
+        break;
+      case "finding_updated":
+        break;
+      case "diagnosis_completed":
+        finishSession("completed", body.report);
+        closeEvents();
+        break;
+      case "diagnosis_cancelled":
+        finishSession("cancelled", body.report);
+        closeEvents();
+        break;
+      default:
+        break;
+    }
+  }
+
+  function openEvents(id) {
+    closeEvents();
+    eventSource = new EventSource(`/api/diagnoses/${encodeURIComponent(id)}/events`);
+    for (const eventType of [
+      "diagnosis_started",
+      "probe_started",
+      "probe_completed",
+      "result_updated",
+      "finding_updated",
+      "diagnosis_completed",
+      "diagnosis_cancelled",
+    ]) {
+      eventSource.addEventListener(eventType, handleEvent);
+    }
+    eventSource.onerror = () => {
+      if (eventSource && eventSource.readyState === EventSource.CLOSED && activeID) {
+        showError("progress stream closed before the session completed");
+      }
+    };
+  }
+
+  async function readResponse(response) {
+    let body = {};
+    try {
+      body = await response.json();
+    } catch (_) {
+      body = {};
+    }
+    if (!response.ok) {
+      throw new Error(body.error || `request failed (${response.status})`);
+    }
+    return body;
+  }
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    error.hidden = true;
+    clearError();
+    closeEvents();
+    activeID = "";
+    probeItems.clear();
+    progress.replaceChildren();
     reportSection.hidden = true;
-    button.disabled = true;
-    button.textContent = "Running…";
+    diagnoseButton.disabled = true;
+    diagnoseButton.textContent = "Starting…";
 
     try {
-      const response = await fetch("/api/diagnose", {
+      const response = await fetch("/api/diagnoses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target: targetInput.value }),
       });
-      const body = await response.json();
-      if (!response.ok) {
-        throw new Error(body.error || `request failed (${response.status})`);
-      }
-      renderReport(body);
+      const snapshot = await readResponse(response);
+      renderSession(snapshot);
+      diagnoseButton.textContent = "Running…";
+      openEvents(snapshot.id);
     } catch (err) {
-      error.textContent = err instanceof Error ? err.message : "diagnose request failed";
-      error.hidden = false;
-    } finally {
-      button.disabled = false;
-      button.textContent = "Diagnose";
+      showError(err instanceof Error ? err.message : "diagnosis request failed");
+      diagnoseButton.disabled = false;
+      diagnoseButton.textContent = "Diagnose";
+    }
+  });
+
+  cancelButton.addEventListener("click", async () => {
+    if (!activeID) {
+      return;
+    }
+    clearError();
+    cancelButton.disabled = true;
+    setSessionState("cancelling");
+    try {
+      const response = await fetch(`/api/diagnoses/${encodeURIComponent(activeID)}`, {
+        method: "DELETE",
+      });
+      const snapshot = await readResponse(response);
+      renderSession(snapshot);
+    } catch (err) {
+      showError(err instanceof Error ? err.message : "cancel request failed");
+      cancelButton.disabled = false;
     }
   });
 })();
