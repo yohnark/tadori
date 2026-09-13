@@ -276,6 +276,145 @@ func TestViewModelUsesCanonicalOperationalAndPathObservations(t *testing.T) {
 	}
 }
 
+func TestViewModelProjectsDeterministicServiceApplicationViews(t *testing.T) {
+	target := fixtureTarget(443)
+	endpoint := model.Endpoint{Address: "203.0.113.10", Port: 443, Family: model.EndpointFamilyIPv4, Certainty: model.ObservationCertaintyObserved}
+	cases := []struct {
+		name     string
+		protocol model.ApplicationProtocol
+		app      model.ApplicationObservation
+		check    func(t *testing.T, view ApplicationView)
+	}{
+		{
+			name:     "http",
+			protocol: model.ApplicationProtocolHTTPS,
+			app: model.ApplicationObservation{
+				Applicability: model.ObservationApplicabilityApplicable, Protocol: model.ApplicationProtocolHTTPS,
+				RequestAttempted: true, ResponseReceived: true, Result: model.HTTPResultSuccess,
+				HTTPVersion: "HTTP/2", StatusCode: 302, Status: "Found", URL: "https://example.test/health",
+				RequestedResource: "/health", Redirects: []model.HTTPRedirectObservation{{URL: "https://example.test", StatusCode: 302, Location: "/health", ToURL: "https://example.test/health"}},
+				Provenance: []string{"http response"}, ProbeNames: []string{"http"}, EvidenceIDs: []string{"http/application"},
+				EndpointUsed: &endpoint, Certainty: model.ObservationCertaintyObserved,
+			},
+			check: func(t *testing.T, view ApplicationView) {
+				if view.HTTP == nil || view.HTTP.StatusCode != 302 || view.HTTP.HTTPVersion != "HTTP/2" || len(view.HTTP.Redirects) != 1 {
+					t.Fatalf("HTTP view = %#v", view.HTTP)
+				}
+			},
+		},
+		{
+			name:     "dns",
+			protocol: model.ApplicationProtocolDNS,
+			app: model.ApplicationObservation{
+				Applicability: model.ObservationApplicabilityApplicable, Protocol: model.ApplicationProtocolDNS,
+				RequestAttempted: true, ResponseReceived: true, Result: model.HTTPResultPartial,
+				Provenance: []string{"DNS service response"}, ProbeNames: []string{"dns_service"}, EvidenceIDs: []string{"dns/application"},
+				Certainty: model.ObservationCertaintyObserved,
+				DNS: &model.DNSApplicationObservation{
+					QueryName: "diagnostic.tadori.test", QueryType: "A", Result: model.DNSApplicationResultPartial,
+					UDP:        model.DNSApplicationTransportObservation{Transport: "udp", Attempted: true, ResponseReceived: true, Outcome: "success", RCodeName: "NOERROR", EvidenceIDs: []string{"dns/udp"}, Provenance: []string{"udp wire"}},
+					TCP:        model.DNSApplicationTransportObservation{Transport: "tcp", Attempted: true, ResponseReceived: true, Outcome: "refused", RCode: 5, RCodeName: "REFUSED", Truncated: true, Fallback: true, FallbackReason: "UDP truncated", EvidenceIDs: []string{"dns/tcp"}, Provenance: []string{"tcp wire"}},
+					Divergence: true, RequestAttempted: true, ResponseReceived: true, Certainty: model.ObservationCertaintyObserved,
+					Provenance: []string{"DNS service observation"}, ProbeNames: []string{"dns_service"}, EvidenceIDs: []string{"dns/application"},
+				},
+			},
+			check: func(t *testing.T, view ApplicationView) {
+				if view.DNS == nil || !view.DNS.Divergence || view.DNS.UDP.Transport != "udp" || view.DNS.TCP.RCodeName != "REFUSED" || !view.DNS.TCP.Fallback {
+					t.Fatalf("DNS view = %#v", view.DNS)
+				}
+			},
+		},
+		{
+			name:     "smb",
+			protocol: model.ApplicationProtocolSMB,
+			app: model.ApplicationObservation{
+				Applicability: model.ObservationApplicabilityApplicable, Protocol: model.ApplicationProtocolSMB,
+				RequestAttempted: true, ResponseReceived: true, Result: model.HTTPResultSuccess,
+				Provenance: []string{"SMB negotiate"}, ProbeNames: []string{"smb"}, EvidenceIDs: []string{"smb/application"},
+				SMB: &model.SMBApplicationObservation{Result: model.SMBResultNegotiated, Negotiated: true, Dialect: "SMB 3.1.1", Capabilities: []string{"DFS", "LARGE_MTU"}, ServerGUID: "safe-guid", MaxReadSize: 0x100000},
+			},
+			check: func(t *testing.T, view ApplicationView) {
+				if view.SMB == nil || view.SMB.Dialect != "SMB 3.1.1" || len(view.SMB.Capabilities) != 2 || view.SMB.MaxReadSize != 0x100000 {
+					t.Fatalf("SMB view = %#v", view.SMB)
+				}
+			},
+		},
+		{
+			name:     "ssh",
+			protocol: model.ApplicationProtocolSSH,
+			app: model.ApplicationObservation{
+				Applicability: model.ObservationApplicabilityApplicable, Protocol: model.ApplicationProtocolSSH,
+				RequestAttempted: true, ResponseReceived: true, HandshakeAttempted: true, HandshakeComplete: true,
+				ProtocolResult: model.ApplicationProtocolResultSuccess, Result: model.HTTPResultSuccess, ServerIdentification: "SSH-2.0-OpenSSH_9.8",
+				Provenance: []string{"SSH banner"}, ProbeNames: []string{"ssh"}, EvidenceIDs: []string{"ssh/application"},
+			},
+			check: func(t *testing.T, view ApplicationView) {
+				if view.SSH == nil || !view.SSH.HandshakeComplete || view.SSH.ServerIdentification == "" || view.SSH.Result != model.ApplicationProtocolResultSuccess {
+					t.Fatalf("SSH view = %#v", view.SSH)
+				}
+			},
+		},
+		{
+			name:     "rdp",
+			protocol: model.ApplicationProtocolRDP,
+			app: model.ApplicationObservation{
+				Applicability: model.ObservationApplicabilityApplicable, Protocol: model.ApplicationProtocolRDP,
+				RequestAttempted: true, ResponseReceived: true, HandshakeAttempted: true, HandshakeComplete: true,
+				ProtocolResult: model.ApplicationProtocolResultSuccess, Result: model.HTTPResultSuccess,
+				RequestedSecurityProtocols: []string{"tls", "credssp"}, NegotiatedSecurityProtocol: "tls",
+				Provenance: []string{"RDP negotiation"}, ProbeNames: []string{"rdp"}, EvidenceIDs: []string{"rdp/application"},
+			},
+			check: func(t *testing.T, view ApplicationView) {
+				if view.RDP == nil || view.RDP.NegotiatedSecurityProtocol != "tls" || len(view.RDP.RequestedSecurityProtocols) != 2 {
+					t.Fatalf("RDP view = %#v", view.RDP)
+				}
+			},
+		},
+		{
+			name:     "unsupported",
+			protocol: model.ApplicationProtocolCustom,
+			app: model.ApplicationObservation{
+				Applicability: model.ObservationApplicabilityUnsupported, Protocol: model.ApplicationProtocolCustom,
+				ProtocolResult: model.ApplicationProtocolResultUnsupported, Result: model.HTTPResultUnsupported,
+				Provenance: []string{"service profile"}, EvidenceIDs: []string{"application/unsupported"},
+			},
+			check: func(t *testing.T, view ApplicationView) {
+				if view.HTTP != nil || view.DNS != nil || view.SMB != nil || view.SSH != nil || view.RDP != nil || view.Applicability != model.ObservationApplicabilityUnsupported {
+					t.Fatalf("unsupported view = %#v", view)
+				}
+			},
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			report := model.DiagnosticReport{
+				SchemaVersion: model.DiagnosticSchemaVersion,
+				Target:        target,
+				Status:        model.ReportStatusComplete,
+				Observations:  model.Observations{Application: testCase.app},
+			}
+			first, err := BuildDiagnosticView(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := BuildDiagnosticView(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstJSON, _ := json.Marshal(first)
+			secondJSON, _ := json.Marshal(second)
+			if string(firstJSON) != string(secondJSON) {
+				t.Fatalf("service view is not deterministic\nfirst: %s\nsecond: %s", firstJSON, secondJSON)
+			}
+			if !containsString(first.Application.EvidenceIDs, testCase.app.EvidenceIDs[0]) || len(first.Application.Provenance) == 0 {
+				t.Fatalf("application provenance/evidence = %#v", first.Application)
+			}
+			testCase.check(t, first.Application)
+		})
+	}
+}
+
 func TestViewModelProjectsNormalizedNetworkContext(t *testing.T) {
 	target := fixtureTarget(443)
 	context := model.NetworkContext{

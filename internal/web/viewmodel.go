@@ -37,6 +37,7 @@ type ProgressRunner func(context.Context, model.Target, func(ProgressEvent)) mod
 type DiagnosticViewModel struct {
 	Report         model.DiagnosticReport   `json:"report"`
 	Observations   model.Observations       `json:"observations"`
+	Application    ApplicationView          `json:"application"`
 	CanonicalJSON  string                   `json:"canonical_json"`
 	NetworkContext *NetworkContextView      `json:"network_context,omitempty"`
 	Overall        OverallView              `json:"overall"`
@@ -130,6 +131,77 @@ type EvidenceView struct {
 	InspectorState string             `json:"inspector_state"`
 	InspectorNote  string             `json:"inspector_note,omitempty"`
 	Raw            json.RawMessage    `json:"raw"`
+}
+
+// ApplicationView is the UI projection of the canonical application
+// observation. The service-specific values are intentionally kept separate
+// from the shared execution state so the browser never has to infer a
+// protocol from evidence or HTTP-shaped fields.
+type ApplicationView struct {
+	Applicability      model.ObservationApplicability   `json:"applicability"`
+	RequestAttempted   bool                             `json:"request_attempted"`
+	ResponseReceived   bool                             `json:"response_received"`
+	TransportConnected bool                             `json:"transport_connected"`
+	Protocol           model.ApplicationProtocol        `json:"protocol,omitempty"`
+	HandshakeAttempted bool                             `json:"handshake_attempted"`
+	HandshakeComplete  bool                             `json:"handshake_complete"`
+	ProtocolResult     model.ApplicationProtocolResult  `json:"protocol_result,omitempty"`
+	Result             model.ApplicationResult          `json:"result"`
+	FailureReason      model.FailureReason              `json:"failure_reason"`
+	FaultDomain        model.FaultDomain                `json:"fault_domain"`
+	Certainty          model.ObservationCertainty       `json:"certainty"`
+	EndpointUsed       *model.Endpoint                  `json:"endpoint_used,omitempty"`
+	RequestedResource  string                           `json:"requested_resource,omitempty"`
+	Timing             model.Timing                     `json:"timing"`
+	Provenance         []string                         `json:"provenance,omitempty"`
+	ProbeNames         []string                         `json:"probe_names,omitempty"`
+	EvidenceIDs        []string                         `json:"evidence_ids,omitempty"`
+	Limitations        []string                         `json:"limitations,omitempty"`
+	HTTP               *HTTPApplicationView             `json:"http,omitempty"`
+	DNS                *DNSApplicationView              `json:"dns,omitempty"`
+	SMB                *model.SMBApplicationObservation `json:"smb,omitempty"`
+	SSH                *ProtocolApplicationView         `json:"ssh,omitempty"`
+	RDP                *ProtocolApplicationView         `json:"rdp,omitempty"`
+}
+
+type HTTPApplicationView struct {
+	Result            model.HTTPResult                `json:"result"`
+	HTTPVersion       string                          `json:"http_version,omitempty"`
+	StatusCode        int                             `json:"status_code,omitempty"`
+	Status            string                          `json:"status,omitempty"`
+	URL               string                          `json:"url,omitempty"`
+	RequestedResource string                          `json:"requested_resource,omitempty"`
+	Redirects         []model.HTTPRedirectObservation `json:"redirects,omitempty"`
+}
+
+type DNSApplicationView struct {
+	RequestedEndpoint string                                   `json:"requested_endpoint,omitempty"`
+	QueryName         string                                   `json:"query_name"`
+	QueryType         string                                   `json:"query_type"`
+	Result            model.DNSApplicationResult               `json:"result"`
+	UDP               model.DNSApplicationTransportObservation `json:"udp"`
+	TCP               model.DNSApplicationTransportObservation `json:"tcp"`
+	Divergence        bool                                     `json:"divergence"`
+	RequestAttempted  bool                                     `json:"request_attempted"`
+	ResponseReceived  bool                                     `json:"response_received"`
+	FailureReason     model.FailureReason                      `json:"failure_reason"`
+	FaultDomain       model.FaultDomain                        `json:"fault_domain"`
+	Certainty         model.ObservationCertainty               `json:"certainty"`
+	Provenance        []string                                 `json:"provenance,omitempty"`
+	ProbeNames        []string                                 `json:"probe_names,omitempty"`
+	EvidenceIDs       []string                                 `json:"evidence_ids,omitempty"`
+	Limitations       []string                                 `json:"limitations,omitempty"`
+}
+
+type ProtocolApplicationView struct {
+	Result                     model.ApplicationProtocolResult `json:"result"`
+	HandshakeAttempted         bool                            `json:"handshake_attempted"`
+	HandshakeComplete          bool                            `json:"handshake_complete"`
+	ResponseReceived           bool                            `json:"response_received"`
+	TransportConnected         bool                            `json:"transport_connected"`
+	ServerIdentification       string                          `json:"server_identification,omitempty"`
+	NegotiatedSecurityProtocol string                          `json:"negotiated_security_protocol,omitempty"`
+	RequestedSecurityProtocols []string                        `json:"requested_security_protocols,omitempty"`
 }
 
 // NameResolutionView is the presentation projection of the canonical DNS
@@ -256,6 +328,7 @@ func BuildDiagnosticView(diagnosticReport model.DiagnosticReport) (DiagnosticVie
 	view := DiagnosticViewModel{
 		Report:        diagnosticReport,
 		Observations:  observations,
+		Application:   buildApplicationView(observations.Application),
 		CanonicalJSON: string(canonical),
 		Progress:      make([]ProgressEvent, 0),
 		Probes:        make([]ProbeView, 0, len(diagnosticReport.Probes)),
@@ -323,6 +396,96 @@ func BuildDiagnosticView(diagnosticReport model.DiagnosticReport) (DiagnosticVie
 	view.Comparisons = buildComparisons(observations.PathCorrelations, pathInputs)
 	view.Progress = completedProgress(view.Probes)
 	return view, nil
+}
+
+func buildApplicationView(observation model.ApplicationObservation) ApplicationView {
+	view := ApplicationView{
+		Applicability:      observation.Applicability,
+		RequestAttempted:   observation.RequestAttempted,
+		ResponseReceived:   observation.ResponseReceived,
+		TransportConnected: observation.TransportConnected,
+		Protocol:           observation.Protocol,
+		HandshakeAttempted: observation.HandshakeAttempted,
+		HandshakeComplete:  observation.HandshakeComplete,
+		ProtocolResult:     observation.ProtocolResult,
+		Result:             observation.Result,
+		FailureReason:      observation.FailureReason,
+		FaultDomain:        observation.FaultDomain,
+		Certainty:          observation.Certainty,
+		RequestedResource:  observation.RequestedResource,
+		Timing:             observation.Timing,
+		Provenance:         append([]string(nil), observation.Provenance...),
+		ProbeNames:         append([]string(nil), observation.ProbeNames...),
+		EvidenceIDs:        append([]string(nil), observation.EvidenceIDs...),
+		Limitations:        append([]string(nil), observation.Limitations...),
+	}
+	if observation.EndpointUsed != nil {
+		endpoint := *observation.EndpointUsed
+		view.EndpointUsed = &endpoint
+	}
+
+	switch {
+	case observation.Protocol == model.ApplicationProtocolHTTP || observation.Protocol == model.ApplicationProtocolHTTPS || hasHTTPApplicationObservation(observation):
+		view.HTTP = &HTTPApplicationView{
+			Result:            observation.Result,
+			HTTPVersion:       observation.HTTPVersion,
+			StatusCode:        observation.StatusCode,
+			Status:            observation.Status,
+			URL:               observation.URL,
+			RequestedResource: observation.RequestedResource,
+			Redirects:         append([]model.HTTPRedirectObservation(nil), observation.Redirects...),
+		}
+	case observation.Protocol == model.ApplicationProtocolDNS || observation.DNS != nil:
+		if observation.DNS != nil {
+			dns := observation.DNS
+			view.DNS = &DNSApplicationView{
+				RequestedEndpoint: dns.RequestedEndpoint,
+				QueryName:         dns.QueryName,
+				QueryType:         dns.QueryType,
+				Result:            dns.Result,
+				UDP:               dns.UDP,
+				TCP:               dns.TCP,
+				Divergence:        dns.Divergence,
+				RequestAttempted:  dns.RequestAttempted,
+				ResponseReceived:  dns.ResponseReceived,
+				FailureReason:     dns.FailureReason,
+				FaultDomain:       dns.FaultDomain,
+				Certainty:         dns.Certainty,
+				Provenance:        append([]string(nil), dns.Provenance...),
+				ProbeNames:        append([]string(nil), dns.ProbeNames...),
+				EvidenceIDs:       append([]string(nil), dns.EvidenceIDs...),
+				Limitations:       append([]string(nil), dns.Limitations...),
+			}
+		}
+	case observation.Protocol == model.ApplicationProtocolSMB || observation.SMB != nil:
+		if observation.SMB != nil {
+			smb := *observation.SMB
+			smb.Capabilities = append([]string(nil), observation.SMB.Capabilities...)
+			view.SMB = &smb
+		}
+	case observation.Protocol == model.ApplicationProtocolSSH:
+		view.SSH = protocolApplicationView(observation)
+	case observation.Protocol == model.ApplicationProtocolRDP:
+		view.RDP = protocolApplicationView(observation)
+	}
+	return view
+}
+
+func hasHTTPApplicationObservation(observation model.ApplicationObservation) bool {
+	return observation.HTTPVersion != "" || observation.StatusCode != 0 || observation.Status != "" || observation.URL != "" || len(observation.Redirects) > 0
+}
+
+func protocolApplicationView(observation model.ApplicationObservation) *ProtocolApplicationView {
+	return &ProtocolApplicationView{
+		Result:                     observation.ProtocolResult,
+		HandshakeAttempted:         observation.HandshakeAttempted,
+		HandshakeComplete:          observation.HandshakeComplete,
+		ResponseReceived:           observation.ResponseReceived,
+		TransportConnected:         observation.TransportConnected,
+		ServerIdentification:       observation.ServerIdentification,
+		NegotiatedSecurityProtocol: observation.NegotiatedSecurityProtocol,
+		RequestedSecurityProtocols: append([]string(nil), observation.RequestedSecurityProtocols...),
+	}
 }
 
 func buildNameResolutionView(observation model.NameResolutionObservation) *NameResolutionView {

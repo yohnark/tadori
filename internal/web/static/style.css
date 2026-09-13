@@ -1368,6 +1368,459 @@ button.track-node:focus-visible {
   border-top: 1px solid var(--line);
 }
 
+/* Observed Path projection shell */
+.path-panel {
+  overflow: hidden;
+}
+
+.observed-path-explanation {
+  line-height: 1.55;
+}
+
+.path-view-toolbar {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.path-view-context {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.path-view-context .eyebrow {
+  margin: 0;
+}
+
+.path-view-status {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.path-view-switch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-subtle);
+}
+
+.path-view-tab {
+  min-width: 78px;
+  padding: 6px 13px;
+  border: 0;
+  border-right: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.path-view-tab:last-child {
+  border-right: 0;
+}
+
+.path-view-tab:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.path-view-tab:focus-visible,
+.inline-path-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.path-view-tab.is-active {
+  background: var(--ink);
+  color: var(--surface);
+}
+
+.path-view-tab.is-active:hover {
+  background: var(--ink);
+  color: var(--surface);
+}
+
+.path-view[hidden] {
+  display: none;
+}
+
+.path-graph-view {
+  min-width: 0;
+}
+
+.path-graph-header {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.path-graph-header h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.path-graph-header p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.path-graph-header .count-label {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.path-graph-viewport {
+  position: relative;
+  min-height: 326px;
+  padding: 18px 20px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background:
+    linear-gradient(to right, rgba(216, 221, 227, 0.42) 1px, transparent 1px) 20px 0 / 80px 100%,
+    var(--surface-subtle);
+  scrollbar-color: var(--line-strong) var(--surface-subtle);
+  scrollbar-width: thin;
+}
+
+.path-graph-viewport:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.path-graph-viewport[data-state="loading"],
+.path-graph-viewport[data-state="empty"],
+.path-graph-viewport[data-state="unsupported"] {
+  display: grid;
+  place-items: center;
+}
+
+.path-graph-state {
+  display: flex;
+  width: min(100%, 530px);
+  min-height: 176px;
+  align-items: center;
+  gap: 14px;
+  padding: 22px 24px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.path-graph-state[hidden] {
+  display: none;
+}
+
+.path-graph-state strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.path-graph-state p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.path-state-mark {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+#path-graph-loading .path-state-mark {
+  border-style: dashed;
+}
+
+#path-graph-unsupported .path-state-mark {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+.path-graph-reserved {
+  min-width: 0;
+}
+
+.path-graph-reserved[hidden] {
+  display: none;
+}
+
+.path-graph-scaffold {
+  position: relative;
+  width: max(100%, 980px);
+  min-height: 222px;
+  border: 1px dashed var(--line-strong);
+  background: var(--surface);
+}
+
+.path-graph-scaffold::before {
+  position: absolute;
+  top: 50%;
+  right: 42px;
+  left: 42px;
+  height: 1px;
+  background: var(--line-strong);
+  content: "";
+}
+
+.graph-scaffold-guide {
+  display: flex;
+  position: absolute;
+  right: 18px;
+  left: 18px;
+  justify-content: space-between;
+  gap: 20px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.graph-guide-top {
+  top: 13px;
+}
+
+.graph-guide-bottom {
+  bottom: 13px;
+}
+
+.graph-scaffold-track {
+  display: grid;
+  position: absolute;
+  top: 50%;
+  right: 30px;
+  left: 30px;
+  grid-template-columns: minmax(138px, 1fr) 76px minmax(190px, 1.35fr) 108px minmax(170px, 1.2fr) 76px minmax(138px, 1fr);
+  align-items: center;
+  gap: 0;
+  transform: translateY(-50%);
+}
+
+.graph-scaffold-column {
+  display: grid;
+  position: relative;
+  z-index: 1;
+  min-height: 102px;
+  align-content: center;
+  gap: 5px;
+  padding: 12px 13px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.graph-scaffold-origin {
+  border-color: var(--line-strong);
+}
+
+.graph-scaffold-hop {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.graph-scaffold-range {
+  border-style: dashed;
+  background: var(--surface-subtle);
+}
+
+.graph-scaffold-destination {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
+.graph-column-label {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
+.graph-scaffold-slot {
+  display: block;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.graph-scaffold-caption {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.graph-scaffold-connector {
+  position: relative;
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.graph-scaffold-connector::after {
+  position: absolute;
+  top: -3px;
+  right: 0;
+  width: 6px;
+  height: 6px;
+  border-top: 1px solid var(--line-strong);
+  border-right: 1px solid var(--line-strong);
+  content: "";
+  transform: rotate(45deg);
+}
+
+.graph-scaffold-gap {
+  background: repeating-linear-gradient(to right, var(--line-strong) 0 4px, transparent 4px 8px);
+}
+
+.graph-scaffold-gap::after {
+  display: none;
+}
+
+.path-graph-reservation {
+  display: flex;
+  min-height: 54px;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.reservation-mark {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 17px;
+}
+
+.path-graph-reservation strong {
+  display: block;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.path-graph-reservation p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.path-graph-footer {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.path-graph-footer .path-legend {
+  flex: 1 1 auto;
+  gap: 14px;
+  padding: 0;
+  border: 0;
+}
+
+.path-overflow-hint {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.path-mobile-fallback {
+  display: none;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--amber-soft);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.path-mobile-fallback strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.inline-path-action {
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.path-table-view {
+  min-width: 0;
+}
+
+.path-table-note {
+  border-top: 0;
+}
+
+.path-table-view .path-list {
+  min-width: 0;
+}
+
+.path-destination.positive,
+.path-destination.warning,
+.path-destination.negative,
+.track-node.negative,
+.track-node.destination-node.positive {
+  box-shadow: none;
+}
+
+.path-destination.positive {
+  background: var(--green-soft);
+}
+
+.path-destination.warning {
+  background: var(--amber-soft);
+}
+
+.path-destination.negative {
+  background: var(--red-soft);
+}
+
+.track-node.negative {
+  background: var(--red-soft);
+}
+
+.responder-chip {
+  border: 1px solid var(--line);
+}
+
 @media (prefers-reduced-motion: reduce) {
   #report:not([hidden]) {
     animation: none;
@@ -1504,5 +1957,59 @@ button.track-node:focus-visible {
   .observation-row,
   .observation-pane .observation-row {
     grid-template-columns: minmax(7rem, 0.9fr) minmax(0, 1.1fr);
+  }
+
+  .path-view-toolbar,
+  .path-graph-header,
+  .path-graph-footer {
+    align-items: flex-start;
+  }
+
+  .path-view-toolbar {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .path-view-switch {
+    width: 100%;
+  }
+
+  .path-view-tab {
+    flex: 1 1 50%;
+  }
+
+  .path-graph-header {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .path-graph-header .count-label {
+    text-align: left;
+  }
+
+  .path-graph-viewport {
+    min-height: 278px;
+    padding: 12px;
+  }
+
+  .path-graph-scaffold {
+    min-height: 218px;
+  }
+
+  .path-graph-reservation {
+    align-items: flex-start;
+  }
+
+  .path-graph-footer {
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .path-overflow-hint {
+    align-self: flex-start;
+  }
+
+  .path-mobile-fallback {
+    display: block;
   }
 }

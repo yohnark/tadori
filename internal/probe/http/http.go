@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	stdhttp "net/http"
+	"net/url"
 	"strings"
 	"syscall"
 	"time"
@@ -315,31 +316,66 @@ func transportForSelectedEndpoint(base stdhttp.RoundTripper, target model.Target
 		return base
 	}
 	transport, ok := base.(*stdhttp.Transport)
-	if !ok || transport.Proxy != nil {
-		// A custom transport or a proxy owns its own dialing semantics. Do not
-		// claim that the selected endpoint was used when this adapter cannot
-		// safely preserve those semantics.
+	if !ok {
+		// A custom transport owns its own dialing semantics. Do not claim that
+		// the selected endpoint was used when this adapter cannot prove it.
 		return base
 	}
 	endpoint, err := target.EndpointAddress()
 	if err != nil {
 		return base
 	}
-	clone := transport.Clone()
+	return &selectedEndpointTransport{
+		base:          transport,
+		endpoint:      endpoint,
+		requestedHost: strings.Trim(strings.TrimSpace(target.RequestedIdentity), "[]"),
+	}
+}
+
+// selectedEndpointTransport separates direct execution from proxy-owned
+// execution for each request. A configured Proxy function is not itself proof
+// that a proxy will be used: http.DefaultTransport has one even when its
+// environment lookup returns direct execution.
+type selectedEndpointTransport struct {
+	base          *stdhttp.Transport
+	endpoint      string
+	requestedHost string
+}
+
+func (t *selectedEndpointTransport) RoundTrip(request *stdhttp.Request) (*stdhttp.Response, error) {
+	clone := t.base.Clone()
+
+	// Resolve the proxy decision once. Replacing Proxy on the clone preserves
+	// the decision without invoking a stateful or environment-backed callback
+	// a second time inside net/http.Transport.
+	if proxy := clone.Proxy; proxy != nil {
+		proxyURL, proxyErr := proxy(request)
+		clone.Proxy = func(*stdhttp.Request) (*url.URL, error) {
+			return proxyURL, proxyErr
+		}
+		if proxyErr != nil || proxyURL != nil {
+			// A selected proxy owns dialing, including CONNECT for HTTPS. Keep
+			// its transport path intact and do not rewrite its dial address.
+			return clone.RoundTrip(request)
+		}
+	}
+
+	// The request is direct, so the selected concrete endpoint can be pinned.
 	dial := clone.DialContext
 	if dial == nil {
 		dialer := &net.Dialer{}
 		dial = dialer.DialContext
 	}
-	requestedHost := strings.Trim(strings.TrimSpace(target.RequestedIdentity), "[]")
 	clone.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, _, splitErr := net.SplitHostPort(address)
-		if splitErr == nil && strings.EqualFold(strings.Trim(host, "[]"), requestedHost) {
-			return dial(ctx, network, endpoint)
+		if splitErr == nil && strings.EqualFold(strings.Trim(host, "[]"), t.requestedHost) {
+			return dial(ctx, network, t.endpoint)
 		}
+		// Redirects to another host retain normal name resolution. Only the
+		// original requested identity is correlated with the selected endpoint.
 		return dial(ctx, network, address)
 	}
-	return clone
+	return clone.RoundTrip(request)
 }
 
 type responseMetadata struct {

@@ -233,6 +233,55 @@ func TestManagerBoundsConcurrentExecution(t *testing.T) {
 	}
 }
 
+func TestManagerOverallTimeoutFailsAndRetainsCanonicalReport(t *testing.T) {
+	target := model.NewTarget("overall-timeout.example", 443)
+	wantReport := model.DiagnosticReport{
+		SchemaVersion: model.DiagnosticSchemaVersion,
+		Target:        target,
+		Status:        model.ReportStatusComplete,
+		Probes: []model.ProbeResult{{
+			Name:   "tcp",
+			Status: model.ProbeStatusPassed,
+			Interpretation: model.ProbeInterpretation{
+				FailureReason: model.FailureReasonNone,
+				Layer:         model.LayerTCP,
+				FaultDomain:   model.FaultDomainTransport,
+			},
+		}},
+	}
+	m := NewManager(Options{
+		OverallTimeout: 20 * time.Millisecond,
+		NewID:          func() string { return "overall-timeout-1" },
+		Run: func(ctx context.Context, _ model.Target, _ Progress) model.DiagnosticReport {
+			<-ctx.Done()
+			return wantReport
+		},
+	})
+
+	created, err := m.Create(target)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	completed, err := m.Wait(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if completed.State != StateFailed {
+		t.Fatalf("state = %q, want failed after overall timeout", completed.State)
+	}
+	if completed.Report == nil {
+		t.Fatal("overall timeout discarded the canonical report")
+	}
+	if completed.Report.Status == model.ReportStatusComplete {
+		t.Fatalf("timed-out report status = %q, want non-complete", completed.Report.Status)
+	}
+	if len(completed.Report.Probes) != len(wantReport.Probes) || completed.Report.Probes[0].Name != "tcp" {
+		t.Fatalf("canonical report was not retained: %#v", completed.Report)
+	}
+}
+
 func sessionTestErrorReport(target model.Target) model.DiagnosticReport {
 	return model.DiagnosticReport{
 		SchemaVersion: model.DiagnosticSchemaVersion,

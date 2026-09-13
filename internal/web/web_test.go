@@ -37,6 +37,21 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	if !strings.Contains(page, "HTML Report") || !strings.Contains(page, "json-report-link") {
 		t.Errorf("UI page is missing report export affordances")
 	}
+	for _, fragment := range []string{
+		`id="observed-path-panel"`,
+		`id="path-graph-tab"`,
+		`id="path-table-tab"`,
+		`id="path-graph-viewport"`,
+		`id="path-graph-empty"`,
+		`id="path-graph-loading"`,
+		`id="path-graph-unsupported"`,
+		`Node selection → Evidence inspector`,
+		`not physical topology`,
+	} {
+		if !strings.Contains(page, fragment) {
+			t.Errorf("UI page is missing Observed Path workbench fragment %q", fragment)
+		}
+	}
 
 	style := getBody(t, client, server.URL+"/style.css")
 	if !strings.Contains(style, ".target-row") {
@@ -51,6 +66,11 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	}
 	if !strings.Contains(script, "/report.html") || !strings.Contains(script, "/report.json") {
 		t.Errorf("app.js does not expose report export URLs")
+	}
+	for _, fragment := range []string{"selectPathView", "renderPathGraph", "setPathGraphState", "data-path-view"} {
+		if !strings.Contains(script, fragment) {
+			t.Errorf("app.js is missing Observed Path projection behavior %q", fragment)
+		}
 	}
 	composer := getBody(t, client, server.URL+"/composer.js")
 	if !strings.Contains(composer, "TadoriTargetComposer") || !strings.Contains(composer, "PROVENANCE") {
@@ -161,6 +181,8 @@ func TestStructuredTargetIntentRoundTripsThroughAPI(t *testing.T) {
 	defer handler.Close()
 
 	request := httptest.NewRequest(http.MethodPost, "/api/diagnose", strings.NewReader(`{"target":{"input":"fileserver01","service":"smb","port":1445}}`))
+	request.Host = "127.0.0.1"
+	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -233,6 +255,8 @@ func TestDiagnoseHandlerRejectsInvalidTargetWithoutRunning(t *testing.T) {
 		return model.DiagnosticReport{}
 	}})
 	request := httptest.NewRequest(http.MethodPost, "/api/diagnose", strings.NewReader(`{"target":"javascript:alert(1)"}`))
+	request.Host = "127.0.0.1"
+	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 
@@ -262,6 +286,8 @@ func TestDiagnoseHandlerForwardsRequestCancellation(t *testing.T) {
 	requestContext, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	request := httptest.NewRequest(http.MethodPost, "/api/diagnose", strings.NewReader(`{"target":"http://example.com"}`)).WithContext(requestContext)
+	request.Host = "127.0.0.1"
+	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {

@@ -395,6 +395,13 @@ func (m *Manager) execute(s *managedSession) {
 	}
 
 	report, panicked := runSafely(m.run, ctx, s.target, progress, m.currentTime)
+	deadlineExceeded := errors.Is(ctx.Err(), context.DeadlineExceeded)
+	if deadlineExceeded && report.Status == model.ReportStatusComplete {
+		// A report returned after the manager's overall budget expired cannot
+		// claim execution completeness, even when the runner retained useful
+		// destination evidence.
+		report.Status = model.ReportStatusIncomplete
+	}
 
 	s.mu.Lock()
 	completed := m.currentTime()
@@ -402,7 +409,7 @@ func (m *Manager) execute(s *managedSession) {
 	s.report = &report
 	if s.cancelRequested {
 		s.state = StateCancelled
-	} else if panicked {
+	} else if panicked || deadlineExceeded {
 		s.state = StateFailed
 	} else {
 		s.state = StateCompleted
