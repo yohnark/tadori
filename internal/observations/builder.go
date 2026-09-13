@@ -13,8 +13,10 @@ import (
 
 	"github.com/yohnark/tadori/internal/model"
 	"github.com/yohnark/tadori/internal/probe/dns"
+	httpprobe "github.com/yohnark/tadori/internal/probe/http"
 	"github.com/yohnark/tadori/internal/probe/interfacecfg"
 	"github.com/yohnark/tadori/internal/probe/route"
+	tlsprobe "github.com/yohnark/tadori/internal/probe/tls"
 )
 
 // Build is the deterministic backend projector for report-level observations.
@@ -27,6 +29,9 @@ func Build(target model.Target, probes []model.ProbeResult) model.Observations {
 
 	endpoint := buildEndpointObservation(target, ordered)
 	nameResolution := buildNameResolutionObservation(target, ordered)
+	transport := buildTransportObservation(target, endpoint, ordered)
+	security := buildSecurityObservation(target, endpoint, transport, ordered)
+	application := buildApplicationObservation(target, endpoint, transport, ordered)
 
 	// Route probes are intentionally given the execution view of the target:
 	// this preserves #52's tested-endpoint hand-off while the report's Target
@@ -38,6 +43,9 @@ func Build(target model.Target, probes []model.ProbeResult) model.Observations {
 		Endpoint:       endpoint,
 		NameResolution: nameResolution,
 		NetworkContext: networkContext,
+		Transport:      transport,
+		Security:       security,
+		Application:    application,
 	})
 }
 
@@ -225,6 +233,642 @@ func buildEndpointObservation(target model.Target, probes []model.ProbeResult) m
 		observation.Certainty = model.ObservationCertaintyObserved
 	}
 	return observation
+}
+
+// buildTransportObservation projects every TCP result into one deterministic
+// transport view.  EndpointObservation remains the endpoint correlation
+// authority; this function only adds layer-specific outcome and evidence
+// context to that authoritative view.
+func buildTransportObservation(target model.Target, endpoint model.EndpointObservation, probes []model.ProbeResult) model.TransportObservation {
+	observation := model.TransportObservation{
+		Applicability:     transportApplicability(target),
+		RequestedEndpoint: requestedEndpoint(target),
+		ConnectionOutcome: model.TransportConnectionOutcomeNotAttempted,
+		FailureReason:     model.FailureReasonNone,
+		FaultDomain:       model.FaultDomainTransport,
+		Certainty:         model.ObservationCertaintyUnknown,
+	}
+	if endpoint.SelectedEndpoint != nil {
+		selected := cloneEndpointValue(*endpoint.SelectedEndpoint)
+		observation.ProbeEndpoint = &selected
+	}
+	if endpoint.TestedEndpoint != nil {
+		tested := cloneEndpointValue(*endpoint.TestedEndpoint)
+		observation.TestedEndpoint = &tested
+		observation.RemoteEndpoint = &tested
+		observation.Connected = true
+		observation.ConnectionOutcome = model.TransportConnectionOutcomeConnected
+	}
+	observation.CandidateAttempts = cloneAttempts(endpoint.CandidateAttempts)
+
+	var outcomes []sourceValue
+	var testedEndpoints []sourceValue
+	seenTCP := false
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			switch evidence.Kind {
+			case model.EvidenceKindTCPConnection:
+				seenTCP = true
+				observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
+				observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
+				addObservationProvenance(&observation.Provenance, probe, evidence)
+				var value tcpTransportEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "TCP evidence decode: "+err.Error())
+					continue
+				}
+				if observation.RequestedEndpoint == "" && value.RequestedEndpoint != "" {
+					observation.RequestedEndpoint = value.RequestedEndpoint
+				}
+				if observation.LocalEndpoint == "" {
+					observation.LocalEndpoint = value.LocalEndpoint
+				}
+				if observation.ProbeEndpoint == nil {
+					observation.ProbeEndpoint = endpointFromRaw(value.SelectedEndpoint, target.Port)
+				}
+				if rawEndpoint := endpointFromRaw(value.TestedEndpoint, target.Port); rawEndpoint != nil {
+					testedEndpoints = append(testedEndpoints, sourceValue{value: endpointKey(*rawEndpoint), probe: probe.Name, evidenceID: evidence.ID})
+					if observation.TestedEndpoint == nil {
+						observation.TestedEndpoint = rawEndpoint
+						observation.RemoteEndpoint = cloneEndpointPointer(rawEndpoint)
+					}
+				} else if rawEndpoint := endpointFromRaw(value.RemoteEndpoint, target.Port); rawEndpoint != nil && probe.Status == model.ProbeStatusPassed {
+					testedEndpoints = append(testedEndpoints, sourceValue{value: endpointKey(*rawEndpoint), probe: probe.Name, evidenceID: evidence.ID})
+					if observation.TestedEndpoint == nil {
+						observation.TestedEndpoint = rawEndpoint
+						observation.RemoteEndpoint = cloneEndpointPointer(rawEndpoint)
+					}
+				}
+				if len(value.CandidateAttempts) != 0 && len(observation.CandidateAttempts) == 0 {
+					observation.CandidateAttempts = cloneAttempts(value.CandidateAttempts)
+				}
+				outcome := transportOutcome(probe)
+				outcomes = append(outcomes, sourceValue{value: string(outcome), probe: probe.Name, evidenceID: evidence.ID})
+				if observation.ConnectionOutcome == model.TransportConnectionOutcomeNotAttempted || observation.ConnectionOutcome == model.TransportConnectionOutcomeUnknown {
+					observation.ConnectionOutcome = outcome
+					observation.Connected = outcome == model.TransportConnectionOutcomeConnected
+				}
+				if observation.FailureReason == model.FailureReasonNone || observation.FailureReason == model.FailureReasonUnknown {
+					observation.FailureReason = probe.Interpretation.FailureReason
+				}
+				if probe.Interpretation.FaultDomain != "" {
+					observation.FaultDomain = probe.Interpretation.FaultDomain
+				}
+				mergeObservationTiming(&observation.Timing, probe.Timing)
+
+			case model.EvidenceKindPacketFlow:
+				flow, err := model.DecodePacketFlowEvidence(evidence)
+				if err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "packet-flow evidence decode: "+err.Error())
+					continue
+				}
+				if packetFlowMatches(flow, target, probe) {
+					observation.PacketFlowEvidenceIDs = appendUnique(observation.PacketFlowEvidenceIDs, evidence.ID)
+					observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
+					observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
+					addObservationProvenance(&observation.Provenance, probe, evidence)
+				}
+			}
+		}
+		// A caller may attach the concrete endpoint to the result target even
+		// when the raw TCP evidence predates the #52 field. Keep that fact in
+		// the comparison set, while endpoint.TestedEndpoint remains authoritative.
+		if probe.Name == "tcp" && probe.Target.TestedEndpoint != nil {
+			value := *probe.Target.TestedEndpoint
+			testedEndpoints = append(testedEndpoints, sourceValue{value: endpointKey(value), probe: probe.Name, evidenceID: firstEvidenceID(evidenceIDs(probe.Evidence))})
+		}
+	}
+	if endpoint.TestedEndpoint != nil {
+		testedEndpoints = append([]sourceValue{{value: endpointKey(*endpoint.TestedEndpoint), probe: "endpoint-observation", evidenceID: firstEvidenceID(endpoint.EvidenceIDs)}}, testedEndpoints...)
+	}
+	if values := distinctSourceValues(testedEndpoints); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("transport.tested_endpoint", values, testedEndpoints))
+	}
+	if values := distinctSourceValues(outcomes); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("transport.connection_outcome", values, outcomes))
+	}
+
+	if seenTCP {
+		observation.Applicability = model.ObservationApplicabilityApplicable
+		observation.Certainty = model.ObservationCertaintyObserved
+	} else if observation.TestedEndpoint != nil || observation.ProbeEndpoint != nil {
+		observation.Certainty = model.ObservationCertaintyDerived
+	} else if observation.Applicability == model.ObservationApplicabilityUnsupported {
+		observation.ConnectionOutcome = model.TransportConnectionOutcomeUnsupported
+		observation.FailureReason = model.FailureReasonUnsupported
+	} else {
+		observation.ConnectionOutcome = model.TransportConnectionOutcomeNotAttempted
+	}
+	if observation.TestedEndpoint != nil {
+		observation.TestedEndpoint = cloneEndpointPointer(observation.TestedEndpoint)
+		observation.RemoteEndpoint = cloneEndpointPointer(observation.TestedEndpoint)
+		if observation.ConnectionOutcome == model.TransportConnectionOutcomeNotAttempted || observation.ConnectionOutcome == model.TransportConnectionOutcomeUnknown {
+			observation.ConnectionOutcome = model.TransportConnectionOutcomeConnected
+			observation.Connected = true
+		}
+	}
+	return model.NormalizeTransportObservation(observation)
+}
+
+// buildSecurityObservation projects TLS handshakes and the safe certificate
+// metadata emitted beside them. It never treats an HTTP response as TLS
+// evidence, and it does not infer interception from an ordinary certificate.
+func buildSecurityObservation(target model.Target, endpoint model.EndpointObservation, transport model.TransportObservation, probes []model.ProbeResult) model.SecurityObservation {
+	observation := model.SecurityObservation{
+		Applicability:         tlsApplicability(target, probes),
+		CertificateValidation: model.CertificateValidationUnknown,
+		FailureReason:         model.FailureReasonNone,
+		FaultDomain:           model.FaultDomainTLS,
+		Certainty:             model.ObservationCertaintyUnknown,
+	}
+	if transport.TestedEndpoint != nil {
+		used := cloneEndpointValue(*transport.TestedEndpoint)
+		observation.EndpointUsed = &used
+	} else if endpoint.TestedEndpoint != nil {
+		used := cloneEndpointValue(*endpoint.TestedEndpoint)
+		observation.EndpointUsed = &used
+	}
+	var versions, ciphers, validations, endpoints []sourceValue
+	seenTLS := false
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind != model.EvidenceKindTLSHandshake && evidence.Kind != model.EvidenceKindCertificate && evidence.Kind != model.EvidenceKindTLSTrust {
+				continue
+			}
+			observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
+			observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
+			addObservationProvenance(&observation.Provenance, probe, evidence)
+			switch evidence.Kind {
+			case model.EvidenceKindTLSHandshake:
+				seenTLS = true
+				observation.Attempted = true
+				var value tlsprobe.HandshakeEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "TLS handshake evidence decode: "+err.Error())
+					continue
+				}
+				if observation.ServerName == "" {
+					observation.ServerName = value.ServerName
+				}
+				if observation.NegotiatedProtocol == "" {
+					observation.NegotiatedProtocol = value.NegotiatedProtocol
+				}
+				if observation.NegotiatedProtocolID == "" {
+					observation.NegotiatedProtocolID = value.NegotiatedProtocolID
+				}
+				if observation.TLSVersion == "" {
+					observation.TLSVersion = value.TLSVersion
+				}
+				if observation.TLSVersionID == 0 {
+					observation.TLSVersionID = value.TLSVersionID
+				}
+				if observation.CipherSuite == "" {
+					observation.CipherSuite = value.CipherSuite
+				}
+				if observation.CipherSuiteID == 0 {
+					observation.CipherSuiteID = value.CipherSuiteID
+				}
+				if observation.PeerCertificateCount == 0 {
+					observation.PeerCertificateCount = value.PeerCertificateCount
+				}
+				observation.HandshakeComplete = observation.HandshakeComplete || value.HandshakeComplete
+				if observation.EndpointUsed == nil {
+					observation.EndpointUsed = endpointFromRaw(value.Address, target.Port)
+				}
+				if value.TLSVersion != "" {
+					versions = append(versions, sourceValue{value: value.TLSVersion, probe: probe.Name, evidenceID: evidence.ID})
+				}
+				if value.CipherSuite != "" {
+					ciphers = append(ciphers, sourceValue{value: value.CipherSuite, probe: probe.Name, evidenceID: evidence.ID})
+				}
+				if endpointValue := endpointFromRaw(value.Address, target.Port); endpointValue != nil {
+					endpoints = append(endpoints, sourceValue{value: endpointKey(*endpointValue), probe: probe.Name, evidenceID: evidence.ID})
+				}
+				validation := certificateValidation(probe.Interpretation.FailureReason, value.Error)
+				validations = append(validations, sourceValue{value: string(validation), probe: probe.Name, evidenceID: evidence.ID})
+				if observation.CertificateValidation == model.CertificateValidationUnknown || validation != model.CertificateValidationUnknown {
+					observation.CertificateValidation = validation
+				}
+				if observation.FailureReason == model.FailureReasonNone || observation.FailureReason == model.FailureReasonUnknown {
+					observation.FailureReason = probe.Interpretation.FailureReason
+				}
+				if probe.Interpretation.FaultDomain != "" {
+					observation.FaultDomain = probe.Interpretation.FaultDomain
+				}
+				mergeObservationTiming(&observation.Timing, probe.Timing)
+
+			case model.EvidenceKindCertificate:
+				var value tlsprobe.CertificateMetadata
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "TLS certificate evidence decode: "+err.Error())
+					continue
+				}
+				certificate := model.TLSCertificateObservation{
+					ChainIndex: value.ChainIndex, Subject: value.Subject, Issuer: value.Issuer,
+					SerialNumber: value.SerialNumber, Version: value.Version, NotBefore: value.NotBefore,
+					NotAfter: value.NotAfter, DNSNames: append([]string(nil), value.DNSNames...),
+					IPAddresses: append([]string(nil), value.IPAddresses...), EmailAddresses: append([]string(nil), value.EmailAddresses...),
+					IsCA: value.IsCA, PublicKeyAlgorithm: value.PublicKeyAlgorithm,
+					SignatureAlgorithm: value.SignatureAlgorithm, SHA256: value.SHA256,
+				}
+				if !certificateAlreadyPresent(observation.Certificates, certificate) {
+					observation.Certificates = append(observation.Certificates, certificate)
+				}
+			case model.EvidenceKindTLSTrust:
+				observation.Attempted = true
+				observation.TrustEvidenceIDs = appendUnique(observation.TrustEvidenceIDs, evidence.ID)
+				if explicitInterceptionEvidence(evidence.Raw) {
+					observation.InterceptionEvidenceIDs = appendUnique(observation.InterceptionEvidenceIDs, evidence.ID)
+				}
+			}
+		}
+		if probe.Name == "tls" && !seenTLS {
+			observation.Attempted = true
+			if observation.FailureReason == model.FailureReasonNone || observation.FailureReason == model.FailureReasonUnknown {
+				observation.FailureReason = probe.Interpretation.FailureReason
+			}
+			mergeObservationTiming(&observation.Timing, probe.Timing)
+		}
+	}
+	if observation.EndpointUsed == nil && endpoint.SelectedEndpoint != nil && observation.Attempted {
+		used := cloneEndpointValue(*endpoint.SelectedEndpoint)
+		observation.EndpointUsed = &used
+	}
+	if values := distinctSourceValues(versions); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("security.tls_version", values, versions))
+	}
+	if values := distinctSourceValues(ciphers); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("security.cipher_suite", values, ciphers))
+	}
+	if values := distinctSourceValues(validations); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("security.certificate_validation", values, validations))
+	}
+	if values := distinctSourceValues(endpoints); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("security.endpoint_used", values, endpoints))
+	}
+	if seenTLS || len(observation.Certificates) != 0 || len(observation.TrustEvidenceIDs) != 0 {
+		observation.Applicability = model.ObservationApplicabilityApplicable
+		observation.Certainty = model.ObservationCertaintyObserved
+	} else if observation.Applicability == model.ObservationApplicabilityUnsupported {
+		observation.FailureReason = model.FailureReasonUnsupported
+		observation.Certainty = model.ObservationCertaintyUnsupported
+	} else if observation.Applicability == model.ObservationApplicabilityInapplicable {
+		observation.Certainty = model.ObservationCertaintyDerived
+	} else {
+		observation.Applicability = model.ObservationApplicabilityNotAttempted
+	}
+	return model.NormalizeSecurityObservation(observation)
+}
+
+// buildApplicationObservation projects HTTP response/error evidence without
+// copying the optional body into the canonical contract. The body remains
+// available in the original raw evidence when a caller explicitly requested
+// it from the HTTP probe.
+func buildApplicationObservation(target model.Target, endpoint model.EndpointObservation, transport model.TransportObservation, probes []model.ProbeResult) model.ApplicationObservation {
+	observation := model.ApplicationObservation{
+		Applicability:     httpApplicability(target, probes),
+		RequestedResource: target.Resource,
+		Result:            model.HTTPResultNotAttempted,
+		FailureReason:     model.FailureReasonNone,
+		FaultDomain:       model.FaultDomainHTTP,
+		Certainty:         model.ObservationCertaintyUnknown,
+	}
+	if transport.TestedEndpoint != nil {
+		used := cloneEndpointValue(*transport.TestedEndpoint)
+		observation.EndpointUsed = &used
+	} else if endpoint.TestedEndpoint != nil {
+		used := cloneEndpointValue(*endpoint.TestedEndpoint)
+		observation.EndpointUsed = &used
+	}
+	var statuses, results, urls, endpoints []sourceValue
+	seenHTTP := false
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind != model.EvidenceKindHTTPResponse && evidence.Kind != httpprobe.EvidenceKindHTTPError {
+				continue
+			}
+			seenHTTP = true
+			observation.RequestAttempted = true
+			observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
+			observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
+			addObservationProvenance(&observation.Provenance, probe, evidence)
+			if evidence.Kind == model.EvidenceKindHTTPResponse {
+				var value httpResponseEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "HTTP response evidence decode: "+err.Error())
+					continue
+				}
+				observation.ResponseReceived = observation.ResponseReceived || value.ResponseReceived
+				if observation.HTTPVersion == "" {
+					observation.HTTPVersion = value.Protocol
+				}
+				if observation.StatusCode == 0 {
+					observation.StatusCode = value.StatusCode
+				}
+				if observation.Status == "" {
+					observation.Status = value.Status
+				}
+				if observation.URL == "" {
+					observation.URL = value.URL
+				}
+				observation.Redirects = appendHTTPRedirects(observation.Redirects, value.Redirects)
+				if value.ResponseReceived {
+					observation.Result = model.HTTPResultSuccess
+					if value.StatusCode >= 400 {
+						observation.Result = model.HTTPResultStatusFailure
+					}
+					statuses = append(statuses, sourceValue{value: strconv.Itoa(value.StatusCode), probe: probe.Name, evidenceID: evidence.ID})
+					results = append(results, sourceValue{value: string(observation.Result), probe: probe.Name, evidenceID: evidence.ID})
+				}
+				urls = append(urls, sourceValue{value: value.URL, probe: probe.Name, evidenceID: evidence.ID})
+			} else {
+				var value httpErrorEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "HTTP error evidence decode: "+err.Error())
+					continue
+				}
+				observation.ResponseReceived = observation.ResponseReceived || value.ResponseReceived
+				if observation.URL == "" {
+					observation.URL = value.URL
+				}
+				observation.Redirects = appendHTTPRedirects(observation.Redirects, value.Redirects)
+				observation.Result = model.HTTPResultRequestFailure
+				results = append(results, sourceValue{value: string(model.HTTPResultRequestFailure), probe: probe.Name, evidenceID: evidence.ID})
+				urls = append(urls, sourceValue{value: value.URL, probe: probe.Name, evidenceID: evidence.ID})
+			}
+			if observation.FailureReason == model.FailureReasonNone || observation.FailureReason == model.FailureReasonUnknown {
+				observation.FailureReason = probe.Interpretation.FailureReason
+			}
+			if probe.Interpretation.FaultDomain != "" {
+				observation.FaultDomain = probe.Interpretation.FaultDomain
+			}
+			mergeObservationTiming(&observation.Timing, probe.Timing)
+		}
+		if probe.Name == "http" && !seenHTTP {
+			observation.RequestAttempted = true
+			observation.Result = model.HTTPResultRequestFailure
+			observation.FailureReason = probe.Interpretation.FailureReason
+			mergeObservationTiming(&observation.Timing, probe.Timing)
+		}
+	}
+	if values := distinctSourceValues(statuses); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("application.status_code", values, statuses))
+	}
+	if values := distinctSourceValues(results); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("application.result", values, results))
+	}
+	if values := distinctSourceValues(urls); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("application.url", values, urls))
+	}
+	if observation.EndpointUsed != nil {
+		endpoints = append(endpoints, sourceValue{value: endpointKey(*observation.EndpointUsed), probe: "transport-observation", evidenceID: firstEvidenceID(transport.EvidenceIDs)})
+	}
+	if values := distinctSourceValues(endpoints); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("application.endpoint_used", values, endpoints))
+	}
+	if seenHTTP {
+		observation.Applicability = model.ObservationApplicabilityApplicable
+		observation.Certainty = model.ObservationCertaintyObserved
+	} else if observation.Applicability == model.ObservationApplicabilityInapplicable {
+		observation.Certainty = model.ObservationCertaintyDerived
+	} else if observation.Applicability == model.ObservationApplicabilityUnsupported {
+		observation.Result = model.HTTPResultUnsupported
+		observation.FailureReason = model.FailureReasonUnsupported
+		observation.Certainty = model.ObservationCertaintyUnsupported
+	} else {
+		observation.Applicability = model.ObservationApplicabilityNotAttempted
+	}
+	return model.NormalizeApplicationObservation(observation)
+}
+
+type tcpTransportEvidence struct {
+	RequestedEndpoint string                  `json:"requested_endpoint"`
+	LocalEndpoint     string                  `json:"local_endpoint,omitempty"`
+	RemoteEndpoint    string                  `json:"remote_endpoint,omitempty"`
+	SelectedEndpoint  string                  `json:"selected_endpoint,omitempty"`
+	TestedEndpoint    string                  `json:"tested_endpoint,omitempty"`
+	CandidateAttempts []model.EndpointAttempt `json:"candidate_attempts,omitempty"`
+}
+
+type httpResponseEvidence struct {
+	ResponseReceived bool                            `json:"response_received"`
+	URL              string                          `json:"url,omitempty"`
+	StatusCode       int                             `json:"status_code,omitempty"`
+	Status           string                          `json:"status,omitempty"`
+	Protocol         string                          `json:"protocol,omitempty"`
+	Redirects        []model.HTTPRedirectObservation `json:"redirects,omitempty"`
+}
+
+type httpErrorEvidence struct {
+	ResponseReceived bool                            `json:"response_received"`
+	URL              string                          `json:"url,omitempty"`
+	ErrorKind        string                          `json:"error_kind"`
+	Error            string                          `json:"error"`
+	Redirects        []model.HTTPRedirectObservation `json:"redirects,omitempty"`
+}
+
+func transportApplicability(target model.Target) model.ObservationApplicability {
+	if target.TransportProtocol == model.TransportUDP {
+		return model.ObservationApplicabilityUnsupported
+	}
+	return model.ObservationApplicabilityApplicable
+}
+
+func tlsApplicability(target model.Target, probes []model.ProbeResult) model.ObservationApplicability {
+	if target.ApplicationProtocol == model.ApplicationProtocolHTTPS || target.ApplicationProtocol == model.ApplicationProtocolTLS || target.Service.ID == model.ServiceProfileHTTPS || target.Service.ID == model.ServiceProfileCustomTLS {
+		return model.ObservationApplicabilityApplicable
+	}
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind == model.EvidenceKindTLSHandshake || evidence.Kind == model.EvidenceKindCertificate || evidence.Kind == model.EvidenceKindTLSTrust {
+				return model.ObservationApplicabilityApplicable
+			}
+		}
+	}
+	return model.ObservationApplicabilityInapplicable
+}
+
+func httpApplicability(target model.Target, probes []model.ProbeResult) model.ObservationApplicability {
+	if target.ApplicationProtocol == model.ApplicationProtocolHTTP || target.ApplicationProtocol == model.ApplicationProtocolHTTPS || target.Service.ID == model.ServiceProfileHTTP || target.Service.ID == model.ServiceProfileHTTPS {
+		return model.ObservationApplicabilityApplicable
+	}
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind == model.EvidenceKindHTTPResponse || evidence.Kind == httpprobe.EvidenceKindHTTPError {
+				return model.ObservationApplicabilityApplicable
+			}
+		}
+	}
+	return model.ObservationApplicabilityInapplicable
+}
+
+func requestedEndpoint(target model.Target) string {
+	host := strings.Trim(strings.TrimSpace(target.RequestedIdentity), "[]")
+	if target.LiteralIP != "" {
+		host = strings.Trim(strings.TrimSpace(target.LiteralIP), "[]")
+	}
+	if host == "" {
+		return ""
+	}
+	if target.Port == 0 {
+		return host
+	}
+	return net.JoinHostPort(host, strconv.Itoa(int(target.Port)))
+}
+
+func endpointFromRaw(raw string, defaultPort uint16) *model.Endpoint {
+	if raw == "" {
+		return nil
+	}
+	endpoint, ok := concreteEndpoint(raw, defaultPort)
+	if !ok {
+		return nil
+	}
+	return &endpoint
+}
+
+func cloneEndpointValue(value model.Endpoint) model.Endpoint {
+	value.EvidenceIDs = append([]string(nil), value.EvidenceIDs...)
+	return value
+}
+
+func cloneEndpointPointer(value *model.Endpoint) *model.Endpoint {
+	if value == nil {
+		return nil
+	}
+	copyValue := cloneEndpointValue(*value)
+	return &copyValue
+}
+
+func endpointKey(endpoint model.Endpoint) string {
+	if endpoint.Address == "" {
+		return ""
+	}
+	return net.JoinHostPort(normalizeAddress(endpoint.Address), strconv.Itoa(int(endpoint.Port)))
+}
+
+func transportOutcome(probe model.ProbeResult) model.TransportConnectionOutcome {
+	if probe.Status == model.ProbeStatusPassed && probe.Interpretation.FailureReason == model.FailureReasonNone {
+		return model.TransportConnectionOutcomeConnected
+	}
+	switch string(probe.Interpretation.FailureReason) {
+	case string(model.FailureReasonTCPConnectionRefused):
+		return model.TransportConnectionOutcomeRefused
+	case string(model.FailureReasonTCPConnectionReset):
+		return model.TransportConnectionOutcomeReset
+	case string(model.FailureReasonTCPTimeout):
+		return model.TransportConnectionOutcomeTimeout
+	case "tcp_host_unreachable", string(model.FailureReasonNetworkUnreachable):
+		return model.TransportConnectionOutcomeUnreachable
+	case "tcp_cancellation", "cancellation":
+		return model.TransportConnectionOutcomeCanceled
+	case string(model.FailureReasonUnsupported):
+		return model.TransportConnectionOutcomeUnsupported
+	default:
+		return model.TransportConnectionOutcomeFailed
+	}
+}
+
+func certificateValidation(reason model.FailureReason, message string) model.CertificateValidationState {
+	if reason == model.FailureReasonNone {
+		return model.CertificateValidationValid
+	}
+	if reason != model.FailureReasonCertificateValidationFailure {
+		return model.CertificateValidationUnknown
+	}
+	message = strings.ToLower(message)
+	switch {
+	case strings.Contains(message, "expired"), strings.Contains(message, "not yet valid"):
+		return model.CertificateValidationExpired
+	case strings.Contains(message, "not valid for"), strings.Contains(message, "hostname"):
+		return model.CertificateValidationHostnameMismatch
+	case strings.Contains(message, "unknown authority"), strings.Contains(message, "trust"):
+		return model.CertificateValidationUntrusted
+	default:
+		return model.CertificateValidationInvalid
+	}
+}
+
+func certificateAlreadyPresent(values []model.TLSCertificateObservation, candidate model.TLSCertificateObservation) bool {
+	for _, value := range values {
+		if candidate.SHA256 != "" && value.SHA256 == candidate.SHA256 {
+			return true
+		}
+		if candidate.SHA256 == "" && value.ChainIndex == candidate.ChainIndex && value.Subject == candidate.Subject {
+			return true
+		}
+	}
+	return false
+}
+
+func explicitInterceptionEvidence(raw json.RawMessage) bool {
+	var value struct {
+		Interception bool   `json:"interception"`
+		Intercepted  bool   `json:"intercepted"`
+		MITM         bool   `json:"mitm"`
+		TrustStore   string `json:"trust_store"`
+		TrustSource  string `json:"trust_source"`
+	}
+	if json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	return value.Interception || value.Intercepted || value.MITM || strings.Contains(strings.ToLower(value.TrustStore), "intercept") || strings.Contains(strings.ToLower(value.TrustSource), "intercept")
+}
+
+func packetFlowMatches(flow model.PacketFlowEvidence, target model.Target, probe model.ProbeResult) bool {
+	if flow.ProbeID != "" && probe.ProbeID != "" && flow.ProbeID == probe.ProbeID {
+		return true
+	}
+	if flow.CorrelationID != "" && probe.CorrelationID != "" && flow.CorrelationID == probe.CorrelationID {
+		return true
+	}
+	if flow.Target.RequestedIdentity != "" && target.RequestedIdentity != "" && strings.EqualFold(flow.Target.RequestedIdentity, target.RequestedIdentity) && flow.Target.Port == target.Port {
+		return true
+	}
+	return probe.Name == "tcp"
+}
+
+func addObservationProvenance(provenance *[]string, probe model.ProbeResult, evidence model.Evidence) {
+	*provenance = appendUnique(*provenance, "probe:"+probe.Name)
+	if probe.ProbeID != "" {
+		*provenance = appendUnique(*provenance, "probe_id:"+probe.ProbeID)
+	}
+	if probe.CorrelationID != "" {
+		*provenance = appendUnique(*provenance, "correlation:"+probe.CorrelationID)
+	}
+	if evidence.Source != "" {
+		*provenance = appendUnique(*provenance, "source:"+evidence.Source)
+	}
+}
+
+func mergeObservationTiming(destination *model.Timing, candidate model.Timing) {
+	if destination.StartedAt == nil && candidate.StartedAt != nil {
+		value := candidate.StartedAt.UTC()
+		destination.StartedAt = &value
+	}
+	if destination.CompletedAt == nil && candidate.CompletedAt != nil {
+		value := candidate.CompletedAt.UTC()
+		destination.CompletedAt = &value
+	}
+	if destination.DurationMS == 0 && candidate.DurationMS != 0 {
+		destination.DurationMS = candidate.DurationMS
+	}
+}
+
+func appendHTTPRedirects(destination []model.HTTPRedirectObservation, values []model.HTTPRedirectObservation) []model.HTTPRedirectObservation {
+	for _, value := range values {
+		duplicate := false
+		for _, existing := range destination {
+			if existing.URL == value.URL && existing.StatusCode == value.StatusCode && existing.ToURL == value.ToURL {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			destination = append(destination, value)
+		}
+	}
+	return destination
 }
 
 type sourceValue struct {

@@ -68,6 +68,9 @@ type Observations struct {
 	Endpoint       EndpointObservation       `json:"endpoint"`
 	NameResolution NameResolutionObservation `json:"name_resolution"`
 	NetworkContext NetworkContext            `json:"network_context"`
+	Transport      TransportObservation      `json:"transport"`
+	Security       SecurityObservation       `json:"security"`
+	Application    ApplicationObservation    `json:"application"`
 }
 
 // NormalizeObservations returns a detached, stable copy of an observation
@@ -98,7 +101,14 @@ func NormalizeObservations(observations Observations) Observations {
 	name.Conflicts = cloneObservationConflicts(name.Conflicts)
 
 	network := cloneNetworkContext(observations.NetworkContext)
-	return Observations{Endpoint: endpoint, NameResolution: name, NetworkContext: network}
+	return Observations{
+		Endpoint:       endpoint,
+		NameResolution: name,
+		NetworkContext: network,
+		Transport:      NormalizeTransportObservation(observations.Transport),
+		Security:       NormalizeSecurityObservation(observations.Security),
+		Application:    NormalizeApplicationObservation(observations.Application),
+	}
 }
 
 func cloneEndpoint(value Endpoint) Endpoint {
