@@ -20,12 +20,17 @@ const (
 	GatewayProbeName      = "gateway_reachability"
 )
 
-// DefaultRouteProbe emits only default-route observations. It intentionally
-// remains separate from TargetRouteProbe so callers can distinguish a missing
-// default route from a missing route to one particular target.
+// DefaultRouteProbe reports whether the selected endpoint actually depends on
+// a default route. It intentionally remains separate from TargetRouteProbe so
+// callers can distinguish default-route evidence from a route to one target.
 type DefaultRouteProbe struct {
 	Provider RouteTable
 	Timeout  time.Duration
+	// TargetIP may be populated by an integration layer after DNS selection.
+	// It is used only to decide the destination family and whether a default
+	// route is applicable; default-route evidence remains separate from the
+	// target route.
+	TargetIP netip.Addr
 }
 
 func NewDefaultRouteProbe(providers ...RouteTable) *DefaultRouteProbe {
@@ -48,14 +53,69 @@ func (p *DefaultRouteProbe) Run(ctx context.Context, execution probe.ExecutionCo
 		evidence := []model.Evidence{routeErrorEvidence("default-route-1", err)}
 		return routeResult(execution.Target, p.Name(), started, completed, evidence, statusForError(err), reasonForError(err), model.LayerRoute, model.FaultDomainRouting)
 	}
+	targetIP, targetErr := p.targetAddress(execution.Target)
+	if targetErr == nil {
+		if selection, found := SelectDetailed(routes, targetIP); found && selection.Selected.Destination.Bits() != 0 {
+			// A more-specific target route is the route the endpoint actually
+			// uses. A default route is not required merely because this separate
+			// observation lane exists.
+			raw := selectedRouteEvidence("default", selection, targetIP.String(), nil)
+			raw.DefaultRouteApplicable = boolPointer(false)
+			raw.Error = "default route is not required; a more-specific target route is selected"
+			return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("default-route-1", raw)}, model.ProbeStatusPassed, model.FailureReasonNone, model.LayerRoute, model.FaultDomainRouting)
+		}
+		if targetIP.IsLoopback() || targetIP.IsLinkLocalUnicast() {
+			selection, found := SelectDetailed(routes, targetIP)
+			if !found {
+				// A default route is not an applicable external check for a
+				// local-scope literal, even when the platform does not expose
+				// its loopback or link-local route in the table.
+				selection = Selection{Target: targetIP, Selected: Route{Destination: netip.PrefixFrom(targetIP, targetIP.BitLen())}, Candidates: nil}
+			}
+			raw := selectedRouteEvidence("default", selection, targetIP.String(), nil)
+			raw.DefaultRouteApplicable = boolPointer(false)
+			raw.Error = "default route is not applicable to the selected local-scope target"
+			return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("default-route-1", raw)}, model.ProbeStatusPassed, model.FailureReasonNone, model.LayerRoute, model.FaultDomainRouting)
+		}
+	}
 	family := targetFamily(execution.Target)
+	if targetIP.IsValid() {
+		if targetIP.Is4() {
+			family = 4
+		} else {
+			family = 6
+		}
+	}
 	selected, found := Default(routes, family)
 	if !found {
 		raw := map[string]any{"route_type": "default", "routes_observed": len(routes)}
 		return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("default-route-1", raw)}, model.ProbeStatusFailed, model.FailureReasonNoRoute, model.LayerRoute, model.FaultDomainRouting)
 	}
-	raw := selectedRouteEvidence("default", selected, "")
+	raw := selectedRouteEvidence("default", Selection{Selected: selected, Candidates: []Route{selected}}, "", nil)
+	raw.DefaultRouteApplicable = boolPointer(true)
 	return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("default-route-1", raw)}, model.ProbeStatusPassed, model.FailureReasonNone, model.LayerRoute, model.FaultDomainRouting)
+}
+
+// RunForAddress applies the family/local-scope decision to an already
+// resolved address without changing the canonical target or doing DNS work.
+func (p *DefaultRouteProbe) RunForAddress(ctx context.Context, execution probe.ExecutionContext, targetIP netip.Addr) model.ProbeResult {
+	clone := *p
+	clone.TargetIP = targetIP
+	return clone.Run(ctx, execution)
+}
+
+func (p *DefaultRouteProbe) targetAddress(target model.Target) (netip.Addr, error) {
+	if p.TargetIP.IsValid() {
+		return model.NormalizeAddr(p.TargetIP), nil
+	}
+	if address := targetAddress(target); address.IsValid() {
+		return address, nil
+	}
+	return parseTargetAddress(target.RequestedIdentity)
+}
+
+func routeIsOnLink(route Route) bool {
+	return !route.Gateway.IsValid() || route.Gateway.IsUnspecified()
 }
 
 func (p *DefaultRouteProbe) routes(ctx context.Context) ([]Route, error) {
@@ -71,8 +131,9 @@ func (p *DefaultRouteProbe) routes(ctx context.Context) ([]Route, error) {
 // It accepts a literal IPv4 or IPv6 address, allowing deterministic tests and
 // avoiding an implicit DNS query. Name resolution is owned by the DNS lane.
 type TargetRouteProbe struct {
-	Provider RouteTable
-	Timeout  time.Duration
+	Provider  RouteTable
+	Timeout   time.Duration
+	Neighbors NeighborTable
 	// TargetIP may be populated by an integration layer after DNS has
 	// selected an address. When valid it takes precedence over the requested
 	// identity.
@@ -87,7 +148,7 @@ func NewTargetRouteProbe(providers ...RouteTable) *TargetRouteProbe {
 	if len(providers) != 0 && providers[0] != nil {
 		provider = providers[0]
 	}
-	return &TargetRouteProbe{Provider: provider, Timeout: defaultProbeTimeout}
+	return &TargetRouteProbe{Provider: provider, Timeout: defaultProbeTimeout, Neighbors: SystemNeighborTable{}}
 }
 
 // NewEffectiveRouteProbe is the descriptive constructor alias.
@@ -113,12 +174,12 @@ func (p *TargetRouteProbe) Run(ctx context.Context, execution probe.ExecutionCon
 		evidence := []model.Evidence{routeErrorEvidence("target-route-1", err)}
 		return routeResult(execution.Target, p.Name(), started, completed, evidence, statusForError(err), reasonForError(err), model.LayerRoute, model.FaultDomainRouting)
 	}
-	selected, found := Select(routes, targetIP)
+	selection, found := SelectDetailed(routes, targetIP)
 	if !found {
 		raw := map[string]any{"route_type": "target", "target_ip": targetIP, "routes_observed": len(routes)}
 		return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("target-route-1", raw)}, model.ProbeStatusFailed, model.FailureReasonNoRoute, model.LayerRoute, model.FaultDomainRouting)
 	}
-	raw := selectedRouteEvidence("target", selected, targetIP.String())
+	raw := selectedRouteEvidence("target", selection, targetIP.String(), p.neighborEvidence(callCtx, targetIP, selection.Selected))
 	return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("target-route-1", raw)}, model.ProbeStatusPassed, model.FailureReasonNone, model.LayerRoute, model.FaultDomainRouting)
 }
 
@@ -134,6 +195,9 @@ func (p *TargetRouteProbe) targetAddress(target model.Target) (netip.Addr, error
 	if p.TargetIP.IsValid() {
 		return model.NormalizeAddr(p.TargetIP), nil
 	}
+	if address := targetAddress(target); address.IsValid() {
+		return address, nil
+	}
 	return parseTargetAddress(target.RequestedIdentity)
 }
 
@@ -143,6 +207,31 @@ func (p *TargetRouteProbe) routes(ctx context.Context) ([]Route, error) {
 		provider = SystemRouteTable{}
 	}
 	return provider.Routes(ctx)
+}
+
+func (p *TargetRouteProbe) neighborEvidence(ctx context.Context, target netip.Addr, selected Route) *model.NeighborEvidence {
+	provider := p.Neighbors
+	if provider == nil {
+		provider = SystemNeighborTable{}
+	}
+	lookup := target
+	if selected.Gateway.IsValid() && !selected.Gateway.IsUnspecified() {
+		lookup = selected.Gateway
+	}
+	evidence, err := provider.Neighbors(ctx, lookup, selected.InterfaceIndex)
+	if err != nil {
+		if evidence.Observation == "" {
+			evidence.Observation = model.NeighborObservationError
+		}
+		if evidence.Note == "" {
+			evidence.Note = err.Error()
+		}
+		return &evidence
+	}
+	if evidence.Observation == "" {
+		evidence.Observation = model.NeighborObservationUnknown
+	}
+	return &evidence
 }
 
 // GatewayProbe checks the next-hop gateway selected for the target. Failure
@@ -178,46 +267,58 @@ func (p *GatewayProbe) Run(ctx context.Context, execution probe.ExecutionContext
 		evidence := []model.Evidence{routeEvidence("gateway-reachability-1", map[string]any{"error": err.Error(), "supporting_only": true})}
 		return routeResult(execution.Target, p.Name(), started, completed, evidence, statusForError(err), reasonForError(err), model.LayerGateway, model.FaultDomainGateway)
 	}
-	var selected Route
+	var selection Selection
 	var found bool
 	targetIP, parseErr := p.targetAddress(execution.Target)
 	if parseErr == nil {
-		selected, found = Select(routes, targetIP)
+		selection, found = SelectDetailed(routes, targetIP)
 	} else {
-		selected, found = Default(routes, targetFamily(execution.Target))
+		selected, selectedFound := Default(routes, targetFamily(execution.Target))
+		selection = Selection{Selected: selected, Candidates: []Route{selected}}
+		found = selectedFound
 	}
 	if !found {
 		raw := map[string]any{"route_type": "gateway", "supporting_only": true, "routes_observed": len(routes)}
 		return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("gateway-reachability-1", raw)}, model.ProbeStatusFailed, model.FailureReasonNoRoute, model.LayerGateway, model.FaultDomainRouting)
 	}
-	if !selected.Gateway.IsValid() || selected.Gateway.IsUnspecified() {
+	if targetIP.IsValid() && (targetIP.IsLoopback() || targetIP.IsLinkLocalUnicast()) {
+		// Loopback and link-local are local route boundaries. Even if a
+		// malformed fixture or platform row supplies a gateway, never run an
+		// external gateway check for these destinations.
+		raw := selectedRouteEvidence("gateway", selection, "", nil)
+		raw.GatewayTested = boolPointer(false)
+		raw.Reachable = nil
+		raw.SupportingOnly = true
+		return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("gateway-reachability-1", raw)}, model.ProbeStatusPassed, model.FailureReasonNone, model.LayerGateway, model.FaultDomainGateway)
+	}
+	if routeIsOnLink(selection.Selected) {
 		// Directly connected target: there is no gateway to ping. Record that
 		// fact as successful local evidence rather than inventing a failure.
-		raw := selectedRouteEvidence("gateway", selected, "")
-		raw["gateway_tested"] = false
-		raw["reachable"] = nil
-		raw["supporting_only"] = true
+		raw := selectedRouteEvidence("gateway", selection, "", nil)
+		raw.GatewayTested = boolPointer(false)
+		raw.Reachable = nil
+		raw.SupportingOnly = true
 		return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("gateway-reachability-1", raw)}, model.ProbeStatusPassed, model.FailureReasonNone, model.LayerGateway, model.FaultDomainGateway)
 	}
 	checker := p.Checker
 	if checker == nil {
 		checker = defaultGatewayChecker
 	}
-	err = checker(callCtx, selected.Gateway)
+	err = checker(callCtx, selection.Selected.Gateway)
 	completed = time.Now().UTC()
-	raw := selectedRouteEvidence("gateway", selected, "")
-	raw["gateway_tested"] = true
-	raw["reachable"] = err == nil
-	raw["supporting_only"] = true
+	raw := selectedRouteEvidence("gateway", selection, "", nil)
+	raw.GatewayTested = boolPointer(true)
+	raw.Reachable = boolPointer(err == nil)
+	raw.SupportingOnly = true
 	if err != nil {
-		raw["error"] = err.Error()
+		raw.Error = err.Error()
 		if gatewayCheckUnsupported(err) {
 			// Route discovery above succeeded. The optional gateway check was
 			// unavailable, so do not describe the selected route as untested or
 			// turn the missing capability into a reachability failure.
-			raw["gateway_tested"] = false
-			raw["reachable"] = nil
-			raw["error"] = ErrGatewayReachabilityUnsupported.Error()
+			raw.GatewayTested = boolPointer(false)
+			raw.Reachable = nil
+			raw.Error = ErrGatewayReachabilityUnsupported.Error()
 			return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("gateway-reachability-1", raw)}, model.ProbeStatusSkipped, model.FailureReasonUnsupported, model.LayerGateway, model.FaultDomainGateway)
 		}
 		status := model.ProbeStatusFailed
@@ -239,6 +340,9 @@ func (p *GatewayProbe) RunForAddress(ctx context.Context, execution probe.Execut
 func (p *GatewayProbe) targetAddress(target model.Target) (netip.Addr, error) {
 	if p.TargetIP.IsValid() {
 		return model.NormalizeAddr(p.TargetIP), nil
+	}
+	if address := targetAddress(target); address.IsValid() {
+		return address, nil
 	}
 	return parseTargetAddress(target.RequestedIdentity)
 }
@@ -267,8 +371,8 @@ func parseTargetAddress(host string) (netip.Addr, error) {
 }
 
 func targetFamily(target model.Target) int {
-	address, err := parseTargetAddress(target.RequestedIdentity)
-	if err != nil {
+	address := targetAddress(target)
+	if !address.IsValid() {
 		return 0
 	}
 	if address.Is4() {
@@ -277,17 +381,99 @@ func targetFamily(target model.Target) int {
 	return 6
 }
 
-func selectedRouteEvidence(routeType string, selected Route, target string) map[string]any {
-	selected = normalizeRoute(selected)
-	return map[string]any{
-		"route_type":      routeType,
-		"target_ip":       target,
-		"destination":     selected.Destination,
-		"gateway":         selected.Gateway,
-		"interface":       selected.Interface,
-		"interface_index": selected.InterfaceIndex,
-		"metric":          selected.Metric,
+func selectedRouteEvidence(routeType string, selection Selection, target string, neighbor *model.NeighborEvidence) RouteObservation {
+	selected := normalizeRoute(selection.Selected)
+	gateway := addrString(selected.Gateway)
+	effective := model.RouteDispositionOnLink
+	nextHop := "on-link"
+	if gateway != "" {
+		effective = model.RouteDispositionRouted
+		nextHop = gateway
 	}
+	observation := RouteObservation{
+		RouteType:               routeType,
+		TargetIP:                target,
+		Destination:             selected.Destination.String(),
+		Gateway:                 gateway,
+		Interface:               selected.Interface,
+		InterfaceIndex:          selected.InterfaceIndex,
+		SourceAddress:           addrString(selected.Source),
+		Metric:                  selected.Metric,
+		EffectiveRoute:          effective,
+		RoutePrefix:             selected.Destination.String(),
+		NextHop:                 nextHop,
+		InterfaceType:           selected.InterfaceType,
+		VPNOrTunnel:             selected.VPNOrTunnel,
+		VirtualAdapter:          selected.VirtualAdapter,
+		RouteSelectionAmbiguous: selection.Ambiguous,
+		Neighbor:                neighbor,
+	}
+	for _, candidate := range selection.Candidates {
+		candidate = normalizeRoute(candidate)
+		if sameRoute(candidate, selected) {
+			continue
+		}
+		observation.CompetingRoutes = append(observation.CompetingRoutes, routeEvidenceCandidate(candidate))
+	}
+	return observation
+}
+
+func routeEvidenceCandidate(route Route) RouteEvidenceCandidate {
+	route = normalizeRoute(route)
+	gateway := addrString(route.Gateway)
+	nextHop := "on-link"
+	if gateway != "" {
+		nextHop = gateway
+	}
+	return RouteEvidenceCandidate{
+		RoutePrefix: route.Destination.String(), Gateway: gateway, NextHop: nextHop,
+		Interface: route.Interface, InterfaceIndex: route.InterfaceIndex,
+		SourceAddress: addrString(route.Source), Metric: route.Metric,
+		VPNOrTunnel: route.VPNOrTunnel, VirtualAdapter: route.VirtualAdapter,
+	}
+}
+
+func addrString(address netip.Addr) string {
+	if !address.IsValid() || address.IsUnspecified() {
+		return ""
+	}
+	return model.NormalizeAddr(address).String()
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+// DecodeRouteEvidence decodes the known structured route shape and fills
+// fields emitted by older route probes when possible.
+func DecodeRouteEvidence(evidence model.Evidence) (RouteObservation, error) {
+	if evidence.Kind != model.EvidenceKindRoute {
+		return RouteObservation{}, errors.New("evidence is not route evidence")
+	}
+	var observation RouteObservation
+	if err := json.Unmarshal(evidence.Raw, &observation); err != nil {
+		return RouteObservation{}, err
+	}
+	if observation.RoutePrefix == "" {
+		observation.RoutePrefix = observation.Destination
+	}
+	if gateway, err := netip.ParseAddr(observation.Gateway); err == nil && gateway.IsUnspecified() {
+		observation.Gateway = ""
+	}
+	hasRoute := observation.RoutePrefix != "" || observation.Gateway != "" || observation.Interface != "" || observation.InterfaceIndex != 0
+	if observation.EffectiveRoute == "" && hasRoute {
+		if observation.Gateway == "" {
+			observation.EffectiveRoute = model.RouteDispositionOnLink
+		} else {
+			observation.EffectiveRoute = model.RouteDispositionRouted
+		}
+	}
+	if observation.NextHop == "" && hasRoute {
+		if observation.Gateway == "" {
+			observation.NextHop = "on-link"
+		} else {
+			observation.NextHop = observation.Gateway
+		}
+	}
+	return observation, nil
 }
 
 func routeEvidence(id string, raw any) model.Evidence {

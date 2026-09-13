@@ -40,10 +40,13 @@ type Address struct {
 type InterfaceState struct {
 	Index     int       `json:"index"`
 	Name      string    `json:"name"`
+	Type      string    `json:"type,omitempty"`
 	Hardware  string    `json:"hardware_address,omitempty"`
 	MTU       int       `json:"mtu"`
 	Up        bool      `json:"up"`
 	Loopback  bool      `json:"loopback"`
+	VPN       bool      `json:"vpn,omitempty"`
+	Virtual   bool      `json:"virtual,omitempty"`
 	Addresses []Address `json:"addresses,omitempty"`
 }
 
@@ -102,11 +105,13 @@ func (p SystemProvider) Snapshot(ctx context.Context) (Snapshot, error) {
 		state := InterfaceState{
 			Index:    iface.Index,
 			Name:     iface.Name,
+			Type:     interfaceType(iface.Name, iface.Flags&net.FlagLoopback != 0),
 			Hardware: iface.HardwareAddr.String(),
 			MTU:      iface.MTU,
 			Up:       iface.Flags&net.FlagUp != 0,
 			Loopback: iface.Flags&net.FlagLoopback != 0,
 		}
+		state.VPN, state.Virtual = classifyInterface(iface.Name, state.Loopback)
 		if addresses, addressErr := iface.Addrs(); addressErr == nil {
 			for _, address := range addresses {
 				if parsed, ok := parseAddress(address); ok {

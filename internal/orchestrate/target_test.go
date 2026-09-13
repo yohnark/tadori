@@ -31,6 +31,7 @@ func TestCanonicalTargetParsing(t *testing.T) {
 		{name: "IPv4", input: "10.0.10.25", wantIdentity: "10.0.10.25", wantLiteral: "10.0.10.25", wantService: model.ServiceProfileHTTP, wantPort: 80},
 		{name: "IPv4 explicit port", input: "10.0.10.25:445", wantIdentity: "10.0.10.25", wantLiteral: "10.0.10.25", wantService: model.ServiceProfileHTTP, wantPort: 445},
 		{name: "IPv6 literal", input: "2001:db8::1", wantIdentity: "2001:db8::1", wantLiteral: "2001:db8::1", wantService: model.ServiceProfileHTTP, wantPort: 80},
+		{name: "IPv6 link-local literal", input: "fe80::1", wantIdentity: "fe80::1", wantLiteral: "fe80::1", wantService: model.ServiceProfileHTTP, wantPort: 80},
 		{name: "IPv6 literal explicit port", input: "[2001:db8::1]:8443", wantIdentity: "2001:db8::1", wantLiteral: "2001:db8::1", wantService: model.ServiceProfileHTTP, wantPort: 8443},
 		{name: "UNC share", input: `\fileserver01\share`, wantIdentity: "fileserver01", wantService: model.ServiceProfileSMB, wantProtocol: model.ApplicationProtocolSMB, wantPort: 445, wantResource: "/share"},
 		{name: "explicit SMB port override", input: "fileserver01", service: model.ServiceProfileSMB, port: uint16Pointer(1445), wantIdentity: "fileserver01", wantService: model.ServiceProfileSMB, wantPort: 1445},

@@ -242,6 +242,7 @@ type Target struct {
 	ResolvedAddresses   []string            `json:"resolved_addresses,omitempty"`
 	SelectedEndpoint    *Endpoint           `json:"selected_endpoint,omitempty"`
 	TestedEndpoint      *Endpoint           `json:"tested_endpoint,omitempty"`
+	NetworkContext      *NetworkContext     `json:"network_context,omitempty"`
 }
 
 // ParseTarget is the one canonical target parser. It accepts URLs, names,
@@ -280,7 +281,7 @@ func ParseTarget(intent TargetIntent) (Target, error) {
 			return Target{}, err
 		}
 		hasInputScheme = true
-	} else if strings.Contains(raw, "://") || hasURIStyleScheme(raw) && !looksLikeHostPort(raw) {
+	} else if !isLiteralAddressInput(raw) && (strings.Contains(raw, "://") || hasURIStyleScheme(raw) && !looksLikeHostPort(raw)) {
 		parsed, err := url.Parse(raw)
 		if err != nil {
 			return Target{}, fmt.Errorf("parse diagnose target: %w", err)
@@ -421,6 +422,11 @@ func hasURIStyleScheme(raw string) bool {
 		}
 	}
 	return true
+}
+
+func isLiteralAddressInput(raw string) bool {
+	_, err := netip.ParseAddr(raw)
+	return err == nil
 }
 
 func looksLikeHostPort(raw string) bool {
@@ -574,6 +580,18 @@ func NormalizeTarget(target Target) Target {
 	}
 	if target.ResolvedAddresses != nil {
 		target.ResolvedAddresses = append([]string(nil), target.ResolvedAddresses...)
+	}
+	if target.NetworkContext != nil {
+		context := *target.NetworkContext
+		context.CompetingRoutes = append([]RouteCandidate(nil), target.NetworkContext.CompetingRoutes...)
+		context.Provenance = append([]string(nil), target.NetworkContext.Provenance...)
+		context.EvidenceIDs = append([]string(nil), target.NetworkContext.EvidenceIDs...)
+		if target.NetworkContext.Neighbor != nil {
+			neighbor := *target.NetworkContext.Neighbor
+			neighbor.Entries = append([]NeighborEntry(nil), target.NetworkContext.Neighbor.Entries...)
+			context.Neighbor = &neighbor
+		}
+		target.NetworkContext = &context
 	}
 	return target
 }

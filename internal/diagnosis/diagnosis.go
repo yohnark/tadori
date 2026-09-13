@@ -1,6 +1,8 @@
 package diagnosis
 
 import (
+	"encoding/json"
+	"net/netip"
 	"sort"
 
 	"github.com/yohnark/tadori/internal/model"
@@ -60,7 +62,7 @@ func Diagnose(probes []model.ProbeResult) []model.DiagnosticFinding {
 
 	// A gateway result is supporting evidence and can still be useful when no
 	// decisive layer produced a finding.
-	if gateway := matching(observations, model.FailureReasonGatewayUnreachable); len(gateway) != 0 && !contradicted(gateway[0], observations) {
+	if gateway := matchingApplicableGateways(observations); len(gateway) != 0 && !contradicted(gateway[0], observations) {
 		return []model.DiagnosticFinding{makeFinding(model.FailureReasonGatewayUnreachable, gateway)}
 	}
 
@@ -71,7 +73,7 @@ func withGatewaySupport(finding model.DiagnosticFinding, observations []observat
 	// Gateway reachability is supporting evidence rather than a claim that
 	// the gateway is necessarily the root cause. Preserve it as a second
 	// machine-readable finding when a decisive failure exists.
-	gateway := matching(observations, model.FailureReasonGatewayUnreachable)
+	gateway := matchingApplicableGateways(observations)
 	if len(gateway) != 0 && !contradicted(gateway[0], observations) {
 		return []model.DiagnosticFinding{finding, makeFinding(model.FailureReasonGatewayUnreachable, gateway)}
 	}
@@ -282,6 +284,63 @@ func matching(observations []observation, reason model.FailureReason) []observat
 		}
 	}
 	return matches
+}
+
+func matchingApplicableGateways(observations []observation) []observation {
+	matches := matching(observations, model.FailureReasonGatewayUnreachable)
+	applicable := make([]observation, 0, len(matches))
+	for _, match := range matches {
+		if gatewayCheckApplies(match.result) {
+			applicable = append(applicable, match)
+		}
+	}
+	return applicable
+}
+
+// gatewayCheckApplies prevents a stale or hand-built gateway failure from
+// becoming a diagnosis when the selected route explicitly has no gateway.
+// Evidence that predates the structured route shape remains applicable so
+// older callers do not silently lose a real supporting observation.
+func gatewayCheckApplies(result model.ProbeResult) bool {
+	for _, evidence := range result.Evidence {
+		if evidence.Kind != model.EvidenceKindRoute && evidence.Kind != model.EvidenceKindGatewayReachability {
+			continue
+		}
+		var routeValue struct {
+			Destination    string                 `json:"destination"`
+			RoutePrefix    string                 `json:"route_prefix"`
+			Gateway        string                 `json:"gateway"`
+			EffectiveRoute model.RouteDisposition `json:"effective_route"`
+			GatewayTested  *bool                  `json:"gateway_tested"`
+		}
+		if err := json.Unmarshal(evidence.Raw, &routeValue); err != nil {
+			continue
+		}
+		if routeValue.GatewayTested != nil && !*routeValue.GatewayTested {
+			return false
+		}
+		if routeValue.EffectiveRoute == model.RouteDispositionOnLink && (routeValue.Destination != "" || routeValue.RoutePrefix != "") {
+			return false
+		}
+		if !gatewayPresent(routeValue.Gateway) && (routeValue.Destination != "" || routeValue.RoutePrefix != "") {
+			return false
+		}
+	}
+	return true
+}
+
+func gatewayPresent(value string) bool {
+	if value == "" {
+		return false
+	}
+	address, err := netip.ParseAddr(value)
+	if err != nil {
+		// Preserve the conservative behavior for legacy opaque values: a
+		// non-empty, unparseable gateway is still evidence that a check may
+		// have been applicable.
+		return true
+	}
+	return !address.IsUnspecified()
 }
 
 func makeFinding(reason model.FailureReason, matches []observation) model.DiagnosticFinding {
