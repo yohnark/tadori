@@ -537,6 +537,9 @@ func buildSecurityObservation(target model.Target, endpoint model.EndpointObserv
 // available in the original raw evidence when a caller explicitly requested
 // it from the HTTP probe.
 func buildApplicationObservation(target model.Target, endpoint model.EndpointObservation, transport model.TransportObservation, probes []model.ProbeResult) model.ApplicationObservation {
+	if target.ApplicationProtocol == model.ApplicationProtocolSSH || target.ApplicationProtocol == model.ApplicationProtocolRDP || hasProtocolEvidence(probes) {
+		return buildProtocolApplicationObservation(target, endpoint, transport, probes)
+	}
 	observation := model.ApplicationObservation{
 		Applicability:     httpApplicability(target, probes),
 		RequestedResource: target.Resource,
@@ -651,6 +654,169 @@ func buildApplicationObservation(target model.Target, endpoint model.EndpointObs
 		observation.Applicability = model.ObservationApplicabilityNotAttempted
 	}
 	return model.NormalizeApplicationObservation(observation)
+}
+
+type sshApplicationEvidence struct {
+	TransportConnected   bool   `json:"transport_connected"`
+	BannerReceived       bool   `json:"banner_received"`
+	BannerValid          bool   `json:"banner_valid"`
+	ServerIdentification string `json:"server_identification,omitempty"`
+	ResponseClass        string `json:"response_class"`
+}
+
+type rdpApplicationEvidence struct {
+	TransportConnected   bool     `json:"transport_connected"`
+	NegotiationAttempted bool     `json:"negotiation_attempted"`
+	NegotiationComplete  bool     `json:"negotiation_complete"`
+	RequestedProtocols   []string `json:"requested_protocols,omitempty"`
+	NegotiatedProtocol   string   `json:"negotiated_protocol,omitempty"`
+	ResponseType         string   `json:"response_type"`
+}
+
+func hasProtocolEvidence(probes []model.ProbeResult) bool {
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind == model.EvidenceKindSSHHandshake || evidence.Kind == model.EvidenceKindRDPNegotiation {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// buildProtocolApplicationObservation projects SSH and RDP handshakes into
+// the same canonical application envelope used by HTTP. TransportConnected
+// is intentionally retained separately from HandshakeComplete: a responder
+// that accepts TCP but rejects or fails the protocol is an application-layer
+// outcome, not a transport failure.
+func buildProtocolApplicationObservation(target model.Target, endpoint model.EndpointObservation, transport model.TransportObservation, probes []model.ProbeResult) model.ApplicationObservation {
+	protocol := target.ApplicationProtocol
+	if protocol == "" {
+		if target.Service.ID == model.ServiceProfileSSH {
+			protocol = model.ApplicationProtocolSSH
+		} else if target.Service.ID == model.ServiceProfileRDP {
+			protocol = model.ApplicationProtocolRDP
+		}
+	}
+	observation := model.ApplicationObservation{
+		Applicability:     model.ObservationApplicabilityApplicable,
+		Protocol:          protocol,
+		ProtocolResult:    model.ApplicationProtocolResultNotAttempted,
+		Result:            model.HTTPResultNotAttempted,
+		FailureReason:     model.FailureReasonNone,
+		FaultDomain:       protocolFaultDomain(protocol),
+		Certainty:         model.ObservationCertaintyUnknown,
+		RequestedResource: target.Resource,
+	}
+	if transport.TestedEndpoint != nil {
+		used := cloneEndpointValue(*transport.TestedEndpoint)
+		observation.EndpointUsed = &used
+	} else if endpoint.TestedEndpoint != nil {
+		used := cloneEndpointValue(*endpoint.TestedEndpoint)
+		observation.EndpointUsed = &used
+	}
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			switch evidence.Kind {
+			case model.EvidenceKindSSHHandshake:
+				var value sshApplicationEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "SSH handshake evidence decode: "+err.Error())
+					continue
+				}
+				observation.Protocol = model.ApplicationProtocolSSH
+				observation.TransportConnected = observation.TransportConnected || value.TransportConnected
+				observation.RequestAttempted = observation.RequestAttempted || value.TransportConnected
+				observation.HandshakeAttempted = observation.HandshakeAttempted || value.TransportConnected
+				observation.ResponseReceived = observation.ResponseReceived || value.BannerReceived
+				observation.HandshakeComplete = observation.HandshakeComplete || value.BannerValid
+				if observation.ServerIdentification == "" {
+					observation.ServerIdentification = value.ServerIdentification
+				}
+				observation.ProtocolResult = sshProtocolResult(value.ResponseClass, value.BannerValid)
+				observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
+				observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
+				addObservationProvenance(&observation.Provenance, probe, evidence)
+				observation.FailureReason = probe.Interpretation.FailureReason
+				if probe.Interpretation.FaultDomain != "" {
+					observation.FaultDomain = probe.Interpretation.FaultDomain
+				}
+				mergeObservationTiming(&observation.Timing, probe.Timing)
+			case model.EvidenceKindRDPNegotiation:
+				var value rdpApplicationEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "RDP negotiation evidence decode: "+err.Error())
+					continue
+				}
+				observation.Protocol = model.ApplicationProtocolRDP
+				observation.TransportConnected = observation.TransportConnected || value.TransportConnected
+				observation.RequestAttempted = observation.RequestAttempted || value.TransportConnected
+				observation.HandshakeAttempted = observation.HandshakeAttempted || value.NegotiationAttempted
+				observation.ResponseReceived = observation.ResponseReceived || (value.ResponseType != "timeout" && value.ResponseType != "transport_failure")
+				observation.HandshakeComplete = observation.HandshakeComplete || value.NegotiationComplete
+				observation.RequestedSecurityProtocols = appendUnique(observation.RequestedSecurityProtocols, value.RequestedProtocols...)
+				if observation.NegotiatedSecurityProtocol == "" {
+					observation.NegotiatedSecurityProtocol = value.NegotiatedProtocol
+				}
+				observation.ProtocolResult = rdpProtocolResult(value.ResponseType, value.NegotiationComplete)
+				observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
+				observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
+				addObservationProvenance(&observation.Provenance, probe, evidence)
+				observation.FailureReason = probe.Interpretation.FailureReason
+				if probe.Interpretation.FaultDomain != "" {
+					observation.FaultDomain = probe.Interpretation.FaultDomain
+				}
+				mergeObservationTiming(&observation.Timing, probe.Timing)
+			}
+		}
+	}
+	if observation.RequestAttempted {
+		observation.Applicability = model.ObservationApplicabilityApplicable
+		observation.Certainty = model.ObservationCertaintyObserved
+	} else if protocol != model.ApplicationProtocolSSH && protocol != model.ApplicationProtocolRDP {
+		observation.Applicability = model.ObservationApplicabilityInapplicable
+		observation.Certainty = model.ObservationCertaintyDerived
+	}
+	return model.NormalizeApplicationObservation(observation)
+}
+
+func protocolFaultDomain(protocol model.ApplicationProtocol) model.FaultDomain {
+	if protocol == model.ApplicationProtocolSSH {
+		return model.FaultDomainSSH
+	}
+	return model.FaultDomainRDP
+}
+
+func sshProtocolResult(class string, complete bool) model.ApplicationProtocolResult {
+	if complete {
+		return model.ApplicationProtocolResultSuccess
+	}
+	switch class {
+	case "timeout":
+		return model.ApplicationProtocolResultTimeout
+	case "malformed", "unsupported_version":
+		return model.ApplicationProtocolResultMalformed
+	case "non_ssh":
+		return model.ApplicationProtocolResultFailure
+	default:
+		return model.ApplicationProtocolResultFailure
+	}
+}
+
+func rdpProtocolResult(responseType string, complete bool) model.ApplicationProtocolResult {
+	if complete {
+		return model.ApplicationProtocolResultSuccess
+	}
+	switch responseType {
+	case "timeout":
+		return model.ApplicationProtocolResultTimeout
+	case "rejected":
+		return model.ApplicationProtocolResultRejected
+	case "malformed":
+		return model.ApplicationProtocolResultMalformed
+	default:
+		return model.ApplicationProtocolResultFailure
+	}
 }
 
 type tcpTransportEvidence struct {
