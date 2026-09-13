@@ -32,6 +32,14 @@ const DefaultOverallTimeout = session.DefaultOverallTimeout
 
 const maxDiagnoseRequestBytes = 8 << 10
 
+const workbenchContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'"
+
+const exportContentSecurityPolicyPrefix = "default-src 'none'; script-src 'none'; style-src "
+
+func exportContentSecurityPolicy() string {
+	return exportContentSecurityPolicyPrefix + report.HTMLInlineStyleCSPSource() + "; style-src-attr 'none'; img-src 'none'; font-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+}
+
 //go:embed static/index.html static/style.css static/composer.js static/app.js
 var staticFiles embed.FS
 
@@ -153,7 +161,7 @@ func (h *Handler) Close() {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'")
+	w.Header().Set("Content-Security-Policy", workbenchContentSecurityPolicy)
 	if admissionErr := admitRequest(r); admissionErr != nil {
 		writeError(w, admissionErr.status, admissionErr.message)
 		return
@@ -492,6 +500,7 @@ func (h *Handler) diagnosisExport(w http.ResponseWriter, r *http.Request, id str
 	w.Header().Set("Cache-Control", "no-store")
 	switch format {
 	case diagnosisExportHTML:
+		w.Header().Set("Content-Security-Policy", exportContentSecurityPolicy())
 		encoded, err := report.RenderHTML(*snapshot.Report)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "encode HTML report: "+err.Error())

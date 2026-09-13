@@ -38,6 +38,9 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 		t.Errorf("UI page is missing report export affordances")
 	}
 	for _, fragment := range []string{
+		`id="destination-status-strip"`,
+		`id="destination-status-label"`,
+		`id="destination-status-detail"`,
 		`id="observed-path-panel"`,
 		`id="path-graph-tab"`,
 		`id="path-table-tab"`,
@@ -123,6 +126,22 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotTarget, parsedTarget) {
 		t.Errorf("runner target = %+v, want %+v", gotTarget, parsedTarget)
+	}
+}
+
+func TestWorkbenchContentSecurityPolicyRemainsUnchanged(t *testing.T) {
+	server := httptest.NewServer(NewHandler(HandlerOptions{Run: func(context.Context, model.Target) model.DiagnosticReport {
+		return model.DiagnosticReport{}
+	}}))
+	defer server.Close()
+
+	response, err := server.Client().Get(server.URL + "/")
+	if err != nil {
+		t.Fatalf("GET workbench: %v", err)
+	}
+	defer response.Body.Close()
+	if got := response.Header.Get("Content-Security-Policy"); got != workbenchContentSecurityPolicy {
+		t.Fatalf("workbench CSP = %q, want %q", got, workbenchContentSecurityPolicy)
 	}
 }
 
@@ -249,8 +268,8 @@ func TestSessionViewEndpointProjectsTerminalCanonicalReport(t *testing.T) {
 	if err := json.NewDecoder(viewResponse.Body).Decode(&view); err != nil {
 		t.Fatalf("decode session view: %v", err)
 	}
-	if len(view.Paths) != 2 || view.Overall.Destination.State != "confirmed" || !reflect.DeepEqual(view.Report.Target, target) {
-		t.Fatalf("session view projection = paths %d, destination %q, target %#v", len(view.Paths), view.Overall.Destination.State, view.Report.Target)
+	if len(view.Paths) != 2 || view.Overall.Destination.Status != "indeterminate" || !reflect.DeepEqual(view.Report.Target, target) {
+		t.Fatalf("session view projection = paths %d, destination %q, target %#v", len(view.Paths), view.Overall.Destination.Status, view.Report.Target)
 	}
 }
 

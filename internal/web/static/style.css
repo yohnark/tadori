@@ -340,6 +340,93 @@ pre,
   margin-top: 10px;
 }
 
+.destination-status-strip {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 70px;
+  margin-bottom: 10px;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--faint);
+  background: var(--surface);
+}
+
+.destination-status-strip.positive {
+  border-left-color: var(--green);
+}
+
+.destination-status-strip.negative {
+  border-left-color: var(--red);
+}
+
+.destination-status-strip.warning {
+  border-left-color: var(--amber);
+}
+
+.destination-status-marker {
+  color: var(--faint);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.destination-status-strip.positive .destination-status-marker,
+.destination-status-strip.positive .destination-status-copy h2 {
+  color: var(--green);
+}
+
+.destination-status-strip.negative .destination-status-marker,
+.destination-status-strip.negative .destination-status-copy h2 {
+  color: var(--red);
+}
+
+.destination-status-strip.warning .destination-status-marker,
+.destination-status-strip.warning .destination-status-copy h2 {
+  color: var(--amber);
+}
+
+.destination-status-copy {
+  min-width: 190px;
+}
+
+.destination-status-copy .eyebrow {
+  margin-bottom: 1px;
+}
+
+.destination-status-copy h2 {
+  margin: 0;
+  font-size: 17px;
+  letter-spacing: .04em;
+}
+
+.destination-status-copy .muted {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
+.destination-status-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.destination-status-meta span {
+  padding: 0 10px;
+  border-left: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.destination-status-meta span:first-child {
+  border-left: 0;
+}
+
+.destination-status-meta span[hidden] {
+  display: none;
+}
+
 .report-export-actions {
   display: flex;
   align-items: center;
@@ -376,6 +463,22 @@ pre,
   grid-template-columns: 1.1fr 1fr 1fr;
   border: 1px solid var(--line);
   background: var(--surface);
+}
+
+@media (max-width: 720px) {
+  .destination-status-strip {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .destination-status-meta {
+    width: 100%;
+    margin-left: 24px;
+  }
+
+  .destination-status-meta span:first-child {
+    padding-left: 0;
+  }
 }
 
 .overview-card {

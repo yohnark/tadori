@@ -75,17 +75,25 @@
         <a id="html-report-link" class="secondary-button" href="#" target="_blank" rel="noopener" hidden>HTML Report</a>
         <a id="json-report-link" class="secondary-button" href="#" download hidden>JSON</a>
       </div>
+      <section id="destination-status-strip" class="destination-status-strip neutral" aria-labelledby="destination-status-label">
+        <span class="destination-status-marker" aria-hidden="true">●</span>
+        <div class="destination-status-copy">
+          <p class="eyebrow">Destination Status</p>
+          <h2 id="destination-status-label">—</h2>
+          <p id="destination-status-detail" class="muted">—</p>
+        </div>
+        <div class="destination-status-meta" aria-label="Destination details">
+          <span id="destination-status-service">—</span>
+          <span id="destination-status-identity">—</span>
+          <span id="destination-status-endpoint">—</span>
+          <span id="destination-status-reason" hidden></span>
+        </div>
+      </section>
       <section class="overview-grid" aria-label="Diagnostic summary">
         <article class="overview-card panel" id="diagnosis-card">
           <p class="eyebrow">Diagnosis</p>
           <h2 id="diagnosis-label">—</h2>
           <p id="diagnosis-detail" class="muted">—</p>
-        </article>
-        <article class="overview-card panel" id="destination-card">
-          <p class="eyebrow">Destination</p>
-          <h2 id="destination-label">—</h2>
-          <p id="destination-detail" class="muted">—</p>
-          <p id="destination-references" class="reference-line"></p>
         </article>
         <article class="overview-card panel">
           <p class="eyebrow">Execution</p>
