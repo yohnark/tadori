@@ -8,6 +8,7 @@ type ObservationCertainty string
 
 const (
 	ObservationCertaintyObserved    ObservationCertainty = "observed"
+	ObservationCertaintyConfigured  ObservationCertainty = "configured"
 	ObservationCertaintyDerived     ObservationCertainty = "derived"
 	ObservationCertaintyInferred    ObservationCertainty = "inferred"
 	ObservationCertaintyUnknown     ObservationCertainty = "unknown"
@@ -80,19 +81,20 @@ type EndpointObservation struct {
 // should read this envelope rather than reconstructing facts from Target or
 // ProbeResult fields.
 type Observations struct {
-	Endpoint             EndpointObservation       `json:"endpoint"`
-	NameResolution       NameResolutionObservation `json:"name_resolution"`
-	NetworkContext       NetworkContext            `json:"network_context"`
-	Transport            TransportObservation      `json:"transport"`
-	Security             SecurityObservation       `json:"security"`
-	Application          ApplicationObservation    `json:"application"`
-	Paths                []PathObservation         `json:"paths,omitempty"`
-	PacketFlows          []PacketFlowEvidence      `json:"packet_flows,omitempty"`
-	PathProvenance       []ObservationProvenance   `json:"path_provenance,omitempty"`
-	PacketFlowProvenance []ObservationProvenance   `json:"packet_flow_provenance,omitempty"`
-	PathCorrelations     []PathCorrelation         `json:"path_correlations,omitempty"`
-	Conflicts            []ObservationConflict     `json:"conflicts,omitempty"`
-	Divergences          []ObservationDivergence   `json:"divergences,omitempty"`
+	Endpoint             EndpointObservation         `json:"endpoint"`
+	NameResolution       NameResolutionObservation   `json:"name_resolution"`
+	NetworkContext       NetworkContext              `json:"network_context"`
+	EnterprisePolicy     EnterprisePolicyObservation `json:"enterprise_policy"`
+	Transport            TransportObservation        `json:"transport"`
+	Security             SecurityObservation         `json:"security"`
+	Application          ApplicationObservation      `json:"application"`
+	Paths                []PathObservation           `json:"paths,omitempty"`
+	PacketFlows          []PacketFlowEvidence        `json:"packet_flows,omitempty"`
+	PathProvenance       []ObservationProvenance     `json:"path_provenance,omitempty"`
+	PacketFlowProvenance []ObservationProvenance     `json:"packet_flow_provenance,omitempty"`
+	PathCorrelations     []PathCorrelation           `json:"path_correlations,omitempty"`
+	Conflicts            []ObservationConflict       `json:"conflicts,omitempty"`
+	Divergences          []ObservationDivergence     `json:"divergences,omitempty"`
 }
 
 // NormalizeObservations returns a detached, stable copy of an observation
@@ -123,6 +125,7 @@ func NormalizeObservations(observations Observations) Observations {
 	name.Conflicts = cloneObservationConflicts(name.Conflicts)
 
 	network := cloneNetworkContext(observations.NetworkContext)
+	enterprise := NormalizeEnterprisePolicyObservation(observations.EnterprisePolicy)
 	paths := clonePathObservations(observations.Paths)
 	packetFlows := clonePacketFlows(observations.PacketFlows)
 	pathProvenance := cloneObservationProvenance(observations.PathProvenance)
@@ -134,6 +137,7 @@ func NormalizeObservations(observations Observations) Observations {
 		Endpoint:             endpoint,
 		NameResolution:       name,
 		NetworkContext:       network,
+		EnterprisePolicy:     enterprise,
 		Transport:            NormalizeTransportObservation(observations.Transport),
 		Security:             NormalizeSecurityObservation(observations.Security),
 		Application:          NormalizeApplicationObservation(observations.Application),

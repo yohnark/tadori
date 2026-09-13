@@ -11,7 +11,9 @@ import (
 
 	"github.com/yohnark/tadori/internal/model"
 	"github.com/yohnark/tadori/internal/probe/dns"
+	enterpriseprobe "github.com/yohnark/tadori/internal/probe/enterprise"
 	"github.com/yohnark/tadori/internal/probe/interfacecfg"
+	proxyprobe "github.com/yohnark/tadori/internal/probe/proxy"
 	"github.com/yohnark/tadori/internal/probe/route"
 )
 
@@ -393,6 +395,227 @@ func TestNormalizeObservationsDetachesNestedProvenance(t *testing.T) {
 	}
 }
 
+func enterpriseFixtureProbe(t *testing.T, evidence ...model.Evidence) model.ProbeResult {
+	t.Helper()
+	return model.ProbeResult{Name: enterpriseprobe.Name, Status: model.ProbeStatusPassed, Evidence: evidence}
+}
+
+func enterpriseConfigEvidence(t *testing.T, id, source string, value proxyprobe.ConfigurationObservation) model.Evidence {
+	t.Helper()
+	kind := model.EvidenceKindWinHTTPProxy
+	if source == "wininet" {
+		kind = model.EvidenceKindWinINETProxy
+	}
+	return fixtureEvidence(t, id, kind, source, value)
+}
+
+func enterpriseConnectivityFixture(t *testing.T, id string, effective []enterpriseprobe.EffectiveProxy, paths []enterpriseprobe.PathObservation) model.Evidence {
+	t.Helper()
+	return fixtureEvidence(t, id, model.EvidenceKindProxyConnectivity, "windows-enterprise", enterpriseConnectivityEvidence{EffectiveProxy: effective, Paths: paths})
+}
+
+func enterpriseDirectConfig() proxyprobe.ConfigurationObservation {
+	return proxyprobe.ConfigurationObservation{State: proxyprobe.StateDirect, Direct: true}
+}
+
+func enterpriseStaticConfig(endpoint string) proxyprobe.ConfigurationObservation {
+	return proxyprobe.ConfigurationObservation{State: proxyprobe.StateStaticProxyConfigured, StaticProxyConfigured: true, ProxyEndpoints: []string{endpoint}}
+}
+
+func TestBuildEnterpriseDirectConfigurationDoesNotClaimRuntimeUse(t *testing.T) {
+	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t,
+		enterpriseConfigEvidence(t, "enterprise-winhttp", "winhttp", enterpriseDirectConfig()),
+		enterpriseConfigEvidence(t, "enterprise-wininet", "wininet", enterpriseDirectConfig()),
+	)})
+	enterprise := got.EnterprisePolicy
+	if enterprise.State != model.EnterpriseObservationStateObserved || enterprise.Certainty != model.ObservationCertaintyConfigured && enterprise.Certainty != model.ObservationCertaintyObserved {
+		t.Fatalf("enterprise state = %#v", enterprise)
+	}
+	if enterprise.WinHTTP.Configuration.State != string(proxyprobe.StateDirect) || enterprise.WinHTTP.Configuration.Certainty != model.ObservationCertaintyConfigured {
+		t.Fatalf("WinHTTP configuration = %#v", enterprise.WinHTTP.Configuration)
+	}
+	if enterprise.WinHTTP.Effective.Observed || enterprise.WinHTTP.PAC.ResolutionObserved || len(enterprise.Paths) != 0 {
+		t.Fatalf("configuration was promoted to runtime use = %#v", enterprise.WinHTTP)
+	}
+	if enterprise.ProxyConfigurationDiverges || !enterprise.ProxyConfigurationKnown {
+		t.Fatalf("direct source comparison = %#v", enterprise)
+	}
+}
+
+func TestBuildEnterpriseProjectsWinHTTPRuntimeAndReachability(t *testing.T) {
+	endpoint := "proxy.corp.example:8080"
+	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t,
+		enterpriseConfigEvidence(t, "enterprise-winhttp-config", "winhttp", enterpriseStaticConfig(endpoint)),
+		enterpriseConnectivityFixture(t, "enterprise-connectivity", []enterpriseprobe.EffectiveProxy{{Source: "winhttp", Mode: enterpriseprobe.PathModeProxy, Endpoint: endpoint, ResolutionOK: true}}, []enterpriseprobe.PathObservation{{
+			Name: enterpriseprobe.PathServiceWinHTTP, Source: "winhttp", Mode: enterpriseprobe.PathModeProxy, Endpoint: endpoint,
+			RequestAttempted: true, TCPConnected: true, ConnectOutcome: enterpriseprobe.ConnectSucceeded, HTTPResponse: true, HTTPStatusCode: 204,
+		}}),
+	)})
+	proxy := got.EnterprisePolicy.WinHTTP
+	if !proxy.Effective.Observed || proxy.Effective.Mode != enterpriseprobe.PathModeProxy || proxy.Effective.Endpoint != endpoint || proxy.Effective.Certainty != model.ObservationCertaintyObserved {
+		t.Fatalf("effective WinHTTP result = %#v", proxy.Effective)
+	}
+	if len(proxy.EndpointReachability) != 1 || proxy.EndpointReachability[0].Reachability != model.EnterpriseEndpointReachable || !proxy.EndpointReachability[0].TCPConnected {
+		t.Fatalf("endpoint reachability = %#v", proxy.EndpointReachability)
+	}
+	if len(got.EnterprisePolicy.Paths) != 1 || got.EnterprisePolicy.Paths[0].Certainty != model.ObservationCertaintyObserved {
+		t.Fatalf("path observation = %#v", got.EnterprisePolicy.Paths)
+	}
+}
+
+func TestBuildEnterprisePreservesWinHTTPWinINETDivergence(t *testing.T) {
+	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t,
+		enterpriseConfigEvidence(t, "enterprise-http", "winhttp", enterpriseStaticConfig("proxy.service.example:8080")),
+		enterpriseConfigEvidence(t, "enterprise-inet", "wininet", enterpriseStaticConfig("proxy.browser.example:8080")),
+	)})
+	if !got.EnterprisePolicy.ProxyConfigurationKnown || !got.EnterprisePolicy.ProxyConfigurationDiverges {
+		t.Fatalf("source divergence = %#v", got.EnterprisePolicy)
+	}
+	if len(got.EnterprisePolicy.Conflicts) != 1 || len(got.EnterprisePolicy.Conflicts[0].EvidenceIDs) != 2 {
+		t.Fatalf("divergence provenance = %#v", got.EnterprisePolicy.Conflicts)
+	}
+	if got.EnterprisePolicy.WinHTTP.Configuration.Certainty != model.ObservationCertaintyConfigured || got.EnterprisePolicy.WinINET.Configuration.Certainty != model.ObservationCertaintyConfigured {
+		t.Fatalf("configuration certainty was lost = %#v", got.EnterprisePolicy)
+	}
+}
+
+func TestBuildEnterprisePACConfigurationStaysUnknownUntilEffectiveResult(t *testing.T) {
+	config := proxyprobe.ConfigurationObservation{State: proxyprobe.StatePACConfigured, PACConfigured: true, PACURL: "https://pac.corp.example/proxy.pac", AutoDetect: true}
+	pac := enterprisePACEvidence{Configured: true, URL: config.PACURL, AutoDetect: true, Executed: false}
+	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t,
+		enterpriseConfigEvidence(t, "enterprise-pac-config", "wininet", config),
+		fixtureEvidence(t, "enterprise-pac", model.EvidenceKindPAC, "wininet", pac),
+	)})
+	value := got.EnterprisePolicy.WinINET.PAC
+	if !value.Configured || !value.AutoDetect || value.URL != config.PACURL || value.Certainty != model.ObservationCertaintyConfigured {
+		t.Fatalf("PAC configuration = %#v", value)
+	}
+	if value.ResolutionObserved || value.Used || value.Mode != model.EnterpriseProxyModeUnknown || value.Endpoint != "" {
+		t.Fatalf("PAC configuration claimed a selected result = %#v", value)
+	}
+}
+
+func TestBuildEnterpriseDistinguishesReachableProxyFromCONNECT407(t *testing.T) {
+	endpoint := "proxy.corp.example:8080"
+	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t,
+		enterpriseConfigEvidence(t, "enterprise-inet-config", "wininet", enterpriseStaticConfig(endpoint)),
+		enterpriseConnectivityFixture(t, "enterprise-407", nil, []enterpriseprobe.PathObservation{{
+			Name: enterpriseprobe.PathBrowserWinINET, Source: "wininet", Mode: enterpriseprobe.PathModeProxy, Endpoint: endpoint,
+			TCPConnected: true, ConnectOutcome: enterpriseprobe.ConnectAuthRequired, ConnectStatusCode: 407, ProxyAuthenticationHint: true,
+		}}),
+	)})
+	path := got.EnterprisePolicy.Paths[0]
+	endpointObservation := got.EnterprisePolicy.WinINET.EndpointReachability[0]
+	if path.ConnectOutcome != enterpriseprobe.ConnectAuthRequired || path.ConnectStatusCode != 407 || !path.ProxyAuthenticationHint {
+		t.Fatalf("CONNECT authentication result = %#v", path)
+	}
+	if endpointObservation.Reachability != model.EnterpriseEndpointReachable || endpointObservation.ConnectOutcome != enterpriseprobe.ConnectAuthRequired {
+		t.Fatalf("407 was confused with endpoint unreachability = %#v", endpointObservation)
+	}
+}
+
+func TestBuildEnterpriseDirectFailureProxySuccessIsAnInference(t *testing.T) {
+	endpoint := "proxy.corp.example:8080"
+	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t,
+		enterpriseConnectivityFixture(t, "enterprise-paths", []enterpriseprobe.EffectiveProxy{{Source: "wininet", Mode: enterpriseprobe.PathModeProxy, Endpoint: endpoint, ResolutionOK: true}}, []enterpriseprobe.PathObservation{
+			{Name: enterpriseprobe.PathApplicationDirect, Source: "direct", Mode: enterpriseprobe.PathModeDirect, RequestAttempted: true, FailureReason: model.FailureReasonTCPTimeout},
+			{Name: enterpriseprobe.PathBrowserWinINET, Source: "wininet", Mode: enterpriseprobe.PathModeProxy, Endpoint: endpoint, RequestAttempted: true, TCPConnected: true, ConnectOutcome: enterpriseprobe.ConnectSucceeded, HTTPResponse: true, HTTPStatusCode: 200},
+		}),
+	)})
+	comparison := got.EnterprisePolicy.DirectVsProxy
+	if comparison.State != model.EnterprisePathComparisonDirectFailureProxyWorks || !comparison.PolicyPossible || comparison.Certainty != model.ObservationCertaintyInferred {
+		t.Fatalf("path comparison = %#v", comparison)
+	}
+	if got.EnterprisePolicy.Firewall.BlockCausality != model.EnterpriseFirewallCausalityNotEstablished {
+		t.Fatalf("path inference leaked into firewall causality = %#v", got.EnterprisePolicy.Firewall)
+	}
+}
+
+func TestBuildEnterpriseFirewallAndVPNCorrelationRemainEvidenceBounded(t *testing.T) {
+	enabled := true
+	firewall := enterpriseprobe.FirewallObservation{Source: "windows-firewall-profile", Available: true, Profiles: []enterpriseprobe.FirewallProfile{{Name: "Domain", FirewallEnabled: &enabled, PolicyPresent: true}}}
+	routing := enterpriseRoutingEvidence{
+		Adapters: []enterpriseprobe.AdapterObservation{{Index: 12, Name: "Contoso VPN", Type: "vpn", Operational: true, VPN: true, Virtual: true}},
+		Routes: []enterpriseprobe.RouteObservation{
+			{Path: enterpriseprobe.PathApplicationDirect, InterfaceIndex: 4, NextHop: "192.0.2.1", Available: true},
+			{Path: enterpriseprobe.PathBrowserWinINET, InterfaceIndex: 12, NextHop: "10.0.0.1", Available: true},
+		},
+	}
+	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{
+		enterpriseFixtureProbe(t, fixtureEvidence(t, "enterprise-firewall", model.EvidenceKindFirewallProfile, "windows-firewall-profile", firewall), fixtureEvidence(t, "enterprise-routing", model.EvidenceKindAdapterRouting, "windows-ip-helper", routing)),
+		fixtureRouteProbe(t, "route-canonical", "192.0.2.10", "0.0.0.0/0", "192.0.2.1", "Ethernet", 4, 10, false, false),
+	})
+	value := got.EnterprisePolicy
+	if len(value.Firewall.Profiles) != 1 || value.Firewall.Profiles[0].EffectiveState != "enabled" || value.Firewall.Profiles[0].BlockCausality != model.EnterpriseFirewallCausalityNotEstablished {
+		t.Fatalf("firewall state = %#v", value.Firewall)
+	}
+	if value.Network.RouteDifferenceKnown != true || !value.Network.RouteDifference || len(value.Network.AdapterParticipation) != 1 || !value.Network.VPNAdapterPresent {
+		t.Fatalf("enterprise route/VPN correlation = %#v", value.Network)
+	}
+	if !value.Network.NetworkContextReferenced || !contains(value.Network.NetworkContextEvidenceIDs, "route-canonical") {
+		t.Fatalf("network context reference = %#v", value.Network)
+	}
+	if value.Network.SelectedRouteUsesVPN {
+		t.Fatalf("enterprise VPN presence was promoted to selected route = %#v", value.Network)
+	}
+}
+
+func TestBuildEnterpriseTLSPolicySuspicionIsConservative(t *testing.T) {
+	tls := enterpriseTLSEvidence{
+		Comparison: enterpriseprobe.TLSComparison{
+			DirectCertificateSHA256: strings.Repeat("a", 64), ProxyCertificateSHA256: strings.Repeat("b", 64), CertificatesDiffer: true,
+			BothTrusted: true, BothHostnameVerified: true, PossibleInterception: true,
+			InterceptionBasis: "trusted hostname-valid peer certificates differ between direct and proxy paths",
+		},
+		TrustStore: enterpriseprobe.TrustStoreObservation{Source: "windows-root-store", Available: true, RootCount: 42},
+	}
+	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t, fixtureEvidence(t, "enterprise-tls", model.EvidenceKindTLSTrust, "crypto/x509", tls))})
+	value := got.EnterprisePolicy.TLS
+	if !value.PossibleInterception || value.InterceptionSuspicion != model.EnterpriseInterceptionSuspicionPossible || value.Certainty != model.ObservationCertaintyInferred {
+		t.Fatalf("TLS suspicion = %#v", value)
+	}
+	if value.InterceptionBasis == "" || !value.CertificatesDifferKnown || !value.BothTrustedKnown || !value.BothHostnameKnown {
+		t.Fatalf("TLS provenance/known flags = %#v", value)
+	}
+
+	tls.Comparison.PossibleInterception = false
+	tls.Comparison.BothTrusted = false
+	got = Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t, fixtureEvidence(t, "enterprise-tls-untrusted", model.EvidenceKindTLSTrust, "crypto/x509", tls))})
+	if got.EnterprisePolicy.TLS.PossibleInterception || got.EnterprisePolicy.TLS.InterceptionSuspicion != model.EnterpriseInterceptionSuspicionNotEstablished {
+		t.Fatalf("certificate difference overclaimed interception = %#v", got.EnterprisePolicy.TLS)
+	}
+}
+
+func TestBuildEnterpriseUnsupportedStatePreserved(t *testing.T) {
+	probe := model.ProbeResult{Name: enterpriseprobe.Name, Status: model.ProbeStatusSkipped, Interpretation: model.ProbeInterpretation{FailureReason: model.FailureReasonUnsupported}, Evidence: []model.Evidence{fixtureEvidence(t, "enterprise-unsupported", model.EvidenceKindProxyConfiguration, "windows-enterprise", map[string]string{"state": "unsupported_platform"})}}
+	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{probe})
+	value := got.EnterprisePolicy
+	if value.State != model.EnterpriseObservationStateUnsupported || !value.Unsupported || value.Certainty != model.ObservationCertaintyUnsupported {
+		t.Fatalf("unsupported enterprise state = %#v", value)
+	}
+	if len(value.Limitations) == 0 || !contains(value.EvidenceIDs, "enterprise-unsupported") {
+		t.Fatalf("unsupported provenance = %#v", value)
+	}
+}
+
+func TestBuildEnterpriseProjectionIsDeterministicAndLeavesRawEvidenceUntouched(t *testing.T) {
+	config := enterpriseConfigEvidence(t, "enterprise-winhttp", "winhttp", enterpriseStaticConfig("proxy.corp.example:8080"))
+	connectivity := enterpriseConnectivityFixture(t, "enterprise-connectivity", []enterpriseprobe.EffectiveProxy{{Source: "winhttp", Mode: enterpriseprobe.PathModeProxy, Endpoint: "proxy.corp.example:8080", ResolutionOK: true}}, []enterpriseprobe.PathObservation{{Name: enterpriseprobe.PathServiceWinHTTP, Source: "winhttp", Mode: enterpriseprobe.PathModeProxy, Endpoint: "proxy.corp.example:8080", TCPConnected: true, ConnectOutcome: enterpriseprobe.ConnectSucceeded, HTTPResponse: true, HTTPStatusCode: 200}})
+	rawConfig := append([]byte(nil), config.Raw...)
+	probe := enterpriseFixtureProbe(t, connectivity, config)
+	target := mustTarget(t, "service.example:443")
+	left := Build(target, []model.ProbeResult{probe})
+	right := Build(target, []model.ProbeResult{enterpriseFixtureProbe(t, config, connectivity)})
+	if !reflect.DeepEqual(left, right) {
+		t.Fatalf("enterprise projection depends on evidence order\nleft=%#v\nright=%#v", left.EnterprisePolicy, right.EnterprisePolicy)
+	}
+	if !bytes.Equal(config.Raw, rawConfig) {
+		t.Fatal("enterprise projection changed raw evidence")
+	}
+	if !contains(left.EnterprisePolicy.WinHTTP.Configuration.EvidenceIDs, "enterprise-winhttp") || left.EnterprisePolicy.WinHTTP.Configuration.Certainty != model.ObservationCertaintyConfigured {
+		t.Fatalf("configuration provenance/certainty = %#v", left.EnterprisePolicy.WinHTTP.Configuration)
+	}
+}
 func TestBuildPathAndPacketFlowObservationsRetainVisibilityAndDivergence(t *testing.T) {
 	target := mustTarget(t, "203.0.113.45:443")
 	path := model.PathObservation{
