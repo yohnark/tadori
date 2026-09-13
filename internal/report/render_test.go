@@ -116,6 +116,82 @@ func TestWriteJSONMatchesMarshalJSON(t *testing.T) {
 	}
 }
 
+func TestTimestampRenderingUsesUTCAcrossReportProbeAndEvidence(t *testing.T) {
+	reportStarted := time.Date(2026, time.January, 2, 12, 4, 5, 123456789, time.FixedZone("ahead", 9*60*60))
+	reportCompleted := time.Date(2026, time.January, 2, 4, 5, 6, 987654321, time.FixedZone("behind", -5*60*60))
+	probeStarted := time.Date(2026, time.January, 2, 13, 0, 0, 0, time.FixedZone("india", 5*60*60+30*60))
+	probeCompleted := time.Date(2026, time.January, 2, 2, 1, 0, 0, time.FixedZone("west", -7*60*60))
+	evidenceCaptured := time.Date(2026, time.January, 2, 20, 34, 5, 500000000, time.FixedZone("india", 5*60*60+30*60))
+	report := model.DiagnosticReport{
+		SchemaVersion: model.DiagnosticSchemaVersion,
+		Target:        model.Target{Host: "example.com", Port: 443},
+		Status:        model.ReportStatusComplete,
+		StartedAt:     &reportStarted,
+		CompletedAt:   &reportCompleted,
+		Probes: []model.ProbeResult{{
+			Name:   "http",
+			Status: model.ProbeStatusPassed,
+			Timing: model.Timing{StartedAt: &probeStarted, CompletedAt: &probeCompleted, DurationMS: 91},
+			Evidence: []model.Evidence{{
+				ID:         "http-1",
+				Kind:       model.EvidenceKindHTTPResponse,
+				CapturedAt: &evidenceCaptured,
+				Raw:        json.RawMessage(`{"status":200}`),
+			}},
+			Interpretation: model.ProbeInterpretation{
+				FailureReason: model.FailureReasonNone,
+				Layer:         model.LayerHTTP,
+				FaultDomain:   model.FaultDomainHTTP,
+			},
+		}},
+	}
+
+	encoded, err := MarshalJSON(report)
+	if err != nil {
+		t.Fatalf("marshal report with offset timestamps: %v", err)
+	}
+	for _, want := range []string{
+		`"started_at":"2026-01-02T03:04:05.123456789Z"`,
+		`"completed_at":"2026-01-02T09:05:06.987654321Z"`,
+		`"started_at":"2026-01-02T07:30:00Z"`,
+		`"completed_at":"2026-01-02T09:01:00Z"`,
+		`"captured_at":"2026-01-02T15:04:05.5Z"`,
+	} {
+		if !strings.Contains(string(encoded), want) {
+			t.Errorf("canonical JSON missing %q: %s", want, encoded)
+		}
+	}
+	for _, nonCanonical := range []string{"+09:00", "-05:00", "+05:30", "-07:00"} {
+		if strings.Contains(string(encoded), nonCanonical) {
+			t.Errorf("canonical JSON retained source offset %q: %s", nonCanonical, encoded)
+		}
+	}
+
+	human := RenderHuman(report)
+	for _, want := range []string{
+		`started_at="2026-01-02T03:04:05.123456789Z"`,
+		`completed_at="2026-01-02T09:05:06.987654321Z"`,
+		`started_at="2026-01-02T07:30:00Z"`,
+		`completed_at="2026-01-02T09:01:00Z"`,
+		`captured_at=2026-01-02T15:04:05.5Z`,
+	} {
+		if !strings.Contains(human, want) {
+			t.Errorf("human output missing %q:\n%s", want, human)
+		}
+	}
+	for _, nonCanonical := range []string{"+09:00", "-05:00", "+05:30", "-07:00"} {
+		if strings.Contains(human, nonCanonical) {
+			t.Errorf("human output mixed source offset %q:\n%s", nonCanonical, human)
+		}
+	}
+
+	// Rendering is a projection: it must not change the source locations held
+	// by the structured report for a later, explicitly localized presentation.
+	if report.StartedAt.Location() != reportStarted.Location() || report.Probes[0].Timing.StartedAt.Location() != probeStarted.Location() || report.Probes[0].Evidence[0].CapturedAt.Location() != evidenceCaptured.Location() {
+		t.Fatal("timestamp rendering mutated the structured report")
+	}
+}
+
 func TestRenderHumanSuccessFixture(t *testing.T) {
 	report := model.DiagnosticReport{
 		SchemaVersion: model.DiagnosticSchemaVersion,

@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -72,6 +73,69 @@ func TestProbeResultJSONSeparatesRawEvidenceFromInterpretation(t *testing.T) {
 	}
 	if document.Interpretation.FailureReason != FailureReasonDNSNXDomain {
 		t.Fatalf("interpretation was not serialized separately: %#v", document.Interpretation)
+	}
+}
+
+func TestProbeResultJSONNormalizesTimestampOffsets(t *testing.T) {
+	started := time.Date(2026, time.January, 2, 12, 4, 5, 123456789, time.FixedZone("ahead", 9*60*60))
+	completed := time.Date(2026, time.January, 2, 4, 5, 6, 987654321, time.FixedZone("behind", -5*60*60))
+	captured := time.Date(2026, time.January, 2, 20, 34, 5, 500000000, time.FixedZone("india", 5*60*60+30*60))
+	duration := completed.Sub(started).Milliseconds()
+	probe := ProbeResult{
+		Name:   "offset-probe",
+		Target: Target{Host: "example.com", Port: 443},
+		Status: ProbeStatusPassed,
+		Timing: Timing{
+			StartedAt:   &started,
+			CompletedAt: &completed,
+			DurationMS:  duration,
+		},
+		Evidence: []Evidence{{
+			ID:         "offset-evidence",
+			Kind:       EvidenceKindHTTPResponse,
+			CapturedAt: &captured,
+			Raw:        json.RawMessage(`{"status":200}`),
+		}},
+		Interpretation: ProbeInterpretation{
+			FailureReason: FailureReasonNone,
+			Layer:         LayerHTTP,
+			FaultDomain:   FaultDomainHTTP,
+		},
+	}
+
+	encoded, err := json.Marshal(probe)
+	if err != nil {
+		t.Fatalf("marshal probe result: %v", err)
+	}
+
+	for _, want := range []string{
+		`"started_at":"2026-01-02T03:04:05.123456789Z"`,
+		`"completed_at":"2026-01-02T09:05:06.987654321Z"`,
+		`"captured_at":"2026-01-02T15:04:05.5Z"`,
+		`"duration_ms":21661864`,
+	} {
+		if !strings.Contains(string(encoded), want) {
+			t.Errorf("canonical probe JSON missing %q: %s", want, encoded)
+		}
+	}
+	for _, nonCanonical := range []string{"+09:00", "-05:00", "+05:30"} {
+		if strings.Contains(string(encoded), nonCanonical) {
+			t.Errorf("canonical probe JSON retained source offset %q: %s", nonCanonical, encoded)
+		}
+	}
+
+	var decoded ProbeResult
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal normalized probe result: %v", err)
+	}
+	if !decoded.Timing.StartedAt.Equal(started) || !decoded.Timing.CompletedAt.Equal(completed) || !decoded.Evidence[0].CapturedAt.Equal(captured) {
+		t.Fatalf("timestamp instant changed after canonicalization: %#v", decoded)
+	}
+	if decoded.Timing.DurationMS != duration {
+		t.Fatalf("duration changed after canonicalization: got %d, want %d", decoded.Timing.DurationMS, duration)
+	}
+	if decoded.Timing.StartedAt.Location() != time.UTC || decoded.Timing.CompletedAt.Location() != time.UTC || decoded.Evidence[0].CapturedAt.Location() != time.UTC {
+		t.Fatalf("decoded canonical timestamps are not UTC: %#v", decoded)
 	}
 }
 
