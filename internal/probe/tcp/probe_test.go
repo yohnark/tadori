@@ -29,7 +29,7 @@ func TestProbeConnectsToLocalListenerAndRecordsEndpoints(t *testing.T) {
 		}
 	}()
 
-	target := model.Target{Host: "127.0.0.1", Port: uint16(listener.Addr().(*net.TCPAddr).Port)}
+	target := model.NewTarget("127.0.0.1", uint16(listener.Addr().(*net.TCPAddr).Port))
 	result := New(500*time.Millisecond).Run(context.Background(), probecontract.ExecutionContext{Target: target})
 
 	if result.Name != "tcp" {
@@ -94,7 +94,7 @@ func TestProbeDistinguishesConnectionRefused(t *testing.T) {
 		Dialer: DialContextFunc(func(context.Context, string, string) (net.Conn, error) {
 			return nil, underlying
 		}),
-	}).Run(context.Background(), probecontract.ExecutionContext{Target: model.Target{Host: "127.0.0.1", Port: port}})
+	}).Run(context.Background(), probecontract.ExecutionContext{Target: model.NewTarget("127.0.0.1", port)})
 
 	if result.Status != model.ProbeStatusFailed {
 		t.Fatalf("status = %q, want failed", result.Status)
@@ -113,7 +113,7 @@ func TestProbeTimeoutIsBoundedAndDistinctFromRefused(t *testing.T) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		}),
-	}).Run(context.Background(), probecontract.ExecutionContext{Target: model.Target{Host: "192.0.2.1", Port: 443}})
+	}).Run(context.Background(), probecontract.ExecutionContext{Target: model.NewTarget("192.0.2.1", 443)})
 
 	if result.Status != model.ProbeStatusFailed {
 		t.Fatalf("status = %q, want failed", result.Status)
@@ -135,7 +135,7 @@ func TestProbeHonorsCancellation(t *testing.T) {
 		Dialer: DialContextFunc(func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return nil, ctx.Err()
 		}),
-	}).Run(ctx, probecontract.ExecutionContext{Target: model.Target{Host: "127.0.0.1", Port: 1}})
+	}).Run(ctx, probecontract.ExecutionContext{Target: model.NewTarget("127.0.0.1", 1)})
 
 	if result.Status != model.ProbeStatusError {
 		t.Fatalf("status = %q, want error", result.Status)
@@ -160,7 +160,7 @@ func TestProbeNormalizesSocketErrnos(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			result := NewWithConfig(Config{Dialer: DialContextFunc(func(context.Context, string, string) (net.Conn, error) {
 				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: test.err}
-			})}).Run(context.Background(), probecontract.ExecutionContext{Target: model.Target{Host: "127.0.0.1", Port: 443}})
+			})}).Run(context.Background(), probecontract.ExecutionContext{Target: model.NewTarget("127.0.0.1", 443)})
 			if result.Interpretation.FailureReason != test.reason {
 				t.Fatalf("reason = %q, want %q (evidence: %s)", result.Interpretation.FailureReason, test.reason, result.Evidence[0].Raw)
 			}
@@ -173,10 +173,10 @@ func TestProbeNormalizesSocketErrnos(t *testing.T) {
 
 func TestProbeRejectsMalformedAddressAndInvalidPort(t *testing.T) {
 	tests := []model.Target{
-		{Host: "", Port: 443},
-		{Host: "127.0.0.1", Port: 0},
-		{Host: "127.0.0.1:80", Port: 443},
-		{Host: "[not-an-ip]", Port: 443},
+		{RequestedIdentity: "", Port: 443},
+		{RequestedIdentity: "127.0.0.1", Service: model.ServiceProfile{ID: model.ServiceProfileCustomTCP}, Port: 0},
+		{RequestedIdentity: "127.0.0.1:80", Port: 443},
+		{RequestedIdentity: "[not-an-ip]", Port: 443},
 	}
 	for _, target := range tests {
 		result := New(time.Second).Run(context.Background(), probecontract.ExecutionContext{Target: target})

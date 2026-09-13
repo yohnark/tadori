@@ -13,7 +13,10 @@ import (
 
 func TestManagerLifecycleProgressAndCanonicalReport(t *testing.T) {
 	clock := func() time.Time { return time.Date(2026, 9, 13, 1, 2, 3, 0, time.FixedZone("JST", 9*60*60)) }
-	target := model.Target{URL: "https://example.com", Scheme: "https", Host: "example.com", Port: 443}
+	target, err := model.ParseTarget(model.TargetIntent{Input: "https://example.com"})
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
 	wantReport := model.DiagnosticReport{
 		SchemaVersion: model.DiagnosticSchemaVersion,
 		Target:        target,
@@ -117,18 +120,18 @@ func TestManagerCancellationPropagatesOnlyToOneSession(t *testing.T) {
 			return fmt.Sprintf("cancel-%d", idNumber.Add(1))
 		},
 		Run: func(ctx context.Context, target model.Target, _ Progress) model.DiagnosticReport {
-			started <- target.Host
+			started <- target.RequestedIdentity
 			<-ctx.Done()
-			cancelled <- target.Host
+			cancelled <- target.RequestedIdentity
 			return sessionTestErrorReport(target)
 		},
 	})
 
-	first, err := m.Create(model.Target{Host: "first", Port: 443})
+	first, err := m.Create(model.NewTarget("first", 443))
 	if err != nil {
 		t.Fatalf("Create first: %v", err)
 	}
-	second, err := m.Create(model.Target{Host: "second", Port: 443})
+	second, err := m.Create(model.NewTarget("second", 443))
 	if err != nil {
 		t.Fatalf("Create second: %v", err)
 	}
@@ -195,15 +198,15 @@ func TestManagerBoundsConcurrentExecution(t *testing.T) {
 		},
 	})
 
-	first, err := m.Create(model.Target{Host: "one", Port: 80})
+	first, err := m.Create(model.NewTarget("one", 80))
 	if err != nil {
 		t.Fatalf("Create first: %v", err)
 	}
-	second, err := m.Create(model.Target{Host: "two", Port: 80})
+	second, err := m.Create(model.NewTarget("two", 80))
 	if err != nil {
 		t.Fatalf("Create second: %v", err)
 	}
-	if _, err := m.Create(model.Target{Host: "three", Port: 80}); err != ErrBusy {
+	if _, err := m.Create(model.NewTarget("three", 80)); err != ErrBusy {
 		t.Fatalf("third Create error = %v, want ErrBusy", err)
 	}
 

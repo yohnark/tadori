@@ -34,7 +34,7 @@ func fixtureSnapshot() Snapshot {
 
 func TestInterfaceProbeSuccessPreservesAddressesAndPrefixes(t *testing.T) {
 	p := NewInterfaceProbe(SnapshotProviderFunc(func(context.Context) (Snapshot, error) { return fixtureSnapshot(), nil }))
-	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "198.51.100.20", Port: 443}})
+	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("198.51.100.20", 443)})
 	if got.Status != model.ProbeStatusPassed || got.Interpretation.FailureReason != model.FailureReasonNone {
 		t.Fatalf("unexpected result: %#v", got)
 	}
@@ -169,7 +169,7 @@ func TestInterfaceProbeTimeoutReason(t *testing.T) {
 
 func TestDNSProbeIsLocalEvidenceOnly(t *testing.T) {
 	p := NewDNSProbe(SnapshotProviderFunc(func(context.Context) (Snapshot, error) { return fixtureSnapshot(), nil }))
-	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "does-not-resolve.invalid"}})
+	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("does-not-resolve.invalid", 80)})
 	if got.Status != model.ProbeStatusPassed || got.Interpretation.FailureReason != model.FailureReasonNone {
 		t.Fatalf("DNS config result = %#v", got)
 	}

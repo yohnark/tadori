@@ -819,11 +819,16 @@ func ProbeHTTPPath(ctx context.Context, target model.Target, name, source, mode,
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	targetURL := target.URL
-	parsed, err := url.Parse(targetURL)
-	if err != nil || parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+	targetURL, err := target.HTTPURL()
+	if err != nil {
 		path.FailureReason = model.FailureReasonProbeExecution
-		path.Error = "target URL is malformed"
+		path.Error = err.Error()
+		return path
+	}
+	parsed, err := url.Parse(targetURL)
+	if err != nil {
+		path.FailureReason = model.FailureReasonProbeExecution
+		path.Error = "canonical target URL is malformed"
 		return path
 	}
 	if mode == PathModeProxy || mode == PathModePAC {

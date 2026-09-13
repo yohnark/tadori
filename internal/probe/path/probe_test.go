@@ -39,7 +39,7 @@ func TestProbePreservesMultipleRespondersAndUnobservableTTLs(t *testing.T) {
 		Attempts:  2,
 		Observer:  observer,
 		Protocols: []model.PathProtocol{model.PathProtocolICMP, model.PathProtocolTCP},
-	}).Run(context.Background(), probecontract.ExecutionContext{Target: model.Target{Host: "198.51.100.10", Port: 8443}})
+	}).Run(context.Background(), probecontract.ExecutionContext{Target: model.NewTarget("198.51.100.10", 8443)})
 
 	if result.Status != model.ProbeStatusPassed {
 		t.Fatalf("status = %q, want passed", result.Status)
@@ -101,7 +101,7 @@ func TestProbeKeepsTCPPathWhenICMPIsUnsupported(t *testing.T) {
 			}
 			return Observation{Responders: []model.PathResponder{{Address: "127.0.0.1"}}, DestinationReached: true}, nil
 		}),
-	}).Run(context.Background(), probecontract.ExecutionContext{Target: model.Target{Host: "127.0.0.1", Port: 9}})
+	}).Run(context.Background(), probecontract.ExecutionContext{Target: model.NewTarget("127.0.0.1", 9)})
 
 	if result.Status != model.ProbeStatusPassed || result.Interpretation.Layer != model.LayerTCP {
 		t.Fatalf("TCP observation did not survive unsupported ICMP: %#v", result)
@@ -135,7 +135,7 @@ func TestProbeBoundsObserverAndHonorsCancellation(t *testing.T) {
 		cancel()
 	}()
 
-	result := New(Config{Timeout: time.Second, MaxTTL: 2, Attempts: 1, Observer: observer}).Run(ctx, probecontract.ExecutionContext{Target: model.Target{Host: "example.com", Port: 443}})
+	result := New(Config{Timeout: time.Second, MaxTTL: 2, Attempts: 1, Observer: observer}).Run(ctx, probecontract.ExecutionContext{Target: model.NewTarget("example.com", 443)})
 	if result.Status != model.ProbeStatusError || result.Interpretation.FailureReason != FailureReasonPathCancellation {
 		t.Fatalf("cancellation result = %#v, want bounded cancellation", result)
 	}
@@ -144,7 +144,7 @@ func TestProbeBoundsObserverAndHonorsCancellation(t *testing.T) {
 func TestProbeUnknownProtocolIsAnError(t *testing.T) {
 	result := New(Config{Protocols: []model.PathProtocol{"udp"}, Observer: ObserverFunc(func(context.Context, Request) (Observation, error) {
 		return Observation{}, errors.New("observer should not be called")
-	})}).Run(context.Background(), probecontract.ExecutionContext{Target: model.Target{Host: "example.com", Port: 443}})
+	})}).Run(context.Background(), probecontract.ExecutionContext{Target: model.NewTarget("example.com", 443)})
 	if result.Status != model.ProbeStatusError || result.Interpretation.FailureReason != FailureReasonPathObservation {
 		t.Fatalf("unknown protocol result = %#v", result)
 	}
@@ -156,7 +156,7 @@ func TestProbeICMPOperationalFailureIsICMPOnly(t *testing.T) {
 		Observer: ObserverFunc(func(context.Context, Request) (Observation, error) {
 			return Observation{}, errors.New("icmp receive failed")
 		}),
-	}).Run(context.Background(), probecontract.ExecutionContext{Target: model.Target{Host: "198.51.100.1", Port: 443}})
+	}).Run(context.Background(), probecontract.ExecutionContext{Target: model.NewTarget("198.51.100.1", 443)})
 	if result.Status != model.ProbeStatusError || result.Interpretation.FailureReason != model.FailureReasonICMPFailure || result.Interpretation.Layer != model.LayerICMP {
 		t.Fatalf("ICMP operational failure was promoted: %#v", result)
 	}

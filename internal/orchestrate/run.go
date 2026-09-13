@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -102,6 +105,10 @@ func Run(ctx context.Context, target model.Target, opts Options) model.Diagnosti
 	}
 
 	results := runProbes(ctx, target, timeout, probeConcurrency, sessionID, backend, opts.OnProbeStarted, opts.OnProbeCompleted)
+	target = enrichTargetEndpoints(target, results)
+	for index := range results {
+		results[index].Target = target
+	}
 
 	sort.Slice(results, func(i, j int) bool { return results[i].Name < results[j].Name })
 
@@ -181,25 +188,42 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 			return pathprobe.New(pathprobe.Config{Timeout: timeout}).Run(runCtx, execution)
 		}},
 	}
-	if target.URL == "" {
-		// A host:port target has no URL semantics. Preserve explicit skipped
-		// lanes in the report so consumers can distinguish them from an
-		// attempted TLS/HTTP failure.
-		jobs = append(jobs,
-			job{name: "tls", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
-				return skippedURLProbe(runCtx, target, "tls", model.LayerTLS, model.FaultDomainTLS)
-			}},
-			job{name: "http", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
-				return skippedURLProbe(runCtx, target, "http", model.LayerHTTP, model.FaultDomainHTTP)
-			}},
-		)
-	} else {
+	if target.ApplicationProtocol == model.ApplicationProtocolHTTPS {
 		jobs = append(jobs,
 			job{name: "tls", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 				return tls.New(tls.Config{}).Run(runCtx, execution)
 			}},
 			job{name: "http", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 				return http.New().Run(runCtx, execution)
+			}},
+		)
+	} else if target.ApplicationProtocol == model.ApplicationProtocolTLS {
+		jobs = append(jobs,
+			job{name: "tls", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
+				return tls.New(tls.Config{}).Run(runCtx, execution)
+			}},
+			job{name: "http", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
+				return skippedURLProbe(runCtx, target, "http", model.LayerHTTP, model.FaultDomainHTTP)
+			}},
+		)
+	} else if target.ApplicationProtocol == model.ApplicationProtocolHTTP {
+		jobs = append(jobs,
+			job{name: "tls", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
+				return skippedURLProbe(runCtx, target, "tls", model.LayerTLS, model.FaultDomainTLS)
+			}},
+			job{name: "http", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
+				return http.New().Run(runCtx, execution)
+			}},
+		)
+	} else {
+		// Non-HTTP profiles retain lower-layer diagnostics and expose explicit
+		// skipped URL lanes rather than guessing an application probe.
+		jobs = append(jobs,
+			job{name: "tls", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
+				return skippedURLProbe(runCtx, target, "tls", model.LayerTLS, model.FaultDomainTLS)
+			}},
+			job{name: "http", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
+				return skippedURLProbe(runCtx, target, "http", model.LayerHTTP, model.FaultDomainHTTP)
 			}},
 		)
 	}
@@ -247,7 +271,7 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 				if result.Name == "" {
 					result.Name = item.job.name
 				}
-				if result.Target == (model.Target{}) {
+				if result.Target.OriginalInput == "" && result.Target.RequestedIdentity == "" && result.Target.Port == 0 {
 					result.Target = target
 				}
 				result.SessionID = identity.SessionID
@@ -385,6 +409,86 @@ func resolvedAddress(result model.ProbeResult) netip.Addr {
 		}
 	}
 	return netip.Addr{}
+}
+
+func enrichTargetEndpoints(target model.Target, results []model.ProbeResult) model.Target {
+	target = model.NormalizeTarget(target)
+	addresses := make([]string, 0, len(target.ResolvedAddresses)+2)
+	addAddress := func(raw string) {
+		if raw == "" {
+			return
+		}
+		if address, err := netip.ParseAddr(strings.Trim(raw, "[]")); err == nil {
+			raw = model.NormalizeAddr(address).String()
+		}
+		for _, existing := range addresses {
+			if existing == raw {
+				return
+			}
+		}
+		addresses = append(addresses, raw)
+	}
+	for _, result := range results {
+		for _, evidence := range result.Evidence {
+			if evidence.Kind != model.EvidenceKindDNSResolution {
+				continue
+			}
+			var value dns.DNSResolutionEvidence
+			if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+				continue
+			}
+			for _, address := range append(append([]string{}, value.A...), value.AAAA...) {
+				addAddress(address)
+			}
+		}
+	}
+	if len(addresses) > 0 {
+		target.ResolvedAddresses = addresses
+		target.SelectedEndpoint = &model.Endpoint{Address: addresses[0], Port: target.Port}
+	} else if target.LiteralIP != "" {
+		target.SelectedEndpoint = &model.Endpoint{Address: target.LiteralIP, Port: target.Port}
+	}
+	for _, result := range results {
+		for _, evidence := range result.Evidence {
+			if evidence.Kind != model.EvidenceKindTCPConnection {
+				continue
+			}
+			var value map[string]any
+			if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+				continue
+			}
+			for _, key := range []string{"remote_endpoint", "address"} {
+				endpoint, ok := value[key].(string)
+				if !ok || endpoint == "" {
+					continue
+				}
+				if concrete, ok := concreteEndpoint(endpoint, target.Port); ok {
+					target.TestedEndpoint = &concrete
+					return target
+				}
+			}
+		}
+	}
+	return target
+}
+
+func concreteEndpoint(raw string, defaultPort uint16) (model.Endpoint, bool) {
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil {
+		host = strings.Trim(raw, "[]")
+		port = fmt.Sprintf("%d", defaultPort)
+	}
+	if host == "" {
+		return model.Endpoint{}, false
+	}
+	parsedPort, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || parsedPort == 0 {
+		return model.Endpoint{}, false
+	}
+	if address, err := netip.ParseAddr(host); err == nil {
+		host = model.NormalizeAddr(address).String()
+	}
+	return model.Endpoint{Address: host, Port: uint16(parsedPort)}, true
 }
 
 func reportStatus(results []model.ProbeResult) model.ReportStatus {

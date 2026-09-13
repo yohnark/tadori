@@ -30,12 +30,3 @@ func NormalizePrefix(prefix netip.Prefix) netip.Prefix {
 
 	return netip.PrefixFrom(prefix.Addr().Unmap(), bits).Masked()
 }
-
-// NormalizeTarget canonicalizes a literal IP in target.Host while preserving
-// Target.URL, which records the endpoint supplied by the caller.
-func NormalizeTarget(target Target) Target {
-	if address, err := netip.ParseAddr(target.Host); err == nil {
-		target.Host = NormalizeAddr(address).String()
-	}
-	return target
-}

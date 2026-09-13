@@ -66,14 +66,16 @@ func (p *DefaultRouteProbe) routes(ctx context.Context) ([]Route, error) {
 	return provider.Routes(ctx)
 }
 
-// TargetRouteProbe selects the effective route toward execution.Target.Host.
+// TargetRouteProbe selects the effective route toward execution.Target's
+// canonical requested identity.
 // It accepts a literal IPv4 or IPv6 address, allowing deterministic tests and
 // avoiding an implicit DNS query. Name resolution is owned by the DNS lane.
 type TargetRouteProbe struct {
 	Provider RouteTable
 	Timeout  time.Duration
 	// TargetIP may be populated by an integration layer after DNS has
-	// selected an address. When valid it takes precedence over Target.Host.
+	// selected an address. When valid it takes precedence over the requested
+	// identity.
 	TargetIP netip.Addr
 }
 
@@ -102,7 +104,7 @@ func (p *TargetRouteProbe) Run(ctx context.Context, execution probe.ExecutionCon
 	targetIP, parseErr := p.targetAddress(execution.Target)
 	if parseErr != nil {
 		completed := time.Now().UTC()
-		raw := map[string]any{"route_type": "target", "target": execution.Target.Host, "error": parseErr.Error()}
+		raw := map[string]any{"route_type": "target", "target": execution.Target.RequestedIdentity, "error": parseErr.Error()}
 		return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("target-route-1", raw)}, model.ProbeStatusFailed, model.FailureReasonInvalidRoute, model.LayerRoute, model.FaultDomainRouting)
 	}
 	routes, err := p.routes(callCtx)
@@ -132,7 +134,7 @@ func (p *TargetRouteProbe) targetAddress(target model.Target) (netip.Addr, error
 	if p.TargetIP.IsValid() {
 		return model.NormalizeAddr(p.TargetIP), nil
 	}
-	return parseTargetAddress(target.Host)
+	return parseTargetAddress(target.RequestedIdentity)
 }
 
 func (p *TargetRouteProbe) routes(ctx context.Context) ([]Route, error) {
@@ -238,7 +240,7 @@ func (p *GatewayProbe) targetAddress(target model.Target) (netip.Addr, error) {
 	if p.TargetIP.IsValid() {
 		return model.NormalizeAddr(p.TargetIP), nil
 	}
-	return parseTargetAddress(target.Host)
+	return parseTargetAddress(target.RequestedIdentity)
 }
 
 func (p *GatewayProbe) routes(ctx context.Context) ([]Route, error) {
@@ -265,7 +267,7 @@ func parseTargetAddress(host string) (netip.Addr, error) {
 }
 
 func targetFamily(target model.Target) int {
-	address, err := parseTargetAddress(target.Host)
+	address, err := parseTargetAddress(target.RequestedIdentity)
 	if err != nil {
 		return 0
 	}

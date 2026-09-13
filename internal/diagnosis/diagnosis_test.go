@@ -382,7 +382,7 @@ func TestDiagnoseCorrelatesTCPPathDestinationSuccessWithRequestedPort(t *testing
 
 	pathResult := model.ProbeResult{
 		Name:   "path",
-		Target: model.Target{Host: "198.51.100.10", Port: 8443},
+		Target: model.NewTarget("198.51.100.10", 8443),
 		Status: model.ProbeStatusPassed,
 		Evidence: []model.Evidence{{
 			ID:   "path/tcp",
@@ -451,7 +451,7 @@ func TestDiagnoseKeepsTCPRefusalFindingDespitePathDestinationResponse(t *testing
 	}
 	pathResult := model.ProbeResult{
 		Name:     "path",
-		Target:   model.Target{Host: "198.51.100.10", Port: 8443},
+		Target:   model.NewTarget("198.51.100.10", 8443),
 		Status:   model.ProbeStatusPassed,
 		Evidence: []model.Evidence{{ID: "path/tcp", Kind: model.EvidenceKindPathObservation, Raw: raw}},
 		Interpretation: model.ProbeInterpretation{
@@ -468,9 +468,9 @@ func TestDiagnoseKeepsTCPRefusalFindingDespitePathDestinationResponse(t *testing
 
 func TestDiagnoseDoesNotCrossSuppressDifferentTCPPorts(t *testing.T) {
 	failedPort := failed("tcp-22", model.FailureReasonTCPTimeout, model.LayerTCP, model.FaultDomainTransport)
-	failedPort.Target = model.Target{Host: "db.example", Port: 22}
+	failedPort.Target = model.NewTarget("db.example", 22)
 	successPort := passed("tcp-443", model.LayerTCP)
-	successPort.Target = model.Target{Host: "db.example", Port: 443}
+	successPort.Target = model.NewTarget("db.example", 443)
 
 	got := Diagnose([]model.ProbeResult{failedPort, successPort})
 	if len(got) != 1 || got[0].FailureReason != model.FailureReasonTCPTimeout {

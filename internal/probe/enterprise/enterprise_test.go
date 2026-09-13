@@ -21,7 +21,15 @@ import (
 )
 
 func enterpriseTarget() model.Target {
-	return model.Target{URL: "https://service.example.test/health", Scheme: "https", Host: "service.example.test", Port: 443}
+	return parseEnterpriseTarget("https://service.example.test/health")
+}
+
+func parseEnterpriseTarget(raw string) model.Target {
+	target, err := model.ParseTarget(model.TargetIntent{Input: raw})
+	if err != nil {
+		panic(err)
+	}
+	return target
 }
 
 func testProbe(snapshot Snapshot) model.ProbeResult {
@@ -151,7 +159,7 @@ func TestProbeHTTPPathCapturesProxy407WithoutCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := ProbeHTTPPath(context.Background(), model.Target{URL: "http://service.example.test/health"}, PathBrowserWinINET, "wininet", PathModeProxy, "user:password@"+net.JoinHostPort(proxyURL.Hostname(), proxyURL.Port()), time.Second)
+	path := ProbeHTTPPath(context.Background(), parseEnterpriseTarget("http://service.example.test/health"), PathBrowserWinINET, "wininet", PathModeProxy, "user:password@"+net.JoinHostPort(proxyURL.Hostname(), proxyURL.Port()), time.Second)
 	if path.FailureReason != model.FailureReasonProxyAuthenticationRequired || !path.ProxyAuthenticationHint || !path.TCPConnected {
 		t.Fatalf("407 path = %#v", path)
 	}
@@ -165,7 +173,7 @@ func TestProbeHTTPPathRetainsPeerCertificateOnTrustFailure(t *testing.T) {
 		_, _ = io.WriteString(writer, "not reached")
 	}))
 	defer server.Close()
-	path := ProbeHTTPPath(context.Background(), model.Target{URL: server.URL}, PathApplicationDirect, "direct", PathModeDirect, "", time.Second)
+	path := ProbeHTTPPath(context.Background(), parseEnterpriseTarget(server.URL), PathApplicationDirect, "direct", PathModeDirect, "", time.Second)
 	if path.FailureReason != model.FailureReasonCertificateValidationFailure || !path.TCPConnected || !path.TLSAttempted || path.Certificate == nil {
 		t.Fatalf("TLS trust path = %#v", path)
 	}

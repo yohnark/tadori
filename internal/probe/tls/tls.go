@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strconv"
 	"strings"
 	"time"
 
@@ -260,17 +259,16 @@ func (p Probe) tlsConfig(host string) *tls.Config {
 }
 
 func targetAddress(target model.Target) (string, string, error) {
-	host := strings.TrimSpace(target.Host)
+	target = model.NormalizeTarget(target)
+	host := strings.TrimSpace(target.RequestedIdentity)
 	if host == "" {
-		return "", "", errors.New("target host is required")
+		return "", "", errors.New("target identity is required")
 	}
-	if target.Port == 0 {
-		return "", "", errors.New("target port is required")
+	address, err := target.EndpointAddress()
+	if err != nil {
+		return "", "", err
 	}
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	}
-	return host, net.JoinHostPort(host, strconv.Itoa(int(target.Port))), nil
+	return host, address, nil
 }
 
 func handshakeObservation(phase Phase, address, host string, err error) *HandshakeEvidence {

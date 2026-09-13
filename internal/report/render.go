@@ -63,6 +63,18 @@ func RenderHuman(report model.DiagnosticReport) string {
 
 	fmt.Fprintf(&out, "Status: %s\n", report.Status)
 	fmt.Fprintf(&out, "Target: %s\n", formatTarget(report.Target))
+	if report.Target.Service.Label != "" {
+		fmt.Fprintf(&out, "Service: %s\n", report.Target.Service.Label)
+	}
+	if report.Target.TransportProtocol != "" {
+		fmt.Fprintf(&out, "Transport: %s\n", report.Target.TransportProtocol)
+	}
+	if report.Target.Port != 0 {
+		fmt.Fprintf(&out, "Port: %d\n", report.Target.Port)
+	}
+	if report.Target.Resource != "" {
+		fmt.Fprintf(&out, "Resource: %s\n", report.Target.Resource)
+	}
 	if report.StartedAt != nil || report.CompletedAt != nil {
 		out.WriteString("Report timing:")
 		if report.StartedAt != nil {
@@ -202,22 +214,11 @@ func WriteTerminal(w io.Writer, report model.DiagnosticReport) error {
 }
 
 func formatTarget(target model.Target) string {
-	if target.URL != "" {
-		return target.URL
+	if target.RequestedIdentity != "" {
+		return target.RequestedIdentity
 	}
-
-	var host string
-	if target.Host != "" {
-		host = target.Host
-		if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
-			host = "[" + host + "]"
-		}
-	}
-	if target.Port != 0 {
-		return fmt.Sprintf("%s:%d", host, target.Port)
-	}
-	if host != "" {
-		return host
+	if target.OriginalInput != "" {
+		return target.OriginalInput
 	}
 	return "(unspecified)"
 }

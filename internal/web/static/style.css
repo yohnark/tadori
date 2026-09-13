@@ -133,16 +133,46 @@ pre,
 
 #diagnose-form {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(260px, 1fr) minmax(150px, 0.6fr) 90px auto;
   align-items: center;
   min-height: 48px;
+  gap: 8px;
+  padding: 8px;
 }
 
 #diagnose-form label {
-  padding: 0 14px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 650;
+}
+
+.target-field,
+.service-field,
+.port-field {
+  display: grid;
+  gap: 3px;
+}
+
+.target-row {
+  display: contents;
+}
+
+.service-field select,
+#port {
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  outline: none;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0 8px;
+}
+
+.service-field select:focus,
+#port:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 #target {
@@ -399,6 +429,29 @@ h3 {
   overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 11px;
+}
+
+.target-details {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.target-detail {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.target-detail-label {
+  color: var(--muted);
+}
+
+.target-detail-value {
+  color: var(--ink);
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .reference-line {
@@ -1136,8 +1189,20 @@ button.track-node:focus-visible {
   }
 
   #diagnose-form label {
-    grid-column: 1 / -1;
     padding: 0;
+  }
+
+  .target-field,
+  .primary-button {
+    grid-column: 1 / -1;
+  }
+
+  .service-field {
+    grid-column: 1;
+  }
+
+  .port-field {
+    grid-column: 2;
   }
 
   .primary-button {

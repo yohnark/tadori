@@ -8,7 +8,7 @@ import (
 )
 
 func TestPacketFlowEvidenceStrengthensTCPDiagnosis(t *testing.T) {
-	target := model.Target{Host: "203.0.113.10", Port: 443}
+	target := model.NewTarget("203.0.113.10", 443)
 	started := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	completed := started.Add(time.Second)
 	base := model.ProbeResult{
@@ -62,7 +62,7 @@ func TestPacketFlowEvidenceStrengthensTCPDiagnosis(t *testing.T) {
 }
 
 func TestUnavailablePacketCaptureDoesNotChangeTCPDiagnosis(t *testing.T) {
-	target := model.Target{Host: "203.0.113.10", Port: 443}
+	target := model.NewTarget("203.0.113.10", 443)
 	flow := model.PacketFlowEvidence{
 		SessionID: "session-1", ProbeID: "tcp", CorrelationID: "session-1/tcp", Target: target,
 		CaptureStatus: model.PacketCaptureStatusInsufficientPrivilege,

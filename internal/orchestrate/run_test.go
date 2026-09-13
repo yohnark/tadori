@@ -24,7 +24,7 @@ func TestRunAgainstLocalFixture(t *testing.T) {
 	}))
 	defer server.Close()
 
-	target, err := ParseTarget(server.URL)
+	target, err := model.ParseTarget(model.TargetIntent{Input: server.URL})
 	if err != nil {
 		t.Fatalf("ParseTarget(%q): %v", server.URL, err)
 	}
@@ -37,8 +37,8 @@ func TestRunAgainstLocalFixture(t *testing.T) {
 	if got.SchemaVersion != model.DiagnosticSchemaVersion {
 		t.Errorf("SchemaVersion = %q, want %q", got.SchemaVersion, model.DiagnosticSchemaVersion)
 	}
-	if got.Target.URL != server.URL {
-		t.Errorf("Target.URL = %q, want %q", got.Target.URL, server.URL)
+	if got.Target.OriginalInput != server.URL || got.Target.RequestedIdentity != "127.0.0.1" {
+		t.Errorf("canonical target = %#v, want original input and loopback identity", got.Target)
 	}
 	if got.StartedAt == nil || got.CompletedAt == nil {
 		t.Fatalf("expected StartedAt/CompletedAt to be populated")
@@ -119,7 +119,7 @@ func TestRunProgressHooksTrackEveryCanonicalProbe(t *testing.T) {
 	}))
 	defer server.Close()
 
-	target, err := ParseTarget(server.URL)
+	target, err := model.ParseTarget(model.TargetIntent{Input: server.URL})
 	if err != nil {
 		t.Fatalf("ParseTarget(%q): %v", server.URL, err)
 	}
@@ -175,7 +175,7 @@ func TestRunPreservesPartialResultsOnUnreachableTarget(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close() // nothing listens on this port once closed
 
-	target, err := ParseTarget("http://127.0.0.1:" + strconv.Itoa(port) + "/")
+	target, err := model.ParseTarget(model.TargetIntent{Input: "http://127.0.0.1:" + strconv.Itoa(port) + "/"})
 	if err != nil {
 		t.Fatalf("ParseTarget: %v", err)
 	}
@@ -217,11 +217,11 @@ func TestRunHostPortTargetUsesTCPEndpointAndSkipsURLLanes(t *testing.T) {
 	}()
 
 	port := uint16(listener.Addr().(*net.TCPAddr).Port)
-	target, err := ParseTarget("127.0.0.1:" + strconv.Itoa(int(port)))
+	target, err := model.ParseTarget(model.TargetIntent{Input: "127.0.0.1:" + strconv.Itoa(int(port))})
 	if err != nil {
 		t.Fatalf("ParseTarget: %v", err)
 	}
-	if target.URL != "" || target.Host != "127.0.0.1" || target.Port != port {
+	if target.OriginalInput == "" || target.RequestedIdentity != "127.0.0.1" || target.Port != port {
 		t.Fatalf("host:port target = %#v", target)
 	}
 
@@ -236,8 +236,8 @@ func TestRunHostPortTargetUsesTCPEndpointAndSkipsURLLanes(t *testing.T) {
 	}
 	for _, name := range []string{"tls", "http"} {
 		result := findProbe(t, got.Probes, name)
-		if result.Status != model.ProbeStatusSkipped {
-			t.Errorf("%s status = %s, want skipped for host:port target", name, result.Status)
+		if name == "tls" && result.Status != model.ProbeStatusSkipped {
+			t.Errorf("%s status = %s, want skipped for HTTP-default host:port target", name, result.Status)
 		}
 	}
 	pathResult := findProbe(t, got.Probes, "path")

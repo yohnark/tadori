@@ -222,8 +222,7 @@ func DecodePathObservation(evidence Evidence) (PathObservation, error) {
 // endpoint, including its destination port. It is used before transport
 // evidence is allowed to contradict another probe.
 func (observation PathObservation) MatchesTarget(target Target) bool {
-	return canonicalPathDestination(observation.Destination) == canonicalPathDestination(target.Host) &&
-		observation.DestinationPort == target.Port
+	return target.MatchesAddress(observation.Destination) && observation.DestinationPort == target.Port
 }
 
 // NormalizePathResponder canonicalizes an IP responder while leaving host

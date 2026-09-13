@@ -300,7 +300,7 @@ func failedPathInterpretation(observations []model.PathObservation) model.ProbeI
 }
 
 func (p *Probe) observeProtocol(ctx context.Context, observer Observer, execution probe.ExecutionContext, target model.Target, protocol model.PathProtocol) (model.PathObservation, error) {
-	destination, _, _ := normalizeDestinationAddress(target.Host)
+	destination, _, _ := normalizeDestinationAddress(target.RequestedIdentity)
 	observation := model.PathObservation{
 		Status:          model.PathObservationStatusObserved,
 		Protocol:        protocol,
@@ -605,19 +605,14 @@ func (p *Probe) clockNow() time.Time {
 }
 
 func validateTarget(target model.Target) error {
-	if strings.TrimSpace(target.Host) == "" {
-		return errors.New("path target host is empty")
+	if strings.TrimSpace(target.RequestedIdentity) == "" {
+		return errors.New("path target identity is empty")
 	}
 	if target.Port == 0 {
 		return errors.New("path target port must be between 1 and 65535")
 	}
-	if strings.ContainsAny(target.Host, "\x00 \t\r\n") {
-		return errors.New("path target host is malformed")
-	}
-	if strings.ContainsAny(target.Host, "[]") {
-		if !(strings.HasPrefix(target.Host, "[") && strings.HasSuffix(target.Host, "]")) {
-			return errors.New("path target host is malformed")
-		}
+	if strings.ContainsAny(target.RequestedIdentity, "\x00 \t\r\n") {
+		return errors.New("path target identity is malformed")
 	}
 	return nil
 }

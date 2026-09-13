@@ -26,8 +26,27 @@
   <main class="shell app-shell">
     <section class="command-bar" aria-label="Diagnostic target">
       <form id="diagnose-form">
-        <label for="target">Target</label>
-        <input id="target" name="target" type="text" placeholder="https://example.com or host:port" required autocomplete="url" spellcheck="false">
+        <div class="target-field">
+          <label for="target">Target</label>
+          <input id="target" name="target" type="text" placeholder="hostname, IP, URL, or \\server\\share" required autocomplete="url" spellcheck="false">
+        </div>
+        <div class="service-field">
+          <label for="service">Service</label>
+          <select id="service" name="service" aria-label="Service profile">
+            <option value="http" data-default-port="80">HTTP</option>
+            <option value="https" data-default-port="443">HTTPS</option>
+            <option value="smb" data-default-port="445">File sharing (SMB)</option>
+            <option value="rdp" data-default-port="3389">RDP</option>
+            <option value="ssh" data-default-port="22">SSH</option>
+            <option value="dns" data-default-port="53">DNS</option>
+            <option value="custom_tcp">Custom TCP</option>
+            <option value="custom_tls">Custom TLS</option>
+          </select>
+        </div>
+        <div class="port-field">
+          <label for="port">Port</label>
+          <input id="port" name="port" type="number" min="1" max="65535" inputmode="numeric" aria-label="Port">
+        </div>
         <button class="primary-button" type="submit">Diagnose</button>
       </form>
       <p id="error" class="error" role="alert" hidden></p>
@@ -65,7 +84,7 @@
         <article class="overview-card panel">
           <p class="eyebrow">Execution</p>
           <h2 id="overall-status">—</h2>
-          <p id="report-target" class="target-display">—</p>
+          <div id="report-target" class="target-details">—</div>
         </article>
       </section>
 
@@ -131,7 +150,7 @@
                 <h2 id="evidence-heading">Structured evidence</h2>
               </div>
             </div>
-            <p class="section-note">Select a path element or finding to focus its evidence.</p>
+            <p class="section-note">Select a path element or finding to focus its evidence. Raw evidence remains available in the inspector.</p>
             <div id="evidence" class="evidence-list"></div>
           </section>
 

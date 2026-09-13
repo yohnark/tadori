@@ -113,7 +113,7 @@ Active Routes:
 
 func TestDefaultRouteProbeIsDistinctFromTargetRouteProbe(t *testing.T) {
 	table := fixtureRouteTable{routes: fixtureRoutes()}
-	target := model.Target{Host: "192.0.2.200", Port: 443}
+	target := model.NewTarget("192.0.2.200", 443)
 	defaultResult := NewDefaultRouteProbe(table).Run(context.Background(), probe.ExecutionContext{Target: target})
 	targetResult := NewTargetRouteProbe(table).Run(context.Background(), probe.ExecutionContext{Target: target})
 	if defaultResult.Name != DefaultRouteProbeName || targetResult.Name != TargetRouteProbeName {
@@ -129,7 +129,7 @@ func TestDefaultRouteProbeIsDistinctFromTargetRouteProbe(t *testing.T) {
 
 func TestTargetRouteProbeCanUseResolvedAddressWithoutDNS(t *testing.T) {
 	p := NewTargetRouteProbe(fixtureRouteTable{routes: fixtureRoutes()})
-	got := p.RunForAddress(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "target.example"}}, netip.MustParseAddr("192.0.2.200"))
+	got := p.RunForAddress(context.Background(), probe.ExecutionContext{Target: model.NewTarget("target.example", 80)}, netip.MustParseAddr("192.0.2.200"))
 	if got.Status != model.ProbeStatusPassed || got.Interpretation.FailureReason != model.FailureReasonNone {
 		t.Fatalf("resolved-address route result = %#v", got)
 	}
@@ -137,7 +137,7 @@ func TestTargetRouteProbeCanUseResolvedAddressWithoutDNS(t *testing.T) {
 
 func TestDefaultRouteProbeNormalizesNoRoute(t *testing.T) {
 	p := NewDefaultRouteProbe(fixtureRouteTable{routes: []Route{{Destination: netip.MustParsePrefix("192.0.2.0/24")}}})
-	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "192.0.2.4"}})
+	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("192.0.2.4", 80)})
 	if got.Status != model.ProbeStatusFailed || got.Interpretation.FailureReason != model.FailureReasonNoRoute {
 		t.Fatalf("result = %#v", got)
 	}
@@ -145,11 +145,11 @@ func TestDefaultRouteProbeNormalizesNoRoute(t *testing.T) {
 
 func TestTargetRouteProbeNormalizesNoRouteAndInvalidTarget(t *testing.T) {
 	p := NewTargetRouteProbe(fixtureRouteTable{routes: []Route{{Destination: netip.MustParsePrefix("192.0.2.0/24")}}})
-	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "198.51.100.10"}})
+	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("198.51.100.10", 80)})
 	if got.Interpretation.FailureReason != model.FailureReasonNoRoute {
 		t.Fatalf("no route reason = %q", got.Interpretation.FailureReason)
 	}
-	got = p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "target.example"}})
+	got = p.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("target.example", 80)})
 	if got.Interpretation.FailureReason != model.FailureReasonInvalidRoute {
 		t.Fatalf("invalid target reason = %q", got.Interpretation.FailureReason)
 	}
@@ -159,13 +159,13 @@ func TestGatewayProbeSuccessAndFailureAreSupportingEvidence(t *testing.T) {
 	table := fixtureRouteTable{routes: fixtureRoutes()}
 	success := NewGatewayProbe(table)
 	success.Checker = func(context.Context, netip.Addr) error { return nil }
-	got := success.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "192.0.2.200"}})
+	got := success.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("192.0.2.200", 80)})
 	if got.Status != model.ProbeStatusPassed || got.Interpretation.FailureReason != model.FailureReasonNone {
 		t.Fatalf("success result = %#v", got)
 	}
 	failure := NewGatewayProbe(table)
 	failure.Checker = func(context.Context, netip.Addr) error { return errors.New("fixture gateway down") }
-	got = failure.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "192.0.2.200"}})
+	got = failure.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("192.0.2.200", 80)})
 	if got.Status != model.ProbeStatusFailed || got.Interpretation.FailureReason != model.FailureReasonGatewayUnreachable {
 		t.Fatalf("failure result = %#v", got)
 	}
@@ -187,7 +187,7 @@ func TestGatewayProbeSuccessAndFailureAreSupportingEvidence(t *testing.T) {
 func TestGatewayProbeRouteSuccessWithUnsupportedCheckIsSkipped(t *testing.T) {
 	p := NewGatewayProbe(fixtureRouteTable{routes: fixtureRoutes()})
 	p.Checker = func(context.Context, netip.Addr) error { return ErrGatewayReachabilityUnsupported }
-	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "192.0.2.200"}})
+	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("192.0.2.200", 80)})
 	if got.Status != model.ProbeStatusSkipped || got.Interpretation.FailureReason != model.FailureReasonUnsupported {
 		t.Fatalf("unsupported checker result = %#v", got)
 	}
@@ -234,7 +234,7 @@ func TestGatewayProbeDirectRouteDoesNotInventGatewayFailure(t *testing.T) {
 	checkerCalled := false
 	p := NewGatewayProbe(table)
 	p.Checker = func(context.Context, netip.Addr) error { checkerCalled = true; return errors.New("must not run") }
-	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "192.0.2.8"}})
+	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("192.0.2.8", 80)})
 	if checkerCalled || got.Interpretation.FailureReason != model.FailureReasonNone || got.Status != model.ProbeStatusPassed {
 		t.Fatalf("direct route result = %#v, checker=%v", got, checkerCalled)
 	}
@@ -248,7 +248,7 @@ func TestRouteProbeNormalizesTimeoutAndUnsupported(t *testing.T) {
 	p := NewTargetRouteProbe(timeoutTable)
 	p.Timeout = 5 * time.Millisecond
 	started := time.Now()
-	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "192.0.2.8"}})
+	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("192.0.2.8", 80)})
 	if time.Since(started) > 500*time.Millisecond {
 		t.Fatalf("timeout was not bounded")
 	}
