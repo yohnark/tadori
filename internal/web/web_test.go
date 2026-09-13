@@ -34,6 +34,9 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	if !strings.Contains(page, "Raw evidence") || !strings.Contains(page, "Canonical JSON") {
 		t.Errorf("UI page is missing required report sections")
 	}
+	if !strings.Contains(page, "HTML Report") || !strings.Contains(page, "json-report-link") {
+		t.Errorf("UI page is missing report export affordances")
+	}
 	for _, fragment := range []string{
 		`id="observed-path-panel"`,
 		`id="path-graph-tab"`,
@@ -60,6 +63,9 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	}
 	if strings.Contains(script, "innerHTML") {
 		t.Errorf("app.js must not render evidence with innerHTML")
+	}
+	if !strings.Contains(script, "/report.html") || !strings.Contains(script, "/report.json") {
+		t.Errorf("app.js does not expose report export URLs")
 	}
 	for _, fragment := range []string{"selectPathView", "renderPathGraph", "setPathGraphState", "data-path-view"} {
 		if !strings.Contains(script, fragment) {
