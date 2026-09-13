@@ -1,3 +1,5 @@
-// Package route will own route selection and gateway reachability probes.
-// It is a package boundary only; Issue #2 adds no probe implementation.
+// Package route collects default and effective target routes, selected
+// interfaces/next hops, and bounded gateway reachability evidence.  Gateway
+// failures are deliberately represented as supporting evidence and are not a
+// conclusion about end-to-end connectivity.
 package route
