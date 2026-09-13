@@ -110,6 +110,7 @@ func BuildNetworkContext(target model.Target, selection Selection, interfaces []
 	} else if context.EffectiveRoute == model.RouteDispositionRouted {
 		context.NetworkScope = model.NetworkScopeExternalRouted
 	}
+	context.Certainty = model.ObservationCertaintyDerived
 	return context
 }
 
@@ -164,6 +165,7 @@ func NetworkContextFromProbeResults(target model.Target, probes []model.ProbeRes
 						RequestedIdentity: target.RequestedIdentity,
 						EffectiveRoute:    model.RouteDispositionUnknown,
 						NetworkScope:      model.NetworkScopeUnknown,
+						Certainty:         model.ObservationCertaintyUnknown,
 						Provenance:        uniqueStrings([]string{evidence.Source}),
 						EvidenceIDs:       uniqueStrings([]string{evidence.ID}),
 					}, true
@@ -174,7 +176,7 @@ func NetworkContextFromProbeResults(target model.Target, probes []model.ProbeRes
 	}
 	selection, ok := selectionFromObservation(*routeObservation, target)
 	if !ok {
-		context := model.NetworkContext{RequestedIdentity: target.RequestedIdentity, EffectiveRoute: model.RouteDispositionUnknown, NetworkScope: model.NetworkScopeUnknown, EvidenceIDs: []string{routeEvidenceID}}
+		context := model.NetworkContext{RequestedIdentity: target.RequestedIdentity, EffectiveRoute: model.RouteDispositionUnknown, NetworkScope: model.NetworkScopeUnknown, Certainty: model.ObservationCertaintyUnknown, EvidenceIDs: []string{routeEvidenceID}}
 		if routeSource != "" {
 			context.Provenance = []string{routeSource}
 		}

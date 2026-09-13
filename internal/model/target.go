@@ -248,22 +248,28 @@ const MaxEndpointCandidates = 4
 // stable position in the combined A-then-AAAA answer set and is not an OS
 // connection-order claim.
 type EndpointCandidate struct {
-	Address string         `json:"address"`
-	Family  EndpointFamily `json:"family"`
-	Order   int            `json:"order"`
+	Address     string               `json:"address"`
+	Family      EndpointFamily       `json:"family"`
+	Order       int                  `json:"order"`
+	Certainty   ObservationCertainty `json:"certainty,omitempty"`
+	Provenance  string               `json:"provenance,omitempty"`
+	EvidenceIDs []string             `json:"evidence_ids,omitempty"`
 }
 
 // EndpointAttempt records one bounded transport attempt. It is comparative
 // evidence: a failed candidate does not establish that every candidate for
 // the requested identity failed.
 type EndpointAttempt struct {
-	Candidate         EndpointCandidate `json:"candidate"`
-	RequestedEndpoint string            `json:"requested_endpoint"`
-	RemoteEndpoint    string            `json:"remote_endpoint,omitempty"`
-	Status            ProbeStatus       `json:"status"`
-	FailureReason     FailureReason     `json:"failure_reason"`
-	Error             string            `json:"error,omitempty"`
-	ErrorType         string            `json:"error_type,omitempty"`
+	Candidate         EndpointCandidate    `json:"candidate"`
+	RequestedEndpoint string               `json:"requested_endpoint"`
+	RemoteEndpoint    string               `json:"remote_endpoint,omitempty"`
+	Status            ProbeStatus          `json:"status"`
+	FailureReason     FailureReason        `json:"failure_reason"`
+	Error             string               `json:"error,omitempty"`
+	ErrorType         string               `json:"error_type,omitempty"`
+	Certainty         ObservationCertainty `json:"certainty,omitempty"`
+	Provenance        string               `json:"provenance,omitempty"`
+	EvidenceIDs       []string             `json:"evidence_ids,omitempty"`
 }
 
 // Endpoint is a concrete network endpoint. It is intentionally distinct from
@@ -277,16 +283,15 @@ type Endpoint struct {
 	Family          EndpointFamily          `json:"family,omitempty"`
 	SelectionReason EndpointSelectionReason `json:"selection_reason,omitempty"`
 	Provenance      string                  `json:"provenance,omitempty"`
+	Certainty       ObservationCertainty    `json:"certainty,omitempty"`
+	EvidenceIDs     []string                `json:"evidence_ids,omitempty"`
 }
 
-// Target is the canonical normalized service endpoint. OriginalInput is kept
-// for provenance. RequestedIdentity is the hostname or explicitly requested
-// literal; LiteralIP is populated only when the input explicitly supplied an
-// IP literal. ResolvedAddresses is retained as a compact compatibility view;
-// ResolvedCandidates is the canonical family-preserving answer set.
-// SelectedEndpoint is Tadori's probe candidate, not an assertion about the
-// effective OS/application endpoint. TestedEndpoint is the concrete endpoint
-// observed by transport evidence. CandidateAttempts retain bounded failures.
+// Target is the normalized user/request intent. OriginalInput is retained for
+// request provenance. The endpoint and route fields below are compatibility
+// execution state for existing probes and consumers; they are not the
+// report-level authority. New cross-probe consumers must use
+// DiagnosticReport.Observations.
 type Target struct {
 	OriginalInput       string              `json:"original_input"`
 	RequestedIdentity   string              `json:"requested_identity"`
@@ -296,13 +301,36 @@ type Target struct {
 	TransportProtocol   TransportProtocol   `json:"transport_protocol"`
 	Port                uint16              `json:"port"`
 	Resource            string              `json:"resource,omitempty"`
-	ResolvedAddresses   []string            `json:"resolved_addresses,omitempty"`
-	ResolvedCandidates  []EndpointCandidate `json:"resolved_candidates,omitempty"`
-	ProbeCandidates     []EndpointCandidate `json:"probe_candidates,omitempty"`
-	CandidateAttempts   []EndpointAttempt   `json:"candidate_attempts,omitempty"`
-	SelectedEndpoint    *Endpoint           `json:"selected_endpoint,omitempty"`
-	TestedEndpoint      *Endpoint           `json:"tested_endpoint,omitempty"`
-	NetworkContext      *NetworkContext     `json:"network_context,omitempty"`
+	// Deprecated: compatibility execution state; use Observations.Endpoint.
+	ResolvedAddresses []string `json:"resolved_addresses,omitempty"`
+	// Deprecated: compatibility execution state; use Observations.Endpoint.
+	ResolvedCandidates []EndpointCandidate `json:"resolved_candidates,omitempty"`
+	// Deprecated: compatibility execution state; use Observations.Endpoint.
+	ProbeCandidates []EndpointCandidate `json:"probe_candidates,omitempty"`
+	// Deprecated: compatibility execution state; use Observations.Endpoint.
+	CandidateAttempts []EndpointAttempt `json:"candidate_attempts,omitempty"`
+	// Deprecated: compatibility execution state; use Observations.Endpoint.
+	SelectedEndpoint *Endpoint `json:"selected_endpoint,omitempty"`
+	// Deprecated: compatibility execution state; use Observations.Endpoint.
+	TestedEndpoint *Endpoint `json:"tested_endpoint,omitempty"`
+	// Deprecated: compatibility execution state; use Observations.NetworkContext.
+	NetworkContext *NetworkContext `json:"network_context,omitempty"`
+}
+
+// TargetIntentOnly returns the report-facing request object.  The execution
+// copy used by probes may temporarily carry compatibility fields from #52 and
+// #46, but those runtime observations are canonical only in
+// DiagnosticReport.Observations.
+func TargetIntentOnly(target Target) Target {
+	target = NormalizeTarget(target)
+	target.ResolvedAddresses = nil
+	target.ResolvedCandidates = nil
+	target.ProbeCandidates = nil
+	target.CandidateAttempts = nil
+	target.SelectedEndpoint = nil
+	target.TestedEndpoint = nil
+	target.NetworkContext = nil
+	return target
 }
 
 // ParseTarget is the one canonical target parser. It accepts URLs, names,
@@ -651,14 +679,17 @@ func NormalizeTarget(target Target) Target {
 		target.CandidateAttempts = append([]EndpointAttempt(nil), target.CandidateAttempts...)
 		for index := range target.CandidateAttempts {
 			target.CandidateAttempts[index].Candidate = normalizeEndpointCandidate(target.CandidateAttempts[index].Candidate, target.CandidateAttempts[index].Candidate.Order)
+			target.CandidateAttempts[index].EvidenceIDs = append([]string(nil), target.CandidateAttempts[index].EvidenceIDs...)
 		}
 	}
 	if target.SelectedEndpoint != nil {
 		endpoint := *target.SelectedEndpoint
+		endpoint.EvidenceIDs = append([]string(nil), target.SelectedEndpoint.EvidenceIDs...)
 		target.SelectedEndpoint = &endpoint
 	}
 	if target.TestedEndpoint != nil {
 		endpoint := *target.TestedEndpoint
+		endpoint.EvidenceIDs = append([]string(nil), target.TestedEndpoint.EvidenceIDs...)
 		target.TestedEndpoint = &endpoint
 	}
 	if target.NetworkContext != nil {
@@ -666,6 +697,9 @@ func NormalizeTarget(target Target) Target {
 		context.CompetingRoutes = append([]RouteCandidate(nil), target.NetworkContext.CompetingRoutes...)
 		context.Provenance = append([]string(nil), target.NetworkContext.Provenance...)
 		context.EvidenceIDs = append([]string(nil), target.NetworkContext.EvidenceIDs...)
+		context.ProbeNames = append([]string(nil), target.NetworkContext.ProbeNames...)
+		context.Limitations = append([]string(nil), target.NetworkContext.Limitations...)
+		context.Conflicts = cloneObservationConflicts(target.NetworkContext.Conflicts)
 		if target.NetworkContext.Neighbor != nil {
 			neighbor := *target.NetworkContext.Neighbor
 			neighbor.Entries = append([]NeighborEntry(nil), target.NetworkContext.Neighbor.Entries...)
@@ -792,6 +826,7 @@ func normalizeEndpointCandidate(candidate EndpointCandidate, fallbackOrder int) 
 			}
 		}
 	}
+	candidate.EvidenceIDs = append([]string(nil), candidate.EvidenceIDs...)
 	if candidate.Order <= 0 {
 		candidate.Order = fallbackOrder
 	}

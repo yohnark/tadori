@@ -44,6 +44,15 @@ func TestRunAgainstLocalFixture(t *testing.T) {
 	if got.Target.OriginalInput != server.URL || got.Target.RequestedIdentity != "127.0.0.1" {
 		t.Errorf("canonical target = %#v, want original input and loopback identity", got.Target)
 	}
+	if got.Target.ResolvedCandidates != nil || got.Target.TestedEndpoint != nil || got.Target.NetworkContext != nil {
+		t.Errorf("report target retained runtime observations: %#v", got.Target)
+	}
+	if got.Observations.Endpoint.RequestedIdentity != "127.0.0.1" || got.Observations.Endpoint.TestedEndpoint == nil {
+		t.Errorf("report endpoint observation = %#v", got.Observations.Endpoint)
+	}
+	if got.Observations.NameResolution.RequestedName != "127.0.0.1" {
+		t.Errorf("report name-resolution observation = %#v", got.Observations.NameResolution)
+	}
 	if got.StartedAt == nil || got.CompletedAt == nil {
 		t.Fatalf("expected StartedAt/CompletedAt to be populated")
 	}

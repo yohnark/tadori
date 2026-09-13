@@ -108,6 +108,10 @@ type NameResolutionObservation struct {
 	HostsFileEntries []NameResolutionHostEntry `json:"hosts_file_entries,omitempty"`
 	Limitations      []string                  `json:"limitations,omitempty"`
 	EvidenceIDs      []string                  `json:"evidence_ids,omitempty"`
+	Certainty        ObservationCertainty      `json:"certainty"`
+	Provenance       []string                  `json:"provenance,omitempty"`
+	ProbeNames       []string                  `json:"probe_names,omitempty"`
+	Conflicts        []ObservationConflict     `json:"conflicts,omitempty"`
 }
 
 // NormalizeNameResolutionObservation returns a copy with stable IP and
@@ -123,6 +127,9 @@ func NormalizeNameResolutionObservation(observation NameResolutionObservation) N
 	observation.SelectedAddress = normalizeAddressText(observation.SelectedAddress)
 	observation.Limitations = uniqueStringValues(observation.Limitations)
 	observation.EvidenceIDs = uniqueStringValues(observation.EvidenceIDs)
+	observation.Provenance = uniqueStringValues(observation.Provenance)
+	observation.ProbeNames = uniqueStringValues(observation.ProbeNames)
+	observation.Conflicts = cloneObservationConflicts(observation.Conflicts)
 	for index := range observation.Paths {
 		observation.Paths[index] = normalizeNameResolutionPath(observation.Paths[index])
 	}

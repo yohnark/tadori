@@ -84,22 +84,26 @@ type RouteCandidate struct {
 // from raw route evidence so diagnosis and presentation do not need to
 // infer semantics from platform-specific payloads.
 type NetworkContext struct {
-	RequestedIdentity            string            `json:"requested_identity"`
-	SelectedDestinationAddress   string            `json:"selected_destination_address,omitempty"`
-	SelectedSourceInterface      string            `json:"selected_source_interface,omitempty"`
-	SelectedSourceInterfaceIndex int               `json:"selected_source_interface_index,omitempty"`
-	SelectedSourceAddress        string            `json:"selected_source_address,omitempty"`
-	EffectiveRoute               RouteDisposition  `json:"effective_route"`
-	RoutePrefix                  string            `json:"route_prefix,omitempty"`
-	NextHop                      string            `json:"next_hop,omitempty"`
-	Gateway                      string            `json:"gateway,omitempty"`
-	RouteMetric                  int               `json:"route_metric"`
-	CompetingRoutes              []RouteCandidate  `json:"competing_routes,omitempty"`
-	RouteSelectionAmbiguous      bool              `json:"route_selection_ambiguous,omitempty"`
-	VPNOrTunnelInvolvement       bool              `json:"vpn_or_tunnel_involvement,omitempty"`
-	VirtualAdapterInvolvement    bool              `json:"virtual_adapter_involvement,omitempty"`
-	Neighbor                     *NeighborEvidence `json:"neighbor,omitempty"`
-	NetworkScope                 NetworkScope      `json:"network_scope"`
-	Provenance                   []string          `json:"provenance,omitempty"`
-	EvidenceIDs                  []string          `json:"evidence_ids,omitempty"`
+	RequestedIdentity            string                `json:"requested_identity"`
+	SelectedDestinationAddress   string                `json:"selected_destination_address,omitempty"`
+	SelectedSourceInterface      string                `json:"selected_source_interface,omitempty"`
+	SelectedSourceInterfaceIndex int                   `json:"selected_source_interface_index,omitempty"`
+	SelectedSourceAddress        string                `json:"selected_source_address,omitempty"`
+	EffectiveRoute               RouteDisposition      `json:"effective_route"`
+	RoutePrefix                  string                `json:"route_prefix,omitempty"`
+	NextHop                      string                `json:"next_hop,omitempty"`
+	Gateway                      string                `json:"gateway,omitempty"`
+	RouteMetric                  int                   `json:"route_metric"`
+	CompetingRoutes              []RouteCandidate      `json:"competing_routes,omitempty"`
+	RouteSelectionAmbiguous      bool                  `json:"route_selection_ambiguous,omitempty"`
+	VPNOrTunnelInvolvement       bool                  `json:"vpn_or_tunnel_involvement,omitempty"`
+	VirtualAdapterInvolvement    bool                  `json:"virtual_adapter_involvement,omitempty"`
+	Neighbor                     *NeighborEvidence     `json:"neighbor,omitempty"`
+	NetworkScope                 NetworkScope          `json:"network_scope"`
+	Provenance                   []string              `json:"provenance,omitempty"`
+	EvidenceIDs                  []string              `json:"evidence_ids,omitempty"`
+	Certainty                    ObservationCertainty  `json:"certainty"`
+	ProbeNames                   []string              `json:"probe_names,omitempty"`
+	Limitations                  []string              `json:"limitations,omitempty"`
+	Conflicts                    []ObservationConflict `json:"conflicts,omitempty"`
 }

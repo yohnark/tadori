@@ -17,6 +17,7 @@ import (
 
 	"github.com/yohnark/tadori/internal/diagnosis"
 	"github.com/yohnark/tadori/internal/model"
+	"github.com/yohnark/tadori/internal/observations"
 	"github.com/yohnark/tadori/internal/packet"
 	"github.com/yohnark/tadori/internal/probe"
 	"github.com/yohnark/tadori/internal/probe/dns"
@@ -118,12 +119,17 @@ func Run(ctx context.Context, target model.Target, opts Options) model.Diagnosti
 	completed := now().UTC()
 	report := model.DiagnosticReport{
 		SchemaVersion: model.DiagnosticSchemaVersion,
-		Target:        target,
-		SessionID:     sessionID,
-		Status:        reportStatus(results),
-		StartedAt:     &started,
-		CompletedAt:   &completed,
-		Probes:        results,
+		// Target is the user/request intent in the report contract. Runtime
+		// endpoint, resolver, and route facts are projected into Observations;
+		// probe-local execution targets retain compatibility for existing probe
+		// and diagnosis consumers during the migration window.
+		Target:       model.TargetIntentOnly(target),
+		SessionID:    sessionID,
+		Status:       reportStatus(results),
+		StartedAt:    &started,
+		CompletedAt:  &completed,
+		Probes:       results,
+		Observations: observations.Build(target, results),
 	}
 	report.Findings = diagnosis.Diagnose(report.Probes)
 	return report

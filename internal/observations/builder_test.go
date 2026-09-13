@@ -1,0 +1,392 @@
+package observations
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/netip"
+	"reflect"
+	"testing"
+
+	"github.com/yohnark/tadori/internal/model"
+	"github.com/yohnark/tadori/internal/probe/dns"
+	"github.com/yohnark/tadori/internal/probe/interfacecfg"
+	"github.com/yohnark/tadori/internal/probe/route"
+)
+
+func mustTarget(t *testing.T, input string) model.Target {
+	t.Helper()
+	target, err := model.ParseTarget(model.TargetIntent{Input: input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+func mustRaw(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func fixtureEvidence(t *testing.T, id string, kind model.EvidenceKind, source string, value any) model.Evidence {
+	t.Helper()
+	return model.Evidence{ID: id, Kind: kind, Source: source, Raw: mustRaw(t, value)}
+}
+
+func fixtureDNSProbe(t *testing.T, name string, a, aaaa []string, id string) model.ProbeResult {
+	t.Helper()
+	resolution := model.NameResolutionObservation{
+		RequestedName:   name,
+		A:               append([]string(nil), a...),
+		AAAA:            append([]string(nil), aaaa...),
+		SelectedAddress: firstAnswer(a, aaaa),
+		SelectedFamily:  "A",
+		EffectivePath: &model.NameResolutionPath{
+			State:       model.NameResolutionPathEffective,
+			Mechanism:   model.NameResolutionMechanismDNS,
+			Certainty:   model.NameResolutionCertaintyObserved,
+			Provenance:  "fixture resolver result; server/interface unavailable",
+			EvidenceIDs: []string{id},
+		},
+		EvidenceIDs: []string{id},
+		Certainty:   model.ObservationCertaintyObserved,
+	}
+	if len(aaaa) != 0 && len(a) == 0 {
+		resolution.SelectedFamily = "AAAA"
+	}
+	return model.ProbeResult{
+		Name:           "dns",
+		Status:         model.ProbeStatusPassed,
+		NameResolution: &resolution,
+		Evidence:       []model.Evidence{fixtureEvidence(t, id, model.EvidenceKindDNSResolution, "fixture:dns", dns.DNSResolutionEvidence{Host: name, A: a, AAAA: aaaa})},
+	}
+}
+
+func fixtureRouteProbe(t *testing.T, id, targetIP, prefix, gateway, iface string, index, metric int, vpn, virtual bool) model.ProbeResult {
+	t.Helper()
+	value := route.RouteObservation{
+		RouteType:      "target",
+		TargetIP:       targetIP,
+		RoutePrefix:    prefix,
+		Destination:    prefix,
+		Gateway:        gateway,
+		Interface:      iface,
+		InterfaceIndex: index,
+		Metric:         metric,
+		EffectiveRoute: model.RouteDispositionRouted,
+		InterfaceType:  "ethernet",
+		VPNOrTunnel:    vpn,
+		VirtualAdapter: virtual,
+		NextHop:        gateway,
+		Neighbor:       &model.NeighborEvidence{Observation: model.NeighborObservationObserved, Source: "fixture:neighbor", Entries: []model.NeighborEntry{{Address: gateway, Interface: iface, InterfaceIndex: index, State: "reachable"}}},
+	}
+	if gateway == "" {
+		value.EffectiveRoute = model.RouteDispositionOnLink
+		value.NextHop = "on-link"
+	}
+	return model.ProbeResult{
+		Name: "target_route", Status: model.ProbeStatusPassed,
+		Evidence: []model.Evidence{fixtureEvidence(t, id, model.EvidenceKindRoute, "fixture:route", value)},
+	}
+}
+
+func fixtureInterfaceProbe(t *testing.T, id, name string, index int, address string, prefix int, vpn, virtual bool) model.ProbeResult {
+	t.Helper()
+	return model.ProbeResult{
+		Name: "interface_state", Status: model.ProbeStatusPassed,
+		Evidence: []model.Evidence{fixtureEvidence(t, id, model.EvidenceKindInterfaceState, "fixture:interfaces", []interfacecfg.InterfaceState{{
+			Index: index, Name: name, Up: true, VPN: vpn, Virtual: virtual,
+			Addresses: []interfacecfg.Address{{IP: mustAddr(address), Prefix: prefix}},
+		}})},
+	}
+}
+
+func mustAddr(value string) (address netip.Addr) {
+	address, _ = netip.ParseAddr(value)
+	return address
+}
+
+func TestBuildLiteralIPProjectsIntentEndpointAndLiteralResolution(t *testing.T) {
+	target := mustTarget(t, "192.0.2.44:443")
+	got := Build(target, nil)
+
+	if got.Endpoint.OriginalInput != "192.0.2.44:443" || got.Endpoint.RequestedIdentity != "192.0.2.44" {
+		t.Fatalf("endpoint intent = %#v", got.Endpoint)
+	}
+	if len(got.Endpoint.ResolvedCandidates) != 1 || got.Endpoint.ResolvedCandidates[0].Address != "192.0.2.44" || got.Endpoint.ResolvedCandidates[0].Family != model.EndpointFamilyIPv4 {
+		t.Fatalf("literal candidates = %#v", got.Endpoint.ResolvedCandidates)
+	}
+	if got.Endpoint.SelectedEndpoint == nil || got.Endpoint.SelectedEndpoint.Address != "192.0.2.44" {
+		t.Fatalf("literal selected endpoint = %#v", got.Endpoint.SelectedEndpoint)
+	}
+	if got.NameResolution.EffectivePath == nil || got.NameResolution.EffectivePath.Mechanism != model.NameResolutionMechanismLiteralIP || got.NameResolution.SelectedAddress != "192.0.2.44" {
+		t.Fatalf("literal name resolution = %#v", got.NameResolution)
+	}
+	if got.NameResolution.EffectivePath.Certainty != model.NameResolutionCertaintyObserved || got.NameResolution.Certainty != model.ObservationCertaintyObserved {
+		t.Fatalf("literal certainty = %#v", got.NameResolution)
+	}
+	if got.NetworkContext.EffectiveRoute != model.RouteDispositionUnknown || got.NetworkContext.NetworkScope != model.NetworkScopeUnknown {
+		t.Fatalf("literal network context = %#v", got.NetworkContext)
+	}
+}
+
+func TestBuildPublicHostnamePreservesAAndAAAAAndUnknownDNSProvenance(t *testing.T) {
+	target := mustTarget(t, "www.example.test:443")
+	probe := fixtureDNSProbe(t, "www.example.test", []string{"93.184.216.34"}, []string{"2001:db8::34"}, "dns-resolution-1")
+	got := Build(target, []model.ProbeResult{probe})
+
+	if got.Endpoint.RequestedIdentity != "www.example.test" || got.Endpoint.Port != 443 {
+		t.Fatalf("hostname endpoint = %#v", got.Endpoint)
+	}
+	if len(got.Endpoint.ResolvedCandidates) != 2 || got.Endpoint.ResolvedCandidates[0].Family != model.EndpointFamilyIPv4 || got.Endpoint.ResolvedCandidates[1].Family != model.EndpointFamilyIPv6 {
+		t.Fatalf("A/AAAA candidates = %#v", got.Endpoint.ResolvedCandidates)
+	}
+	if got.Endpoint.ResolvedCandidates[0].Certainty != model.ObservationCertaintyObserved || len(got.Endpoint.ResolvedCandidates[0].EvidenceIDs) != 1 {
+		t.Fatalf("candidate provenance = %#v", got.Endpoint.ResolvedCandidates[0])
+	}
+	if got.NameResolution.SelectedAddress != "93.184.216.34" || !contains(got.NameResolution.EvidenceIDs, "dns-resolution-1") {
+		t.Fatalf("resolution answer = %#v", got.NameResolution)
+	}
+	if got.NameResolution.EffectivePath.Resolver != "" || got.NameResolution.EffectivePath.Provenance == "" {
+		t.Fatalf("unknown resolver provenance was guessed: %#v", got.NameResolution.EffectivePath)
+	}
+	if !contains(got.Endpoint.Provenance, "probe:dns") || !contains(got.Endpoint.EvidenceIDs, "dns-resolution-1") {
+		t.Fatalf("endpoint provenance = %#v", got.Endpoint)
+	}
+}
+
+func TestBuildSplitDNSRetainsConfiguredPolicyAndEffectivePathRoles(t *testing.T) {
+	target := mustTarget(t, "fileserver:445")
+	dnsProbe := fixtureDNSProbe(t, "fileserver", []string{"10.30.14.22"}, nil, "resolution-effective")
+	dnsProbe.NameResolution.CandidateSuffixes = []string{"corp.example"}
+	dnsProbe.NameResolution.EffectivePath.VPN = true
+	dnsProbe.NameResolution.EffectivePath.PolicySource = "fixture:nrpt"
+	dnsProbe.NameResolution.EffectivePath.PolicyRule = "corp"
+	configuration := dns.DNSConfigurationEvidence{
+		Configured: true,
+		Resolvers:  []string{"192.0.2.53", "10.20.0.53"},
+		Source:     "fixture:dns-config",
+		Environment: &dns.ResolutionEnvironment{
+			CandidateSuffixes: []string{"corp.example"},
+			Interfaces: []dns.ResolutionInterface{
+				{Index: 7, Name: "Wi-Fi", DNSServers: []string{"192.0.2.53"}, DNSSuffix: "public.example"},
+				{Index: 19, Name: "Contoso VPN", VPN: true, VirtualAdapter: true, DNSServers: []string{"10.20.0.53"}, DNSSuffix: "corp.example"},
+			},
+			NRPT:             []model.NameResolutionPolicyRule{{Namespaces: []string{".corp.example"}, NameServers: []string{"10.20.0.53"}, Source: "fixture:nrpt", RuleID: "corp", VPNRequired: true}},
+			HostsFileEntries: []model.NameResolutionHostEntry{{Name: "fileserver", Addresses: []string{"10.0.0.5"}, Source: "fixture:hosts"}},
+		},
+	}
+	configProbe := model.ProbeResult{Name: "dns_configuration", Status: model.ProbeStatusPassed, Evidence: []model.Evidence{fixtureEvidence(t, "dns-config-1", model.EvidenceKindDNSConfiguration, "fixture:dns-config", configuration)}}
+
+	got := Build(target, []model.ProbeResult{configProbe, dnsProbe})
+	if !contains(got.NameResolution.CandidateSuffixes, "corp.example") || !contains(got.NameResolution.CandidateSuffixes, "public.example") {
+		t.Fatalf("candidate suffixes = %#v", got.NameResolution.CandidateSuffixes)
+	}
+	if !contains(got.NameResolution.CandidateNamespaces, ".corp.example") {
+		t.Fatalf("candidate namespaces = %#v", got.NameResolution.CandidateNamespaces)
+	}
+	var configured, policy, effective bool
+	for _, path := range got.NameResolution.Paths {
+		switch path.State {
+		case model.NameResolutionPathConfiguredCandidate:
+			configured = true
+		case model.NameResolutionPathPolicyCandidate:
+			policy = true
+		case model.NameResolutionPathEffective:
+			effective = true
+		}
+	}
+	if !configured || !policy || !effective {
+		t.Fatalf("split DNS path roles = %#v", got.NameResolution.Paths)
+	}
+	if got.NameResolution.EffectivePath == nil || !got.NameResolution.EffectivePath.VPN || got.NameResolution.EffectivePath.PolicyRule != "corp" {
+		t.Fatalf("effective split-DNS path = %#v", got.NameResolution.EffectivePath)
+	}
+	if len(got.NameResolution.HostsFileEntries) != 1 || got.NameResolution.HostsFileEntries[0].Source != "fixture:hosts" {
+		t.Fatalf("hosts provenance = %#v", got.NameResolution.HostsFileEntries)
+	}
+	if got.NameResolution.EffectivePath.Certainty != model.NameResolutionCertaintyObserved {
+		t.Fatalf("configured path was promoted to effective certainty: %#v", got.NameResolution.EffectivePath)
+	}
+}
+
+func TestBuildNetworkScopesPreservesRouteInterfaceVPNAndNeighborSemantics(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    string
+		prefix    string
+		gateway   string
+		iface     string
+		index     int
+		address   string
+		vpn       bool
+		virtual   bool
+		wantScope model.NetworkScope
+		wantRoute model.RouteDisposition
+	}{
+		{name: "local link", target: "10.0.10.25:80", prefix: "10.0.10.0/24", iface: "Ethernet", index: 2, address: "10.0.10.10", wantScope: model.NetworkScopeSameLink, wantRoute: model.RouteDispositionOnLink},
+		{name: "private routed", target: "10.30.14.22:443", prefix: "10.30.0.0/16", gateway: "10.20.4.1", iface: "Ethernet", index: 2, address: "10.20.4.18", wantScope: model.NetworkScopePrivateRouted, wantRoute: model.RouteDispositionRouted},
+		{name: "VPN routed", target: "10.30.14.22:443", prefix: "10.30.0.0/16", gateway: "10.20.4.1", iface: "Contoso VPN", index: 8, address: "10.20.4.18", vpn: true, virtual: true, wantScope: model.NetworkScopeVPNTunnelRouted, wantRoute: model.RouteDispositionRouted},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target := mustTarget(t, test.target)
+			routeProbe := fixtureRouteProbe(t, "route-1", test.target[:len(test.target)-len(":80")], test.prefix, test.gateway, test.iface, test.index, 10, test.vpn, test.virtual)
+			// The route target is easier to read as a parsed address than as a
+			// substring of a host:port fixture.
+			if test.name == "private routed" || test.name == "VPN routed" {
+				interfaceType := "ethernet"
+				if test.vpn {
+					interfaceType = "vpn"
+				}
+				routeProbe.Evidence[0].Raw = mustRaw(t, route.RouteObservation{RouteType: "target", TargetIP: "10.30.14.22", RoutePrefix: test.prefix, Destination: test.prefix, Gateway: test.gateway, Interface: test.iface, InterfaceIndex: test.index, Metric: 10, EffectiveRoute: model.RouteDispositionRouted, NextHop: test.gateway, InterfaceType: interfaceType, VPNOrTunnel: test.vpn, VirtualAdapter: test.virtual, Neighbor: &model.NeighborEvidence{Observation: model.NeighborObservationObserved, Source: "fixture:neighbor", Entries: []model.NeighborEntry{{Address: test.gateway, Interface: test.iface, InterfaceIndex: test.index}}}})
+			} else {
+				routeProbe.Evidence[0].Raw = mustRaw(t, route.RouteObservation{RouteType: "target", TargetIP: "10.0.10.25", RoutePrefix: test.prefix, Destination: test.prefix, Interface: test.iface, InterfaceIndex: test.index, Metric: 10, EffectiveRoute: model.RouteDispositionOnLink, NextHop: "on-link", InterfaceType: "ethernet", Neighbor: &model.NeighborEvidence{Observation: model.NeighborObservationNotObserved, Source: "fixture:neighbor", Note: "empty cache"}})
+			}
+			interfaceProbe := fixtureInterfaceProbe(t, "interface-1", test.iface, test.index, test.address, 24, test.vpn, test.virtual)
+			got := Build(target, []model.ProbeResult{interfaceProbe, routeProbe})
+			if got.NetworkContext.NetworkScope != test.wantScope || got.NetworkContext.EffectiveRoute != test.wantRoute {
+				t.Fatalf("network scope/route = %q/%q, want %q/%q: %#v", got.NetworkContext.NetworkScope, got.NetworkContext.EffectiveRoute, test.wantScope, test.wantRoute, got.NetworkContext)
+			}
+			if got.NetworkContext.SelectedSourceInterface != test.iface || got.NetworkContext.SelectedSourceAddress != test.address {
+				t.Fatalf("source context = %#v", got.NetworkContext)
+			}
+			if got.NetworkContext.Neighbor == nil || got.NetworkContext.Neighbor.Source != "fixture:neighbor" {
+				t.Fatalf("neighbor provenance = %#v", got.NetworkContext.Neighbor)
+			}
+			if got.NetworkContext.Certainty != model.ObservationCertaintyDerived || !contains(got.NetworkContext.ProbeNames, "target_route") {
+				t.Fatalf("network certainty/probes = %#v", got.NetworkContext)
+			}
+		})
+	}
+}
+
+func TestBuildNetworkRetainsCompetingRoutesAndIncompleteEvidence(t *testing.T) {
+	target := mustTarget(t, "198.51.100.25:443")
+	routeValue := route.RouteObservation{
+		RouteType: "target", TargetIP: "198.51.100.25", RoutePrefix: "0.0.0.0/0", Destination: "0.0.0.0/0", Gateway: "192.0.2.1", Interface: "Ethernet", InterfaceIndex: 2, Metric: 10, EffectiveRoute: model.RouteDispositionRouted, NextHop: "192.0.2.1",
+		CompetingRoutes: []route.RouteEvidenceCandidate{{RoutePrefix: "0.0.0.0/0", Gateway: "198.51.100.1", Interface: "Backup", InterfaceIndex: 3, Metric: 50}},
+	}
+	got := Build(target, []model.ProbeResult{{Name: "target_route", Evidence: []model.Evidence{fixtureEvidence(t, "route-1", model.EvidenceKindRoute, "fixture:route", routeValue)}}})
+	if len(got.NetworkContext.CompetingRoutes) != 1 || got.NetworkContext.CompetingRoutes[0].Metric != 50 {
+		t.Fatalf("competing routes = %#v", got.NetworkContext.CompetingRoutes)
+	}
+
+	unsupported := model.ProbeResult{Name: "target_route", Status: model.ProbeStatusError, Interpretation: model.ProbeInterpretation{FailureReason: model.FailureReasonUnsupported, Layer: model.LayerRoute, FaultDomain: model.FaultDomainRouting}, Evidence: []model.Evidence{{ID: "route-error", Kind: model.EvidenceKindRoute, Source: "fixture:route", Raw: json.RawMessage(`{"error":"unsupported"}`)}}}
+	unknown := Build(target, []model.ProbeResult{unsupported})
+	if unknown.NetworkContext.EffectiveRoute != model.RouteDispositionUnknown || unknown.NetworkContext.NetworkScope != model.NetworkScopeUnknown {
+		t.Fatalf("incomplete route context = %#v", unknown.NetworkContext)
+	}
+	if unknown.NetworkContext.Certainty != model.ObservationCertaintyUnsupported || !contains(unknown.NetworkContext.EvidenceIDs, "route-error") {
+		t.Fatalf("unsupported route semantics = %#v", unknown.NetworkContext)
+	}
+}
+
+func TestBuildPreservesMultipleCandidatesAndDoesNotTreatThemAsConflict(t *testing.T) {
+	target := mustTarget(t, "dual.example.test:443")
+	probe := fixtureDNSProbe(t, "dual.example.test", []string{"192.0.2.10", "192.0.2.11"}, []string{"2001:db8::10"}, "dns-many")
+	got := Build(target, []model.ProbeResult{probe})
+	if len(got.Endpoint.ResolvedCandidates) != 3 || len(got.Endpoint.ProbeCandidates) != 3 {
+		t.Fatalf("candidate sets = resolved %#v probe %#v", got.Endpoint.ResolvedCandidates, got.Endpoint.ProbeCandidates)
+	}
+	if len(got.Endpoint.Conflicts) != 0 {
+		t.Fatalf("normal multiple candidates became conflict = %#v", got.Endpoint.Conflicts)
+	}
+	if got.Endpoint.SelectedEndpoint == nil || got.Endpoint.SelectedEndpoint.Address != "192.0.2.10" || got.Endpoint.SelectedEndpoint.SelectionReason != model.EndpointSelectionDeterministic {
+		t.Fatalf("probe selection = %#v", got.Endpoint.SelectedEndpoint)
+	}
+	if got.NameResolution.AAAA[0] != "2001:db8::10" || got.NameResolution.SelectedFamily != "A" {
+		t.Fatalf("family distinction = %#v", got.NameResolution)
+	}
+}
+
+func TestBuildRetainsConflictingSourceFactsAndRawEvidence(t *testing.T) {
+	target := mustTarget(t, "conflicting.example:443")
+	first := fixtureDNSProbe(t, "conflicting.example", []string{"192.0.2.10"}, nil, "dns-a")
+	second := fixtureDNSProbe(t, "conflicting.example", []string{"192.0.2.20"}, nil, "dns-b")
+	rawBefore := append([]byte(nil), first.Evidence[0].Raw...)
+	first.NameResolution.SelectedAddress = "192.0.2.10"
+	second.NameResolution.SelectedAddress = "192.0.2.20"
+	got := Build(target, []model.ProbeResult{second, first})
+	if !bytes.Equal(first.Evidence[0].Raw, rawBefore) {
+		t.Fatal("projector changed raw probe evidence")
+	}
+	if len(got.Endpoint.Conflicts) == 0 || len(got.NameResolution.Conflicts) == 0 {
+		t.Fatalf("conflicting DNS facts were collapsed: endpoint=%#v name=%#v", got.Endpoint.Conflicts, got.NameResolution.Conflicts)
+	}
+	if !contains(got.Endpoint.EvidenceIDs, "dns-a") || !contains(got.Endpoint.EvidenceIDs, "dns-b") || !contains(got.NameResolution.EvidenceIDs, "dns-a") || !contains(got.NameResolution.EvidenceIDs, "dns-b") {
+		t.Fatalf("conflict provenance = endpoint %#v name %#v", got.Endpoint, got.NameResolution)
+	}
+	if got.NameResolution.SelectedAddress != "192.0.2.10" {
+		t.Fatalf("deterministic representative changed with input order: %q", got.NameResolution.SelectedAddress)
+	}
+}
+
+func TestBuildIsDeterministicAcrossProbeOrderAndDetachedFromInputs(t *testing.T) {
+	target := mustTarget(t, "service.example:443")
+	dnsProbe := fixtureDNSProbe(t, "service.example", []string{"192.0.2.10"}, []string{"2001:db8::10"}, "dns-1")
+	routeProbe := fixtureRouteProbe(t, "route-1", "192.0.2.10", "192.0.2.0/24", "192.0.2.1", "Ethernet", 2, 10, false, false)
+	interfaceProbe := fixtureInterfaceProbe(t, "interface-1", "Ethernet", 2, "192.0.2.20", 24, false, false)
+	probes := []model.ProbeResult{routeProbe, interfaceProbe, dnsProbe}
+	left := Build(target, probes)
+	right := Build(target, []model.ProbeResult{dnsProbe, routeProbe, interfaceProbe})
+	if !reflect.DeepEqual(left, right) {
+		t.Fatalf("projection depends on probe order\nleft=%#v\nright=%#v", left, right)
+	}
+	probes[0].Evidence[0].Raw[0] = 'x'
+	if left.Endpoint.EvidenceIDs == nil || left.NameResolution.EvidenceIDs == nil {
+		t.Fatalf("projection lost evidence references = %#v", left)
+	}
+	if left.NetworkContext.SelectedSourceInterface != "Ethernet" {
+		t.Fatalf("network projection = %#v", left.NetworkContext)
+	}
+}
+
+func TestBuildUsesLegacyDNSConfigurationShapeAndPreservesUnknownLimitations(t *testing.T) {
+	target := mustTarget(t, "fileserver.corp.example:445")
+	legacy := struct {
+		Servers          []string                         `json:"servers"`
+		Interfaces       []interfacecfg.InterfaceState    `json:"interfaces,omitempty"`
+		Suffixes         []string                         `json:"suffixes,omitempty"`
+		SearchList       []string                         `json:"search_list,omitempty"`
+		NRPT             []model.NameResolutionPolicyRule `json:"nrpt,omitempty"`
+		NRPTError        string                           `json:"nrpt_error,omitempty"`
+		HostsFileEntries []model.NameResolutionHostEntry  `json:"hosts_file_entries,omitempty"`
+		HostsFileError   string                           `json:"hosts_file_error,omitempty"`
+		Error            string                           `json:"error,omitempty"`
+	}{
+		Servers: []string{"10.20.0.53"}, Suffixes: []string{"corp.example"}, SearchList: []string{"corp.example"},
+		Interfaces: []interfacecfg.InterfaceState{{Index: 8, Name: "Contoso VPN", VPN: true, Virtual: true, DNSServers: []netip.Addr{mustAddr("10.20.0.53")}, DNSSuffix: "corp.example"}},
+		NRPT:       []model.NameResolutionPolicyRule{{Namespaces: []string{".corp.example"}, NameServers: []string{"10.20.0.53"}, Source: "fixture:nrpt", RuleID: "corp", VPNRequired: true}},
+		NRPTError:  "policy read incomplete", HostsFileError: "hosts read denied", Error: "resolver state incomplete",
+	}
+	probe := model.ProbeResult{Name: "dns_configuration", Status: model.ProbeStatusError, Evidence: []model.Evidence{fixtureEvidence(t, "legacy-dns", model.EvidenceKindDNSConfiguration, "fixture:legacy", legacy)}}
+	got := Build(target, []model.ProbeResult{probe})
+	if len(got.NameResolution.Paths) < 2 || !contains(got.NameResolution.CandidateSuffixes, "corp.example") {
+		t.Fatalf("legacy DNS shape not projected = %#v", got.NameResolution)
+	}
+	if len(got.NameResolution.Limitations) < 2 || got.NameResolution.Certainty != model.ObservationCertaintyInferred {
+		t.Fatalf("legacy limitations/certainty = %#v", got.NameResolution)
+	}
+	if got.NameResolution.EffectivePath != nil {
+		t.Fatalf("configured DNS was silently promoted to effective path = %#v", got.NameResolution.EffectivePath)
+	}
+}
+
+func TestNormalizeObservationsDetachesNestedProvenance(t *testing.T) {
+	endpoint := model.EndpointObservation{
+		ResolvedCandidates: []model.EndpointCandidate{{Address: "192.0.2.1", EvidenceIDs: []string{"e1"}}},
+		CandidateAttempts:  []model.EndpointAttempt{{Candidate: model.EndpointCandidate{Address: "192.0.2.1", EvidenceIDs: []string{"e2"}}}},
+		Conflicts:          []model.ObservationConflict{{Field: "x", Values: []string{"a"}, EvidenceIDs: []string{"e3"}}},
+	}
+	observations := model.NormalizeObservations(model.Observations{Endpoint: endpoint})
+	endpoint.ResolvedCandidates[0].EvidenceIDs[0] = "changed"
+	endpoint.CandidateAttempts[0].Candidate.EvidenceIDs[0] = "changed"
+	endpoint.Conflicts[0].EvidenceIDs[0] = "changed"
+	if observations.Endpoint.ResolvedCandidates[0].EvidenceIDs[0] != "e1" || observations.Endpoint.CandidateAttempts[0].Candidate.EvidenceIDs[0] != "e2" || observations.Endpoint.Conflicts[0].EvidenceIDs[0] != "e3" {
+		t.Fatalf("nested observation slices share input state = %#v", observations)
+	}
+}
