@@ -250,6 +250,21 @@ func TestDiagnoseRetainsProbeSpecificExtensionReasons(t *testing.T) {
 	}
 }
 
+func TestDiagnoseMixedExtensionAndBuiltInUseLayerPrecedence(t *testing.T) {
+	routeExtension := model.FailureReason("route_scope_mismatch")
+	route := failed("route", routeExtension, model.LayerRoute, model.FaultDomainRouting, "route-evidence")
+	tls := failed("tls", model.FailureReasonTLSHandshakeFailure, model.LayerTLS, model.FaultDomainTLS, "tls-evidence")
+	for _, probes := range [][]model.ProbeResult{{route, tls}, {tls, route}} {
+		got := Diagnose(probes)
+		if len(got) != 1 || got[0].FailureReason != routeExtension || got[0].Layer != model.LayerRoute || got[0].FaultDomain != model.FaultDomainRouting {
+			t.Fatalf("lower-layer extension was hidden by built-in TLS rule: %#v", got)
+		}
+		if !reflect.DeepEqual(got[0].ProbeNames, []string{"route"}) || !reflect.DeepEqual(got[0].EvidenceIDs, []string{"route-evidence"}) {
+			t.Fatalf("wrong mixed-rule references: %#v", got[0])
+		}
+	}
+}
+
 func TestDiagnoseUsesCanonicalReasonAndStableReferences(t *testing.T) {
 	probes := []model.ProbeResult{
 		failed("z-tcp", model.FailureReasonTCPConnectionReset, model.LayerUnknown, model.FaultDomainUnknown, "e-2", "e-1"),

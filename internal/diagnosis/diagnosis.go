@@ -22,26 +22,29 @@ func Diagnose(probes []model.ProbeResult) []model.DiagnosticFinding {
 
 	// Rules are ordered from the earliest decisive boundary to the latest.
 	// Keeping this as a slice (rather than ranging over a map) makes both
-	// precedence and output stable.
+	// precedence and output stable. We collect the first built-in match before
+	// comparing it with extension reasons below, so an opaque lower-layer
+	// reason cannot be hidden by a known higher-layer reason.
+	var builtIn *builtInCandidate
 	for _, rule := range rules {
 		matches := matching(observations, rule.reason)
 		if len(matches) == 0 || contradicted(matches[0].reason, observations) {
 			continue
 		}
-
-		finding := makeFinding(rule.reason, matches)
-		if rule.reason == model.FailureReasonGatewayUnreachable {
-			return []model.DiagnosticFinding{finding}
-		}
-
-		return withGatewaySupport(finding, observations)
+		candidate := builtInCandidate{reason: rule.reason, matches: matches}
+		builtIn = &candidate
+		break
 	}
 
 	// Probe-specific reasons may be added to model.FailureReason without
 	// changing this package. They are not interpreted by their text: the
 	// canonical layer and fault domain supplied by the probe are retained.
-	if extension := genericFailure(observations); extension != nil {
+	extension := genericFailure(observations)
+	if extension != nil && (builtIn == nil || layerRank(extension.result.Interpretation.Layer) < builtInLayerRank(*builtIn)) {
 		return withGatewaySupport(makeExtensionFinding(*extension, observations), observations)
+	}
+	if builtIn != nil {
+		return withGatewaySupport(makeFinding(builtIn.reason, builtIn.matches), observations)
 	}
 
 	// A gateway result is supporting evidence and can still be useful when no
@@ -91,6 +94,16 @@ func Apply(report model.DiagnosticReport) model.DiagnosticReport {
 
 type rule struct {
 	reason model.FailureReason
+}
+
+type builtInCandidate struct {
+	reason  model.FailureReason
+	matches []observation
+}
+
+func builtInLayerRank(candidate builtInCandidate) int {
+	layer, _ := semantics(candidate.reason)
+	return layerRank(layer)
 }
 
 // This table is the diagnosis policy. Reasons in the same layer are ordered
