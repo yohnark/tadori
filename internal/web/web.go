@@ -52,7 +52,10 @@ type HandlerOptions struct {
 	SessionRun SessionRunner
 	// SessionManager can be supplied by tests or an embedding application.
 	// When nil, NewHandler creates an in-memory manager.
-	SessionManager        *session.Manager
+	SessionManager *session.Manager
+	// Progress is the optional UI projection adapter for the legacy synchronous
+	// view endpoint. Session/SSE consumers use SessionRun instead.
+	Progress              ProgressRunner
 	OverallTimeout        time.Duration
 	MaxConcurrentSessions int
 }
@@ -123,6 +126,7 @@ func NewHandler(opts HandlerOptions) *Handler {
 	mux.HandleFunc("/style.css", staticHandler("style.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("/app.js", staticHandler("app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/api/diagnose", h.legacyDiagnose)
+	mux.HandleFunc("/api/diagnose/view", diagnoseViewHandler(legacyRun, opts.Progress, overallTimeout))
 	mux.HandleFunc("/api/diagnoses", h.diagnosisCollection)
 	mux.HandleFunc("/api/diagnoses/", h.diagnosisResource)
 	h.mux = mux
@@ -216,6 +220,10 @@ func (h *Handler) diagnosisCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) diagnosisResource(w http.ResponseWriter, r *http.Request) {
+	if id, ok := parseDiagnosisViewPath(r.URL.Path); ok {
+		h.diagnosisView(w, r, id)
+		return
+	}
 	id, events, ok := parseDiagnosisPath(r.URL.Path)
 	if !ok {
 		http.NotFound(w, r)
@@ -254,6 +262,34 @@ func (h *Handler) diagnosisResource(w http.ResponseWriter, r *http.Request) {
 	default:
 		methodNotAllowed(w, http.MethodGet+", "+http.MethodDelete)
 	}
+}
+
+// diagnosisView returns the server-built UI projection after a session has a
+// canonical final report. Running sessions remain available through the
+// session snapshot and SSE event endpoints; the browser requests this
+// projection when the terminal event arrives.
+func (h *Handler) diagnosisView(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	snapshot, err := h.sessions.Get(id)
+	if err != nil {
+		writeSessionError(w, err)
+		return
+	}
+	if snapshot.Report == nil {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusAccepted, snapshot)
+		return
+	}
+	view, err := BuildDiagnosticView(*snapshot.Report)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "encode diagnostic view: "+err.Error())
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (h *Handler) diagnosisEvents(w http.ResponseWriter, r *http.Request, id string) {
@@ -385,6 +421,18 @@ func parseDiagnosisPath(path string) (id string, events bool, ok bool) {
 	return "", false, false
 }
 
+func parseDiagnosisViewPath(path string) (id string, ok bool) {
+	const prefix = "/api/diagnoses/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	if len(parts) == 2 && parts[1] == "view" && validSessionID(parts[0]) {
+		return parts[0], true
+	}
+	return "", false
+}
+
 func validSessionID(id string) bool {
 	if id == "" || len(id) > 128 {
 		return false
@@ -447,6 +495,62 @@ func writeSessionError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
+// diagnoseViewHandler is an additive synchronous projection for callers that
+// still use the legacy endpoint. The browser uses the session API below so
+// probe progress remains live; this endpoint is useful to embedders and keeps
+// the canonical /api/diagnose response unchanged.
+func diagnoseViewHandler(run Runner, progress ProgressRunner, overallTimeout time.Duration) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+
+		target, ok := decodeTarget(w, r)
+		if !ok {
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), overallTimeout)
+		defer cancel()
+
+		events := []ProgressEvent{{State: "started"}}
+		var eventsMu sync.Mutex
+		emit := func(event ProgressEvent) {
+			eventsMu.Lock()
+			events = append(events, event)
+			eventsMu.Unlock()
+		}
+		var diagnosticReport model.DiagnosticReport
+		if progress != nil {
+			diagnosticReport = progress(ctx, target, emit)
+		} else {
+			diagnosticReport = run(ctx, target)
+		}
+
+		view, err := BuildDiagnosticView(diagnosticReport)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "encode diagnostic view: "+err.Error())
+			return
+		}
+		eventsMu.Lock()
+		view.Progress = append([]ProgressEvent(nil), events...)
+		seenComplete := make(map[string]bool)
+		for _, event := range view.Progress {
+			if event.ProbeName != "" && event.State == "complete" {
+				seenComplete[event.ProbeName] = true
+			}
+		}
+		for _, probe := range view.Probes {
+			if !seenComplete[probe.Name] {
+				view.Progress = append(view.Progress, ProgressEvent{ProbeName: probe.Name, State: "complete", Status: probe.Status})
+			}
+		}
+		eventsMu.Unlock()
+		writeJSON(w, http.StatusOK, view)
 	}
 }
 

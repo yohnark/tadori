@@ -12,6 +12,7 @@ import (
 
 	"github.com/yohnark/tadori/internal/model"
 	"github.com/yohnark/tadori/internal/orchestrate"
+	"github.com/yohnark/tadori/internal/session"
 )
 
 func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
@@ -86,6 +87,106 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	}
 	if gotTarget != parsedTarget {
 		t.Errorf("runner target = %+v, want %+v", gotTarget, parsedTarget)
+	}
+}
+
+func TestDiagnosticViewEndpointKeepsCanonicalReportAndAcceptsProgressAdapter(t *testing.T) {
+	var runCalled bool
+	var progressCalled bool
+	runner := func(_ context.Context, target model.Target) model.DiagnosticReport {
+		runCalled = true
+		return fixtureReport(target)
+	}
+	progress := func(_ context.Context, target model.Target, emit func(ProgressEvent)) model.DiagnosticReport {
+		progressCalled = true
+		emit(ProgressEvent{ProbeName: "dns", State: "running"})
+		return fixtureReport(target)
+	}
+	server := httptest.NewServer(NewHandler(HandlerOptions{Run: runner, Progress: progress}))
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/diagnose/view", strings.NewReader(`{"target":"https://example.com"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("POST /api/diagnose/view: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status = %d, want 200: %s", response.StatusCode, body)
+	}
+
+	var view DiagnosticViewModel
+	if err := json.NewDecoder(response.Body).Decode(&view); err != nil {
+		t.Fatalf("decode diagnostic view: %v", err)
+	}
+	canonical, err := json.Marshal(view.Report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.CanonicalJSON != string(canonical) {
+		t.Fatalf("view canonical_json differs from embedded report")
+	}
+	if !progressCalled || runCalled {
+		t.Fatalf("adapter selection = progressCalled %t, runCalled %t", progressCalled, runCalled)
+	}
+	if len(view.Progress) < 2 || view.Progress[1].State != "running" {
+		t.Fatalf("progress events = %#v", view.Progress)
+	}
+	if len(view.Probes) != len(view.Report.Probes) || len(view.Evidence) == 0 {
+		t.Fatalf("view projection omitted report content: probes=%d report=%d evidence=%d", len(view.Probes), len(view.Report.Probes), len(view.Evidence))
+	}
+}
+
+func TestSessionViewEndpointProjectsTerminalCanonicalReport(t *testing.T) {
+	target := fixtureTarget(443)
+	representative := representativeUIFixtures()["icmp-unobservable-tcp-reaches"]
+	handler := NewHandler(HandlerOptions{
+		SessionRun: func(context.Context, model.Target, session.Progress) model.DiagnosticReport {
+			return representative
+		},
+	})
+	defer handler.Close()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/api/diagnoses", "application/json", strings.NewReader(`{"target":"https://203.0.113.10:443/health"}`))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		response.Body.Close()
+		t.Fatalf("decode session: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusAccepted || created.ID == "" {
+		t.Fatalf("create response = %d/%q", response.StatusCode, created.ID)
+	}
+	if _, err := handler.sessions.Wait(context.Background(), created.ID); err != nil {
+		t.Fatalf("wait for session: %v", err)
+	}
+
+	viewResponse, err := server.Client().Get(server.URL + "/api/diagnoses/" + created.ID + "/view")
+	if err != nil {
+		t.Fatalf("get session view: %v", err)
+	}
+	defer viewResponse.Body.Close()
+	if viewResponse.StatusCode != http.StatusOK {
+		t.Fatalf("session view status = %d, want 200", viewResponse.StatusCode)
+	}
+	var view DiagnosticViewModel
+	if err := json.NewDecoder(viewResponse.Body).Decode(&view); err != nil {
+		t.Fatalf("decode session view: %v", err)
+	}
+	if len(view.Paths) != 2 || view.Overall.Destination.State != "confirmed" || view.Report.Target != target {
+		t.Fatalf("session view projection = paths %d, destination %q, target %#v", len(view.Paths), view.Overall.Destination.State, view.Report.Target)
 	}
 }
 
