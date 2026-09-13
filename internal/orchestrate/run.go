@@ -106,6 +106,9 @@ func Run(ctx context.Context, target model.Target, opts Options) model.Diagnosti
 
 	results := runProbes(ctx, target, timeout, probeConcurrency, sessionID, backend, opts.OnProbeStarted, opts.OnProbeCompleted)
 	target = enrichTargetEndpoints(target, results)
+	if networkContext, ok := route.NetworkContextFromProbeResults(target, results); ok {
+		target.NetworkContext = &networkContext
+	}
 	for index := range results {
 		results[index].Target = target
 	}
@@ -127,7 +130,7 @@ func Run(ctx context.Context, target model.Target, opts Options) model.Diagnosti
 }
 
 // runProbes executes every wired probe concurrently, including DNS. The
-// route and gateway probes benefit from the address DNS resolves, so they
+// route, default-route, and gateway probes benefit from the address DNS resolves, so they
 // wait only on a small channel carrying that one result (with the shared
 // deadline still enforced) rather than the batch waiting on DNS in serial.
 // A probe that panics, errors, or times out still yields a result for its
@@ -159,7 +162,11 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 			return interfacecfg.NewDNSProbe().Run(runCtx, execution)
 		}},
 		{name: route.DefaultRouteProbeName, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
-			return route.NewDefaultRouteProbe().Run(runCtx, execution)
+			p := route.NewDefaultRouteProbe()
+			if targetIP := waitForAddress(runCtx, resolvedReady, &resolvedAddr); targetIP.IsValid() {
+				return p.RunForAddress(runCtx, execution, targetIP)
+			}
+			return p.Run(runCtx, execution)
 		}},
 		{name: route.TargetRouteProbeName, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			p := route.NewTargetRouteProbe()

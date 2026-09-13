@@ -181,6 +181,19 @@ func TestDiagnoseGatewayIsSupportingEvidence(t *testing.T) {
 	}
 }
 
+func TestDiagnoseDoesNotReportGatewayFailureForOnLinkRoute(t *testing.T) {
+	onLinkGateway := failed("gateway", model.FailureReasonGatewayUnreachable, model.LayerGateway, model.FaultDomainGateway, "gateway-on-link")
+	onLinkGateway.Evidence[0] = model.Evidence{
+		ID:   "gateway-on-link",
+		Kind: model.EvidenceKindGatewayReachability,
+		Raw:  json.RawMessage(`{"route_type":"gateway","destination":"10.0.10.0/24","effective_route":"on_link","gateway_tested":false}`),
+	}
+	got := Diagnose([]model.ProbeResult{onLinkGateway})
+	if len(got) != 0 {
+		t.Fatalf("on-link gateway failure became a finding: %#v", got)
+	}
+}
+
 func TestDiagnoseProxyEvidenceDoesNotInventAProxyFault(t *testing.T) {
 	got := Diagnose([]model.ProbeResult{
 		failed("direct-tcp", model.FailureReasonTCPTimeout, model.LayerTCP, model.FaultDomainTransport),

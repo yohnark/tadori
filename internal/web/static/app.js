@@ -21,6 +21,8 @@
   const destinationReferences = document.querySelector("#destination-references");
   const overallStatus = document.querySelector("#overall-status");
   const reportTarget = document.querySelector("#report-target");
+  const networkContextPanel = document.querySelector("#network-context-panel");
+  const networkContext = document.querySelector("#network-context");
   const probeCount = document.querySelector("#probe-count");
   const probes = document.querySelector("#probes");
   const findings = document.querySelector("#findings");
@@ -639,6 +641,7 @@
     diagnosisCard.className = toneClass("overview-card panel", overall.tone);
     overallStatus.textContent = text(overall.execution_label || overall.execution_status);
     renderTargetDetails(view.report && view.report.target);
+    renderNetworkContext(view.network_context);
     renderDestination(overall.destination || {});
 
     probes.replaceChildren();
@@ -687,6 +690,51 @@
     }
     canonicalJSON.textContent = view.canonical_json || jsonText(view.report);
     reportSection.hidden = false;
+  }
+
+  function renderNetworkContext(context) {
+    networkContext.replaceChildren();
+    networkContextPanel.hidden = !context;
+    if (!context) {
+      return;
+    }
+    const fields = [
+      ["Network scope", context.network_scope_label || context.network_scope],
+      ["Requested identity", context.requested_identity],
+      ["Selected destination", context.selected_destination_address],
+      ["Source interface", context.selected_source_interface],
+      ["Source address", context.selected_source_address],
+      ["Route", context.effective_route_label || context.effective_route],
+      ["Route prefix", context.route_prefix],
+      ["Next hop", context.next_hop],
+      ["Gateway", context.gateway || "Not applicable"],
+      ["Route metric", context.route_metric],
+    ];
+    if (context.vpn_or_tunnel_involvement) {
+      fields.push(["VPN / tunnel", "Observed"]);
+    }
+    if (context.virtual_adapter_involvement) {
+      fields.push(["Virtual adapter", "Observed"]);
+    }
+    if (context.route_selection_ambiguous) {
+      fields.push(["Selection", "Ambiguous"]);
+    }
+    if (context.neighbor) {
+      fields.push(["Neighbor cache", context.neighbor.observation]);
+    }
+    for (const [label, value] of fields) {
+      if (value === undefined || value === null || value === "") {
+        continue;
+      }
+      const item = element("div", "context-item");
+      item.appendChild(element("span", "context-label", label));
+      item.appendChild(element("code", "context-value", value));
+      networkContext.appendChild(item);
+    }
+    if (context.competing_routes && context.competing_routes.length) {
+      const note = element("p", "section-note context-note", `${context.competing_routes.length} competing route${context.competing_routes.length === 1 ? "" : "s"} retained in canonical context.`);
+      networkContext.appendChild(note);
+    }
   }
 
   function diagnosisDetailText(overall) {

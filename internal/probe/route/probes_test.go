@@ -137,9 +137,44 @@ func TestTargetRouteProbeCanUseResolvedAddressWithoutDNS(t *testing.T) {
 
 func TestDefaultRouteProbeNormalizesNoRoute(t *testing.T) {
 	p := NewDefaultRouteProbe(fixtureRouteTable{routes: []Route{{Destination: netip.MustParsePrefix("192.0.2.0/24")}}})
-	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("192.0.2.4", 80)})
+	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.NewTarget("198.51.100.4", 80)})
 	if got.Status != model.ProbeStatusFailed || got.Interpretation.FailureReason != model.FailureReasonNoRoute {
 		t.Fatalf("result = %#v", got)
+	}
+}
+
+func TestDefaultRouteProbeDoesNotRequireDefaultForLocalScope(t *testing.T) {
+	p := NewDefaultRouteProbe(fixtureRouteTable{routes: []Route{{Destination: netip.MustParsePrefix("127.0.0.0/8"), Interface: "lo", InterfaceIndex: 1}}})
+	got := p.RunForAddress(context.Background(), probe.ExecutionContext{Target: model.NewTarget("localhost", 80)}, netip.MustParseAddr("127.0.0.1"))
+	if got.Status != model.ProbeStatusPassed || got.Interpretation.FailureReason != model.FailureReasonNone {
+		t.Fatalf("local default-route result = %#v", got)
+	}
+	observation, err := DecodeRouteEvidence(got.Evidence[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.TargetIP != "127.0.0.1" || observation.Error == "" || observation.EffectiveRoute != model.RouteDispositionOnLink {
+		t.Fatalf("local default-route evidence = %#v", observation)
+	}
+}
+
+func TestDefaultRouteProbeDoesNotRequireInternetDefaultForRoutedTarget(t *testing.T) {
+	p := NewDefaultRouteProbe(fixtureRouteTable{routes: []Route{{
+		Destination: netip.MustParsePrefix("10.30.0.0/16"),
+		Gateway:     netip.MustParseAddr("10.20.4.1"),
+		Interface:   "Contoso VPN",
+		Metric:      10,
+	}}})
+	got := p.RunForAddress(context.Background(), probe.ExecutionContext{Target: model.NewTarget("10.30.14.22", 443)}, netip.MustParseAddr("10.30.14.22"))
+	if got.Status != model.ProbeStatusPassed || got.Interpretation.FailureReason != model.FailureReasonNone {
+		t.Fatalf("routed target default-route result = %#v", got)
+	}
+	observation, err := DecodeRouteEvidence(got.Evidence[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.DefaultRouteApplicable == nil || *observation.DefaultRouteApplicable || observation.RoutePrefix != "10.30.0.0/16" {
+		t.Fatalf("routed target default-route evidence = %#v", observation)
 	}
 }
 
