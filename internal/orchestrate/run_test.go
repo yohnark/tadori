@@ -55,6 +55,7 @@ func TestRunAgainstLocalFixture(t *testing.T) {
 		"target_route":         false,
 		"gateway_reachability": false,
 		"proxy_discovery":      false,
+		"windows_enterprise":   false,
 		"tcp":                  false,
 		"path":                 false,
 		"tls":                  false,
@@ -174,8 +175,8 @@ func TestRunPreservesPartialResultsOnUnreachableTarget(t *testing.T) {
 		t.Errorf("interface_state probe status = %s, want passed even though HTTP failed", interfaceResult.Status)
 	}
 
-	if len(got.Probes) != 11 {
-		t.Errorf("len(Probes) = %d, want 11 even with a failing probe", len(got.Probes))
+	if len(got.Probes) != 12 {
+		t.Errorf("len(Probes) = %d, want 12 even with a failing probe", len(got.Probes))
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/yohnark/tadori/internal/model"
 	"github.com/yohnark/tadori/internal/probe"
 	"github.com/yohnark/tadori/internal/probe/dns"
+	"github.com/yohnark/tadori/internal/probe/enterprise"
 	"github.com/yohnark/tadori/internal/probe/http"
 	"github.com/yohnark/tadori/internal/probe/interfacecfg"
 	pathprobe "github.com/yohnark/tadori/internal/probe/path"
@@ -147,6 +148,9 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 		}},
 		{name: proxy.Name, run: func(runCtx context.Context) model.ProbeResult {
 			return proxy.NewProbe().Run(runCtx, execution)
+		}},
+		{name: enterprise.Name, run: func(runCtx context.Context) model.ProbeResult {
+			return enterprise.New().Run(runCtx, execution)
 		}},
 		{name: "tcp", run: func(runCtx context.Context) model.ProbeResult {
 			return tcp.New(timeout).Run(runCtx, execution)

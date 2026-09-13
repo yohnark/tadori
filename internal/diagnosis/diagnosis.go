@@ -127,18 +127,24 @@ var rules = []rule{
 	{reason: model.FailureReasonNoIPAddress},
 	{reason: model.FailureReasonNoRoute},
 	{reason: model.FailureReasonInvalidRoute},
+	{reason: model.FailureReasonEffectiveRouteDifference},
 	{reason: model.FailureReasonDNSNXDomain},
 	{reason: model.FailureReasonDNSNoAnswer},
 	{reason: model.FailureReasonDNSTimeout},
 	{reason: model.FailureReasonDNSResolverFailure},
+	{reason: model.FailureReasonProxyAuthenticationRequired},
+	{reason: model.FailureReasonProxyConnectDenied},
+	{reason: model.FailureReasonDirectEgressRestricted},
+	{reason: model.FailureReasonProxyConfigurationDivergence},
 	{reason: model.FailureReasonProxyConfigurationFailure},
 	{reason: model.FailureReasonProxyUnavailable},
-	{reason: model.FailureReasonProxyAuthenticationRequired},
 	{reason: model.FailureReasonNetworkUnreachable},
 	{reason: model.FailureReasonFirewallBlocked},
 	{reason: model.FailureReasonTCPTimeout},
 	{reason: model.FailureReasonTCPConnectionRefused},
 	{reason: model.FailureReasonTCPConnectionReset},
+	{reason: model.FailureReasonTLSInterceptionSuspected},
+	{reason: model.FailureReasonTLSTrustStoreMismatch},
 	{reason: model.FailureReasonTLSHandshakeFailure},
 	{reason: model.FailureReasonCertificateValidationFailure},
 	{reason: model.FailureReasonHTTPStatusCode},
@@ -409,7 +415,7 @@ func semantics(reason model.FailureReason) (model.Layer, model.FaultDomain) {
 		return model.LayerInterface, model.FaultDomainLocal
 	case model.FailureReasonNoIPAddress:
 		return model.LayerIPConfiguration, model.FaultDomainLocal
-	case model.FailureReasonNoRoute, model.FailureReasonInvalidRoute:
+	case model.FailureReasonNoRoute, model.FailureReasonInvalidRoute, model.FailureReasonEffectiveRouteDifference:
 		return model.LayerRoute, model.FaultDomainRouting
 	case model.FailureReasonGatewayUnreachable:
 		return model.LayerGateway, model.FaultDomainGateway
@@ -417,9 +423,13 @@ func semantics(reason model.FailureReason) (model.Layer, model.FaultDomain) {
 		model.FailureReasonDNSTimeout, model.FailureReasonDNSResolverFailure:
 		return model.LayerDNS, model.FaultDomainDNS
 	case model.FailureReasonProxyConfigurationFailure,
+		model.FailureReasonProxyConfigurationDivergence,
 		model.FailureReasonProxyUnavailable,
+		model.FailureReasonProxyConnectDenied,
 		model.FailureReasonProxyAuthenticationRequired:
 		return model.LayerProxy, model.FaultDomainProxy
+	case model.FailureReasonDirectEgressRestricted:
+		return model.LayerNetwork, model.FaultDomainPolicy
 	case model.FailureReasonNetworkUnreachable:
 		return model.LayerNetwork, model.FaultDomainNetwork
 	case model.FailureReasonFirewallBlocked:
@@ -429,7 +439,9 @@ func semantics(reason model.FailureReason) (model.Layer, model.FaultDomain) {
 		model.FailureReasonTCPConnectionReset:
 		return model.LayerTCP, model.FaultDomainTransport
 	case model.FailureReasonTLSHandshakeFailure,
-		model.FailureReasonCertificateValidationFailure:
+		model.FailureReasonCertificateValidationFailure,
+		model.FailureReasonTLSTrustStoreMismatch,
+		model.FailureReasonTLSInterceptionSuspected:
 		return model.LayerTLS, model.FaultDomainTLS
 	case model.FailureReasonHTTPStatusCode, model.FailureReasonHTTPFailure:
 		return model.LayerHTTP, model.FaultDomainHTTP
@@ -457,7 +469,8 @@ func contradicted(candidate observation, observations []observation) bool {
 		switch reason {
 		case model.FailureReasonInterfaceDown, model.FailureReasonNoIPAddress,
 			model.FailureReasonNoRoute, model.FailureReasonInvalidRoute,
-			model.FailureReasonGatewayUnreachable, model.FailureReasonNetworkUnreachable,
+			model.FailureReasonGatewayUnreachable,
+			model.FailureReasonNetworkUnreachable,
 			model.FailureReasonFirewallBlocked:
 			if layer == model.LayerTCP || layer == model.LayerTLS || layer == model.LayerHTTP {
 				return true
@@ -467,9 +480,11 @@ func contradicted(candidate observation, observations []observation) bool {
 			if layer == model.LayerDNS {
 				return true
 			}
-		case model.FailureReasonProxyConfigurationFailure,
-			model.FailureReasonProxyUnavailable,
-			model.FailureReasonProxyAuthenticationRequired:
+		case model.FailureReasonProxyUnavailable:
+			// Configuration success is not proof that a particular URL's
+			// endpoint, CONNECT policy, or authentication path succeeds. Keep
+			// the legacy contradiction only for a generic endpoint-unavailable
+			// result, and retain the more specific enterprise findings.
 			if layer == model.LayerProxy {
 				return true
 			}

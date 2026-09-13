@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/yohnark/tadori/internal/model"
 	parentprobe "github.com/yohnark/tadori/internal/probe"
@@ -45,9 +46,10 @@ const (
 	StateUnsupportedPlatform      ConfigurationState = "unsupported_platform"
 )
 
-// SourceConfiguration is the safe, normalized output of one native proxy
-// configuration source. Proxy and PAC values are intentionally kept as
-// already-redacted values by the platform implementation.
+// SourceConfiguration is the internal output of one native proxy
+// configuration source. Native values remain private to the probe boundary;
+// callers must use NormalizeConfiguration before placing this value in
+// evidence, and URL resolution redacts values before using them.
 type SourceConfiguration struct {
 	Available  bool
 	Proxy      string
@@ -63,6 +65,245 @@ type SourceConfiguration struct {
 type Discovery struct {
 	WinHTTP SourceConfiguration
 	WinINET SourceConfiguration
+}
+
+// ConfigurationObservation is the redacted, normalized view of one proxy
+// source. It is safe to place in canonical evidence: proxy user-info, PAC URL
+// query strings, and malformed native values are removed before this value is
+// returned.
+type ConfigurationObservation struct {
+	State                 ConfigurationState `json:"state"`
+	Direct                bool               `json:"direct"`
+	StaticProxyConfigured bool               `json:"static_proxy_configured"`
+	ProxyEndpoints        []string           `json:"proxy_endpoints,omitempty"`
+	ProxyBypass           []string           `json:"proxy_bypass,omitempty"`
+	PACConfigured         bool               `json:"pac_configured"`
+	PACURL                string             `json:"pac_url,omitempty"`
+	AutoDetect            bool               `json:"auto_detect,omitempty"`
+	Error                 string             `json:"error,omitempty"`
+}
+
+// URLProxyResolution is the redacted result of resolving a target URL through
+// a Windows proxy source. PAC is resolved by the native Windows API; PAC code
+// is never exposed to or evaluated by Tadori.
+type URLProxyResolution struct {
+	Direct        bool     `json:"direct"`
+	Proxy         string   `json:"proxy,omitempty"`
+	Bypass        []string `json:"bypass,omitempty"`
+	UsedPAC       bool     `json:"used_pac"`
+	AutoDetect    bool     `json:"auto_detect"`
+	Configuration string   `json:"configuration"`
+}
+
+// Discover returns the platform proxy configuration. On Windows it uses the
+// WinHTTP and WinINET-compatible native APIs; other platforms return
+// ErrUnsupportedPlatform. The result keeps the two sources independent.
+func Discover(ctx context.Context) (Discovery, error) { return discoverPlatform(ctx) }
+
+// ResolveProxyForURL resolves the effective proxy for targetURL using one
+// discovered Windows source. Static settings are normalized locally and PAC or
+// auto-detect settings are resolved by the platform adapter.
+func ResolveProxyForURL(ctx context.Context, targetURL string, config SourceConfiguration) (URLProxyResolution, error) {
+	return resolveProxyForURL(ctx, targetURL, config)
+}
+
+// NormalizeConfiguration returns a safe canonical view of config. Callers
+// should use this instead of serializing SourceConfiguration directly because
+// native proxy strings can contain user-info or other sensitive values.
+func NormalizeConfiguration(config SourceConfiguration) ConfigurationObservation {
+	normalized := normalizeConfiguration(config)
+	return ConfigurationObservation{
+		State:                 normalized.state,
+		Direct:                normalized.state == StateDirect,
+		StaticProxyConfigured: len(normalized.endpoints) > 0,
+		ProxyEndpoints:        append([]string(nil), normalized.endpoints...),
+		ProxyBypass:           append([]string(nil), normalized.bypass...),
+		PACConfigured:         normalized.pacConfigured(),
+		PACURL:                normalized.pacURL,
+		AutoDetect:            normalized.autoDetect,
+		Error:                 normalized.err,
+	}
+}
+
+// ProxyEndpoints returns redacted, normalized endpoints from a native proxy
+// string. It never returns user-info and rejects malformed endpoint values.
+func ProxyEndpoints(value string) ([]string, error) {
+	endpoints, _, parseErr := parseProxyEndpoints(value)
+	if parseErr != "" {
+		return endpoints, errors.New(parseErr)
+	}
+	return endpoints, nil
+}
+
+// ProxyEndpointForURL selects the endpoint for targetURL from a WinHTTP proxy
+// list such as "http=proxy-a:8080;https=proxy-b:8443". It returns direct=true
+// for an explicit DIRECT or an empty list. The selected endpoint is always
+// normalized and redacted.
+func ProxyEndpointForURL(value, targetURL string) (endpoint string, direct bool, err error) {
+	parsedURL, parseErr := url.Parse(targetURL)
+	if parseErr != nil || parsedURL.Scheme == "" || parsedURL.Host == "" || parsedURL.User != nil {
+		return "", false, errors.New("target URL is malformed")
+	}
+	original := strings.TrimSpace(value)
+	if original == "" {
+		return "", true, nil
+	}
+	var fallback string
+	var selected string
+	var schemeDirect bool
+	var schemeEntry bool
+	var fallbackDirect bool
+	var fallbackEntry bool
+	parseFailure := false
+	for _, rawPart := range splitProxyList(original) {
+		part := strings.TrimSpace(rawPart)
+		if part == "" {
+			continue
+		}
+		label := ""
+		valuePart := part
+		if equals := strings.IndexByte(part, '='); equals >= 0 {
+			label = strings.ToLower(strings.TrimSpace(part[:equals]))
+			valuePart = strings.TrimSpace(part[equals+1:])
+		}
+		if strings.EqualFold(valuePart, "DIRECT") {
+			if label == strings.ToLower(parsedURL.Scheme) {
+				schemeEntry = true
+				schemeDirect = true
+			} else if label == "" && !fallbackEntry {
+				fallbackEntry = true
+				fallbackDirect = true
+			}
+			continue
+		}
+		candidate, candidateErr := safeEndpoint(valuePart)
+		if candidateErr != nil {
+			parseFailure = true
+			continue
+		}
+		if label == strings.ToLower(parsedURL.Scheme) && !schemeEntry {
+			schemeEntry = true
+			selected = candidate
+		} else if label == "" && !fallbackEntry {
+			fallbackEntry = true
+			fallback = candidate
+		}
+	}
+	if schemeEntry {
+		if schemeDirect {
+			return "", true, nil
+		}
+		return selected, false, nil
+	}
+	if fallbackEntry && fallbackDirect {
+		return "", true, nil
+	}
+	if fallbackEntry && fallback != "" {
+		return fallback, false, nil
+	}
+	if parseFailure {
+		return "", false, errors.New(string(StateMalformedProxyEndpoint))
+	}
+	return "", true, nil
+}
+
+// ProxyBypasses reports whether targetURL matches one of the Windows proxy
+// bypass patterns. It covers the documented literal, wildcard, and <local>
+// forms without evaluating scripts or retaining any configuration beyond the
+// boolean result.
+func ProxyBypasses(targetURL string, bypass []string) bool {
+	parsed, err := url.Parse(targetURL)
+	if err != nil || parsed.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	targetPort := parsed.Port()
+	if targetPort == "" {
+		switch strings.ToLower(parsed.Scheme) {
+		case "https":
+			targetPort = "443"
+		case "http":
+			targetPort = "80"
+		}
+	}
+	for _, raw := range bypass {
+		patterns := strings.FieldsFunc(raw, func(r rune) bool { return r == ';' || r == ',' || unicode.IsSpace(r) })
+		for _, rawPattern := range patterns {
+			pattern := strings.ToLower(strings.TrimSpace(rawPattern))
+			if pattern == "" {
+				continue
+			}
+			if pattern == "<local>" && !strings.Contains(host, ".") {
+				return true
+			}
+			pattern = strings.TrimSuffix(pattern, ".")
+			if strings.HasPrefix(pattern, "<") && strings.HasSuffix(pattern, ">") {
+				continue
+			}
+			pattern = strings.TrimPrefix(pattern, "http://")
+			pattern = strings.TrimPrefix(pattern, "https://")
+			if slash := strings.IndexByte(pattern, '/'); slash >= 0 {
+				pattern = pattern[:slash]
+			}
+			patternPort := ""
+			if strings.HasPrefix(pattern, "[") {
+				if closing := strings.IndexByte(pattern, ']'); closing >= 0 {
+					if suffix := pattern[closing+1:]; strings.HasPrefix(suffix, ":") {
+						patternPort = suffix[1:]
+					}
+					pattern = pattern[1:closing]
+				}
+			} else if colon := strings.LastIndexByte(pattern, ':'); colon >= 0 && strings.Count(pattern, ":") == 1 && !strings.Contains(pattern[colon+1:], ":") {
+				if _, portErr := strconv.ParseUint(pattern[colon+1:], 10, 16); portErr == nil {
+					patternPort = pattern[colon+1:]
+					pattern = pattern[:colon]
+				}
+			}
+			if patternPort != "" && patternPort != targetPort {
+				continue
+			}
+			pattern = strings.Trim(pattern, "[]")
+			if pattern == host {
+				return true
+			}
+			if strings.HasPrefix(pattern, "*.") && strings.HasSuffix(host, pattern[1:]) {
+				return true
+			}
+			if strings.Contains(pattern, "*") {
+				if matched, matchErr := pathMatch(pattern, host); matchErr == nil && matched {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func pathMatch(pattern, value string) (bool, error) {
+	// Keep wildcard matching local and bounded; filepath.Match is platform
+	// dependent, so the small matcher below uses only the Windows host syntax.
+	if pattern == "*" {
+		return true, nil
+	}
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == value, nil
+	}
+	position := 0
+	for index, part := range parts {
+		if part == "" {
+			continue
+		}
+		found := strings.Index(value[position:], part)
+		if found < 0 || index == 0 && found != 0 {
+			return false, nil
+		}
+		position += found + len(part)
+	}
+	if !strings.HasSuffix(pattern, "*") && position != len(value) {
+		return false, nil
+	}
+	return true, nil
 }
 
 // DialContextFunc permits deterministic reachability tests without changing
@@ -416,14 +657,19 @@ func parseProxyEndpoints(value string) (endpoints []string, original string, par
 	if original == "" {
 		return nil, "", ""
 	}
-	parts := strings.Split(original, ";")
+	parts := splitProxyList(original)
+	directSeen := false
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		if part == "" || strings.EqualFold(part, "DIRECT") {
+		if part == "" {
 			continue
 		}
 		if equals := strings.IndexByte(part, '='); equals >= 0 {
 			part = strings.TrimSpace(part[equals+1:])
+		}
+		if strings.EqualFold(part, "DIRECT") {
+			directSeen = true
+			continue
 		}
 		endpoint, err := safeEndpoint(part)
 		if err != nil {
@@ -434,10 +680,16 @@ func parseProxyEndpoints(value string) (endpoints []string, original string, par
 		}
 		endpoints = append(endpoints, endpoint)
 	}
-	if len(endpoints) == 0 && parseErr == "" {
+	if len(endpoints) == 0 && parseErr == "" && !directSeen {
 		parseErr = string(StateMalformedProxyEndpoint)
 	}
 	return endpoints, original, parseErr
+}
+
+func splitProxyList(value string) []string {
+	return strings.FieldsFunc(value, func(r rune) bool {
+		return r == ';' || unicode.IsSpace(r)
+	})
 }
 
 func safeEndpoint(value string) (string, error) {

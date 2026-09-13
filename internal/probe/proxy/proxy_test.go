@@ -297,6 +297,72 @@ func TestParseProxyEndpointsRedactsCredentialsAndSupportsSchemeLists(t *testing.
 	if got[0] != "proxy.example:8080" || got[1] != "[2001:db8::1]:8443" {
 		t.Fatalf("endpoints = %#v", got)
 	}
+	got, _, errText = parseProxyEndpoints("http=proxy-a.example:8080 https=proxy-b.example:8443")
+	if errText != "" || len(got) != 2 || got[0] != "proxy-a.example:8080" || got[1] != "proxy-b.example:8443" {
+		t.Fatalf("whitespace-separated endpoints = %#v, error %q", got, errText)
+	}
+}
+
+func TestParseProxyEndpointsTreatsDIRECTAsDirectConfiguration(t *testing.T) {
+	got, _, errText := parseProxyEndpoints("DIRECT")
+	if errText != "" || len(got) != 0 {
+		t.Fatalf("parse DIRECT = endpoints %#v, error %q", got, errText)
+	}
+	got, _, errText = parseProxyEndpoints("https=DIRECT")
+	if errText != "" || len(got) != 0 {
+		t.Fatalf("parse scheme-specific DIRECT = endpoints %#v, error %q", got, errText)
+	}
+}
+
+func TestProxyEndpointForURLSelectsSchemeSpecificEndpoint(t *testing.T) {
+	endpoint, direct, err := ProxyEndpointForURL("http=http-proxy.example:8080;https=https-proxy.example:8443", "https://service.example/health")
+	if err != nil || direct || endpoint != "https-proxy.example:8443" {
+		t.Fatalf("https selection = endpoint %q, direct %v, error %v", endpoint, direct, err)
+	}
+	endpoint, direct, err = ProxyEndpointForURL("http=http-proxy.example:8080;https=https-proxy.example:8443", "http://service.example/health")
+	if err != nil || direct || endpoint != "http-proxy.example:8080" {
+		t.Fatalf("http selection = endpoint %q, direct %v, error %v", endpoint, direct, err)
+	}
+	endpoint, direct, err = ProxyEndpointForURL("http=http-proxy.example:8080 https=https-proxy.example:8443", "https://service.example/health")
+	if err != nil || direct || endpoint != "https-proxy.example:8443" {
+		t.Fatalf("whitespace-separated https selection = endpoint %q, direct %v, error %v", endpoint, direct, err)
+	}
+}
+
+func TestProxyEndpointForURLHonorsSchemeSpecificDIRECT(t *testing.T) {
+	endpoint, direct, err := ProxyEndpointForURL("http=proxy.example:8080;https=DIRECT", "https://service.example/health")
+	if err != nil || !direct || endpoint != "" {
+		t.Fatalf("DIRECT selection = endpoint %q, direct %v, error %v", endpoint, direct, err)
+	}
+	endpoint, direct, err = ProxyEndpointForURL("DIRECT;proxy.example:8080", "https://service.example/health")
+	if err != nil || !direct || endpoint != "" {
+		t.Fatalf("ordered DIRECT selection = endpoint %q, direct %v, error %v", endpoint, direct, err)
+	}
+}
+
+func TestProxyBypassesSupportsWindowsLocalAndWildcardPatterns(t *testing.T) {
+	tests := []struct {
+		name   string
+		url    string
+		bypass []string
+		want   bool
+	}{
+		{name: "local host", url: "https://intranet/health", bypass: []string{"<local>"}, want: true},
+		{name: "wildcard suffix", url: "https://api.corp.example/health", bypass: []string{"*.corp.example"}, want: true},
+		{name: "combined bypass list", url: "https://api.corp.example/health", bypass: []string{"localhost;*.corp.example"}, want: true},
+		{name: "whitespace bypass list", url: "https://api.corp.example/health", bypass: []string{"localhost *.corp.example"}, want: true},
+		{name: "literal host with port", url: "https://service.example:443/health", bypass: []string{"service.example:443"}, want: true},
+		{name: "literal host with different port", url: "https://service.example:8443/health", bypass: []string{"service.example:443"}, want: false},
+		{name: "IPv6 literal", url: "https://[2001:db8::10]/health", bypass: []string{"[2001:db8::10]"}, want: true},
+		{name: "not matched", url: "https://public.example/health", bypass: []string{"*.corp.example"}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ProxyBypasses(test.url, test.bypass); got != test.want {
+				t.Fatalf("ProxyBypasses(%q, %#v) = %v, want %v", test.url, test.bypass, got, test.want)
+			}
+		})
+	}
 }
 
 func TestProbeHonorsCanceledContext(t *testing.T) {

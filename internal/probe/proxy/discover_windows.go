@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"syscall"
+	"unicode"
 	"unsafe"
 )
 
@@ -14,8 +15,12 @@ import (
 // PowerShell, registry shell, or PAC script engine is involved.
 var (
 	winhttpDLL                     = syscall.NewLazyDLL("winhttp.dll")
+	winhttpOpen                    = winhttpDLL.NewProc("WinHttpOpen")
+	winhttpCloseHandle             = winhttpDLL.NewProc("WinHttpCloseHandle")
+	winhttpSetTimeouts             = winhttpDLL.NewProc("WinHttpSetTimeouts")
 	getDefaultProxyConfiguration   = winhttpDLL.NewProc("WinHttpGetDefaultProxyConfiguration")
 	getIEProxyConfigForCurrentUser = winhttpDLL.NewProc("WinHttpGetIEProxyConfigForCurrentUser")
+	getProxyForURL                 = winhttpDLL.NewProc("WinHttpGetProxyForUrl")
 	kernel32DLL                    = syscall.NewLazyDLL("kernel32.dll")
 	globalFree                     = kernel32DLL.NewProc("GlobalFree")
 )
@@ -24,6 +29,10 @@ const (
 	winHTTPAccessTypeNoProxy        = 1
 	winHTTPAccessTypeNamedProxy     = 3
 	winHTTPAccessTypeAutomaticProxy = 4
+	winHTTPAutoProxyDetect          = 1
+	winHTTPAutoProxyConfigURL       = 2
+	winHTTPAutoDetectDHCP           = 1
+	winHTTPAutoDetectDNSA           = 2
 )
 
 type winHTTPProxyInfo struct {
@@ -39,6 +48,15 @@ type winHTTPCurrentUserIEProxyConfig struct {
 	lpszProxyBypass   *uint16
 }
 
+type winHTTPAutoProxyOptions struct {
+	dwFlags                uint32
+	dwAutoDetectFlags      uint32
+	lpszAutoConfigURL      *uint16
+	lpvReserved            uintptr
+	dwReserved             uint32
+	fAutoLogonIfChallenged int32
+}
+
 func discoverPlatform(ctx context.Context) (Discovery, error) {
 	if err := ctx.Err(); err != nil {
 		return Discovery{}, err
@@ -52,6 +70,121 @@ func discoverPlatform(ctx context.Context) (Discovery, error) {
 	// report WinHTTP and WinINET independently as unavailable instead of
 	// collapsing the two observations into one generic error.
 	return Discovery{WinHTTP: winHTTP, WinINET: winINET}, nil
+}
+
+func resolveProxyForURL(ctx context.Context, targetURL string, config SourceConfiguration) (URLProxyResolution, error) {
+	if err := ctx.Err(); err != nil {
+		return URLProxyResolution{}, err
+	}
+	if !config.Available {
+		return URLProxyResolution{}, errors.New("proxy configuration unavailable")
+	}
+
+	// A static source needs no native URL resolution. Preserve the native
+	// endpoint list only long enough to select a safe endpoint; it is never
+	// returned verbatim.
+	if strings.TrimSpace(config.PACURL) == "" && !config.AutoDetect {
+		if ProxyBypasses(targetURL, config.Bypass) {
+			return URLProxyResolution{Direct: true, Bypass: append([]string(nil), config.Bypass...), Configuration: string(StateDirect)}, nil
+		}
+		endpoint, direct, endpointErr := ProxyEndpointForURL(config.Proxy, targetURL)
+		if endpointErr != nil {
+			return URLProxyResolution{}, endpointErr
+		}
+		if direct || endpoint == "" {
+			return URLProxyResolution{Direct: true, Bypass: append([]string(nil), config.Bypass...), Configuration: string(StateDirect)}, nil
+		}
+		return URLProxyResolution{Proxy: endpoint, Bypass: append([]string(nil), config.Bypass...), Configuration: string(StateStaticProxyConfigured)}, nil
+	}
+
+	urlPointer, err := syscall.UTF16PtrFromString(targetURL)
+	if err != nil {
+		return URLProxyResolution{}, errors.New("invalid target URL")
+	}
+	userAgent, _ := syscall.UTF16PtrFromString("tadori")
+	session, _, callErr := winhttpOpen.Call(
+		uintptr(unsafe.Pointer(userAgent)),
+		winHTTPAccessTypeNoProxy,
+		0,
+		0,
+		0,
+	)
+	if session == 0 {
+		if callErr != nil {
+			return URLProxyResolution{}, errors.New("WinHTTP proxy resolver unavailable")
+		}
+		return URLProxyResolution{}, errors.New("WinHTTP proxy resolver unavailable")
+	}
+	defer winhttpCloseHandle.Call(session)
+	// WinHttpGetProxyForUrl is synchronous. Set a native timeout as well as
+	// honoring the caller context so an unavailable PAC source cannot outlive
+	// the diagnostic's bounded operation.
+	_, _, _ = winhttpSetTimeouts.Call(session, 5000, 5000, 5000, 5000)
+
+	// Do not delegate credential acquisition to WinHTTP while diagnosing. A
+	// challenged PAC source is evidence of a requirement, not permission to
+	// access or emit the caller's credentials.
+	options := winHTTPAutoProxyOptions{}
+	if config.AutoDetect {
+		options.dwFlags |= winHTTPAutoProxyDetect
+		options.dwAutoDetectFlags = winHTTPAutoDetectDHCP | winHTTPAutoDetectDNSA
+	}
+	if config.PACURL != "" {
+		// Remove user-info, query tokens, and fragments before passing a PAC
+		// URL back to WinHTTP. The resolver only needs the PAC resource, and
+		// diagnostics must never forward a captured secret unnecessarily.
+		pacURL := sanitizePACURL(config.PACURL)
+		if pacURL == "" {
+			return URLProxyResolution{}, errors.New("invalid PAC URL")
+		}
+		pacPointer, pointerErr := syscall.UTF16PtrFromString(pacURL)
+		if pointerErr != nil {
+			return URLProxyResolution{}, errors.New("invalid PAC URL")
+		}
+		options.dwFlags |= winHTTPAutoProxyConfigURL
+		options.lpszAutoConfigURL = pacPointer
+	}
+
+	var info winHTTPProxyInfo
+	ret, _, _ := getProxyForURL.Call(session, uintptr(unsafe.Pointer(urlPointer)), uintptr(unsafe.Pointer(&options)), uintptr(unsafe.Pointer(&info)))
+	if ret == 0 {
+		return URLProxyResolution{}, errors.New("WinHTTP automatic proxy resolution failed")
+	}
+	defer freeGlobal(info.lpszProxy)
+	defer freeGlobal(info.lpszProxyBypass)
+
+	if err := ctx.Err(); err != nil {
+		return URLProxyResolution{}, err
+	}
+	if info.dwAccessType == winHTTPAccessTypeNoProxy {
+		return URLProxyResolution{
+			Direct:        true,
+			Bypass:        splitBypass(readUTF16(info.lpszProxyBypass)),
+			UsedPAC:       true,
+			AutoDetect:    config.AutoDetect,
+			Configuration: string(StateDirect),
+		}, nil
+	}
+	endpoint, direct, endpointErr := ProxyEndpointForURL(readUTF16(info.lpszProxy), targetURL)
+	if endpointErr != nil {
+		return URLProxyResolution{}, errors.New("WinHTTP returned a malformed proxy endpoint")
+	}
+	if direct || endpoint == "" {
+		return URLProxyResolution{
+			Direct:        true,
+			Bypass:        splitBypass(readUTF16(info.lpszProxyBypass)),
+			UsedPAC:       true,
+			AutoDetect:    config.AutoDetect,
+			Configuration: string(StateDirect),
+		}, nil
+	}
+	return URLProxyResolution{
+		Proxy:         endpoint,
+		Bypass:        splitBypass(readUTF16(info.lpszProxyBypass)),
+		UsedPAC:       true,
+		AutoDetect:    config.AutoDetect,
+		Configuration: string(StatePACConfigured),
+	}, nil
 }
 
 func queryWinHTTP() (SourceConfiguration, error) {
@@ -112,7 +245,7 @@ func readUTF16(value *uint16) string {
 }
 
 func splitBypass(value string) []string {
-	parts := strings.FieldsFunc(value, func(r rune) bool { return r == ';' || r == ',' })
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == ';' || r == ',' || unicode.IsSpace(r) })
 	result := make([]string, 0, len(parts))
 	for _, part := range parts {
 		if part = strings.TrimSpace(part); part != "" {
