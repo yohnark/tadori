@@ -155,6 +155,8 @@ func TestStructuredTargetIntentRoundTripsThroughAPI(t *testing.T) {
 	defer handler.Close()
 
 	request := httptest.NewRequest(http.MethodPost, "/api/diagnose", strings.NewReader(`{"target":{"input":"fileserver01","service":"smb","port":1445}}`))
+	request.Host = "127.0.0.1"
+	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -227,6 +229,8 @@ func TestDiagnoseHandlerRejectsInvalidTargetWithoutRunning(t *testing.T) {
 		return model.DiagnosticReport{}
 	}})
 	request := httptest.NewRequest(http.MethodPost, "/api/diagnose", strings.NewReader(`{"target":"javascript:alert(1)"}`))
+	request.Host = "127.0.0.1"
+	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 
@@ -256,6 +260,8 @@ func TestDiagnoseHandlerForwardsRequestCancellation(t *testing.T) {
 	requestContext, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	request := httptest.NewRequest(http.MethodPost, "/api/diagnose", strings.NewReader(`{"target":"http://example.com"}`)).WithContext(requestContext)
+	request.Host = "127.0.0.1"
+	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
