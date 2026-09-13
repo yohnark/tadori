@@ -34,6 +34,9 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	if !strings.Contains(page, "Raw evidence") || !strings.Contains(page, "Canonical JSON") {
 		t.Errorf("UI page is missing required report sections")
 	}
+	if !strings.Contains(page, "HTML Report") || !strings.Contains(page, "json-report-link") {
+		t.Errorf("UI page is missing report export affordances")
+	}
 
 	style := getBody(t, client, server.URL+"/style.css")
 	if !strings.Contains(style, ".target-row") {
@@ -45,6 +48,9 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	}
 	if strings.Contains(script, "innerHTML") {
 		t.Errorf("app.js must not render evidence with innerHTML")
+	}
+	if !strings.Contains(script, "/report.html") || !strings.Contains(script, "/report.json") {
+		t.Errorf("app.js does not expose report export URLs")
 	}
 	composer := getBody(t, client, server.URL+"/composer.js")
 	if !strings.Contains(composer, "TadoriTargetComposer") || !strings.Contains(composer, "PROVENANCE") {

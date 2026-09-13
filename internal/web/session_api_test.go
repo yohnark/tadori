@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yohnark/tadori/internal/model"
+	reportpkg "github.com/yohnark/tadori/internal/report"
 	"github.com/yohnark/tadori/internal/session"
 )
 
@@ -126,6 +128,55 @@ func TestSessionAPIStreamsProgressAndReturnsCanonicalReport(t *testing.T) {
 	if !webTestReportsEqual(completed.Report, &wantReport) {
 		t.Fatalf("session report differs from canonical runner report\n got: %#v\nwant: %#v", completed.Report, &wantReport)
 	}
+
+	for _, exported := range []struct {
+		name        string
+		suffix      string
+		contentType string
+		want        []byte
+	}{
+		{name: "HTML", suffix: "/report.html", contentType: "text/html; charset=utf-8", want: mustRenderHTML(t, wantReport)},
+		{name: "JSON", suffix: "/report.json", contentType: "application/json; charset=utf-8", want: mustRenderJSON(t, wantReport)},
+	} {
+		t.Run(exported.name, func(t *testing.T) {
+			response, err := server.Client().Get(server.URL + "/api/diagnoses/" + created.ID + exported.suffix)
+			if err != nil {
+				t.Fatalf("GET export: %v", err)
+			}
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatalf("read export: %v", err)
+			}
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("export status = %d: %s", response.StatusCode, body)
+			}
+			if response.Header.Get("Content-Type") != exported.contentType {
+				t.Fatalf("content type = %q, want %q", response.Header.Get("Content-Type"), exported.contentType)
+			}
+			if string(body) != string(exported.want) {
+				t.Fatalf("export is not deterministic canonical projection")
+			}
+		})
+	}
+}
+
+func mustRenderHTML(t *testing.T, report model.DiagnosticReport) []byte {
+	t.Helper()
+	encoded, err := reportpkg.RenderHTML(report)
+	if err != nil {
+		t.Fatalf("render HTML: %v", err)
+	}
+	return encoded
+}
+
+func mustRenderJSON(t *testing.T, report model.DiagnosticReport) []byte {
+	t.Helper()
+	encoded, err := reportpkg.RenderJSON(report)
+	if err != nil {
+		t.Fatalf("render JSON: %v", err)
+	}
+	return encoded
 }
 
 func TestSessionAPIValidationAndCancellation(t *testing.T) {

@@ -222,6 +222,10 @@ func (h *Handler) diagnosisCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) diagnosisResource(w http.ResponseWriter, r *http.Request) {
+	if id, format, ok := parseDiagnosisExportPath(r.URL.Path); ok {
+		h.diagnosisExport(w, r, id, format)
+		return
+	}
 	if id, ok := parseDiagnosisViewPath(r.URL.Path); ok {
 		h.diagnosisView(w, r, id)
 		return
@@ -263,6 +267,57 @@ func (h *Handler) diagnosisResource(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, snapshot)
 	default:
 		methodNotAllowed(w, http.MethodGet+", "+http.MethodDelete)
+	}
+}
+
+type diagnosisExportFormat string
+
+const (
+	diagnosisExportHTML diagnosisExportFormat = "html"
+	diagnosisExportJSON diagnosisExportFormat = "json"
+)
+
+// diagnosisExport serves only the canonical final report held by the session.
+// The HTML projection is presentation-only; the JSON bytes remain the report
+// package's canonical representation.
+func (h *Handler) diagnosisExport(w http.ResponseWriter, r *http.Request, id string, format diagnosisExportFormat) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	snapshot, err := h.sessions.Get(id)
+	if err != nil {
+		writeSessionError(w, err)
+		return
+	}
+	if snapshot.Report == nil {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusAccepted, snapshot)
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	switch format {
+	case diagnosisExportHTML:
+		encoded, err := report.RenderHTML(*snapshot.Report)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "encode HTML report: "+err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Disposition", `inline; filename="tadori-report.html"`)
+		_, _ = w.Write(encoded)
+	case diagnosisExportJSON:
+		encoded, err := report.RenderJSON(*snapshot.Report)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "encode JSON report: "+err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="tadori-report.json"`)
+		_, _ = w.Write(encoded)
+	default:
+		http.NotFound(w, r)
 	}
 }
 
@@ -433,6 +488,25 @@ func parseDiagnosisViewPath(path string) (id string, ok bool) {
 		return parts[0], true
 	}
 	return "", false
+}
+
+func parseDiagnosisExportPath(path string) (id string, format diagnosisExportFormat, ok bool) {
+	const prefix = "/api/diagnoses/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	if len(parts) != 2 || !validSessionID(parts[0]) {
+		return "", "", false
+	}
+	switch parts[1] {
+	case "report.html":
+		return parts[0], diagnosisExportHTML, true
+	case "report.json":
+		return parts[0], diagnosisExportJSON, true
+	default:
+		return "", "", false
+	}
 }
 
 func validSessionID(id string) bool {

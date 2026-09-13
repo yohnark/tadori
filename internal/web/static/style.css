@@ -340,6 +340,24 @@ pre,
   margin-top: 10px;
 }
 
+.report-export-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.report-export-actions .section-note {
+  border: 0;
+  background: transparent;
+  padding: 0 3px;
+}
+
+.report-export-actions a[hidden] {
+  display: none;
+}
+
 #report:not([hidden]) {
   animation: report-enter 140ms ease-out;
 }

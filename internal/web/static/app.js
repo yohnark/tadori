@@ -40,6 +40,8 @@
   const evidence = document.querySelector("#evidence");
   const evidenceHeading = document.querySelector("#evidence-heading");
   const canonicalJSON = document.querySelector("#canonical-json");
+  const htmlReportLink = document.querySelector("#html-report-link");
+  const jsonReportLink = document.querySelector("#json-report-link");
   const composer = globalThis.TadoriTargetComposer;
 
   let currentView = null;
@@ -1078,7 +1080,22 @@
       evidence.appendChild(element("div", "empty-state", "No evidence was retained."));
     }
     canonicalJSON.textContent = view.canonical_json || jsonText(view.report);
+    renderExportLinks(activeSessionID);
     reportSection.hidden = false;
+  }
+
+  function renderExportLinks(sessionID) {
+    const hasSession = Boolean(sessionID);
+    htmlReportLink.hidden = !hasSession;
+    jsonReportLink.hidden = !hasSession;
+    if (!hasSession) {
+      htmlReportLink.removeAttribute("href");
+      jsonReportLink.removeAttribute("href");
+      return;
+    }
+    const encodedID = encodeURIComponent(sessionID);
+    htmlReportLink.href = `/api/diagnoses/${encodedID}/report.html`;
+    jsonReportLink.href = `/api/diagnoses/${encodedID}/report.json`;
   }
 
   function renderNetworkContext(context) {
