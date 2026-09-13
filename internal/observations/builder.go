@@ -616,12 +616,9 @@ func buildApplicationObservation(target model.Target, endpoint model.EndpointObs
 				}
 				if observation.FailureReason == model.FailureReasonNone || observation.FailureReason == model.FailureReasonUnknown {
 					observation.FailureReason = value.FailureReason
-					if observation.FailureReason == model.FailureReasonNone || observation.FailureReason == model.FailureReasonUnknown {
-						observation.FailureReason = probe.Interpretation.FailureReason
-					}
 				}
-				if probe.Interpretation.FaultDomain != "" {
-					observation.FaultDomain = probe.Interpretation.FaultDomain
+				if observation.FaultDomain == model.FaultDomainSMB && (value.FailureReason == model.FailureReasonTCPTimeout || value.FailureReason == model.FailureReasonTCPConnectionRefused || value.FailureReason == model.FailureReasonSMBConnectionRefused) {
+					observation.FaultDomain = model.FaultDomainTransport
 				}
 				mergeObservationTiming(&observation.Timing, probe.Timing)
 				continue
@@ -658,9 +655,12 @@ func buildApplicationObservation(target model.Target, endpoint model.EndpointObs
 					observation.Result = model.HTTPResultSuccess
 					if value.StatusCode >= 400 {
 						observation.Result = model.HTTPResultStatusFailure
+						observation.FailureReason = model.FailureReasonHTTPStatusCode
 					}
 					statuses = append(statuses, sourceValue{value: strconv.Itoa(value.StatusCode), probe: probe.Name, evidenceID: evidence.ID})
 					results = append(results, sourceValue{value: string(observation.Result), probe: probe.Name, evidenceID: evidence.ID})
+				} else {
+					observation.FailureReason = model.FailureReasonHTTPFailure
 				}
 				urls = append(urls, sourceValue{value: value.URL, probe: probe.Name, evidenceID: evidence.ID})
 			} else {
@@ -675,18 +675,14 @@ func buildApplicationObservation(target model.Target, endpoint model.EndpointObs
 				}
 				observation.Redirects = appendHTTPRedirects(observation.Redirects, value.Redirects)
 				observation.Result = model.HTTPResultRequestFailure
+				observation.FailureReason = model.FailureReasonHTTPFailure
 				results = append(results, sourceValue{value: string(model.HTTPResultRequestFailure), probe: probe.Name, evidenceID: evidence.ID})
 				urls = append(urls, sourceValue{value: value.URL, probe: probe.Name, evidenceID: evidence.ID})
-			}
-			if observation.FailureReason == model.FailureReasonNone || observation.FailureReason == model.FailureReasonUnknown {
-				observation.FailureReason = probe.Interpretation.FailureReason
-			}
-			if probe.Interpretation.FaultDomain != "" {
-				observation.FaultDomain = probe.Interpretation.FaultDomain
 			}
 			mergeObservationTiming(&observation.Timing, probe.Timing)
 		}
 		if probe.Name == "http" && !seenHTTP {
+			seenHTTP = true
 			observation.RequestAttempted = true
 			observation.Result = model.HTTPResultRequestFailure
 			observation.FailureReason = probe.Interpretation.FailureReason
@@ -782,6 +778,7 @@ func buildDNSApplicationObservation(target model.Target, endpoint model.Endpoint
 	}
 	application := model.ApplicationObservation{
 		Applicability:     model.ObservationApplicabilityApplicable,
+		Protocol:          model.ApplicationProtocolDNS,
 		Result:            model.HTTPResultNotAttempted,
 		RequestedResource: target.Resource,
 		FailureReason:     model.FailureReasonNone,
@@ -1007,10 +1004,7 @@ func buildProtocolApplicationObservation(target model.Target, endpoint model.End
 				observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
 				observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
 				addObservationProvenance(&observation.Provenance, probe, evidence)
-				observation.FailureReason = probe.Interpretation.FailureReason
-				if probe.Interpretation.FaultDomain != "" {
-					observation.FaultDomain = probe.Interpretation.FaultDomain
-				}
+				observation.FailureReason = sshFailureReason(value.ResponseClass, value.BannerValid)
 				mergeObservationTiming(&observation.Timing, probe.Timing)
 			case model.EvidenceKindRDPNegotiation:
 				var value rdpApplicationEvidence
@@ -1032,10 +1026,7 @@ func buildProtocolApplicationObservation(target model.Target, endpoint model.End
 				observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
 				observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
 				addObservationProvenance(&observation.Provenance, probe, evidence)
-				observation.FailureReason = probe.Interpretation.FailureReason
-				if probe.Interpretation.FaultDomain != "" {
-					observation.FaultDomain = probe.Interpretation.FaultDomain
-				}
+				observation.FailureReason = rdpFailureReason(value.ResponseType, value.NegotiationComplete)
 				mergeObservationTiming(&observation.Timing, probe.Timing)
 			}
 		}
@@ -1043,9 +1034,9 @@ func buildProtocolApplicationObservation(target model.Target, endpoint model.End
 	if observation.RequestAttempted {
 		observation.Applicability = model.ObservationApplicabilityApplicable
 		observation.Certainty = model.ObservationCertaintyObserved
-	} else if protocol != model.ApplicationProtocolSSH && protocol != model.ApplicationProtocolRDP {
-		observation.Applicability = model.ObservationApplicabilityInapplicable
-		observation.Certainty = model.ObservationCertaintyDerived
+	} else {
+		observation.Applicability = model.ObservationApplicabilityNotAttempted
+		observation.Certainty = model.ObservationCertaintyObserved
 	}
 	return model.NormalizeApplicationObservation(observation)
 }
@@ -1073,6 +1064,26 @@ func sshProtocolResult(class string, complete bool) model.ApplicationProtocolRes
 	}
 }
 
+func sshFailureReason(class string, complete bool) model.FailureReason {
+	if complete {
+		return model.FailureReasonNone
+	}
+	switch class {
+	case "timeout":
+		return model.FailureReasonSSHTimeout
+	case "malformed", "unsupported_version":
+		return model.FailureReasonSSHBannerMalformed
+	case "non_ssh":
+		return model.FailureReasonSSHNonSSHResponse
+	case "handshake_failure":
+		return model.FailureReasonSSHHandshakeFailure
+	case "transport_failure", "invalid_target", "canceled", "no_candidate":
+		return model.FailureReasonNone
+	default:
+		return model.FailureReasonSSHHandshakeFailure
+	}
+}
+
 func rdpProtocolResult(responseType string, complete bool) model.ApplicationProtocolResult {
 	if complete {
 		return model.ApplicationProtocolResultSuccess
@@ -1086,6 +1097,26 @@ func rdpProtocolResult(responseType string, complete bool) model.ApplicationProt
 		return model.ApplicationProtocolResultMalformed
 	default:
 		return model.ApplicationProtocolResultFailure
+	}
+}
+
+func rdpFailureReason(responseType string, complete bool) model.FailureReason {
+	if complete {
+		return model.FailureReasonNone
+	}
+	switch responseType {
+	case "timeout":
+		return model.FailureReasonRDPTimeout
+	case "rejected":
+		return model.FailureReasonRDPNegotiationRejected
+	case "malformed":
+		return model.FailureReasonRDPNegotiationMalformed
+	case "failure", "negotiation_failure":
+		return model.FailureReasonRDPNegotiationFailure
+	case "transport_failure", "invalid_target", "canceled", "no_candidate":
+		return model.FailureReasonNone
+	default:
+		return model.FailureReasonNone
 	}
 }
 

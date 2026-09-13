@@ -202,3 +202,154 @@ func TestDiagnoseReportUsesCanonicalObservationsOverProbeInterpretation(t *testi
 func valueToTarget(value model.Observations) model.Target {
 	return model.NewTarget(value.Endpoint.RequestedIdentity, value.Endpoint.Port)
 }
+
+func canonicalApplicationEnvelope(protocol model.ApplicationProtocol) model.Observations {
+	return model.Observations{Endpoint: model.EndpointObservation{
+		RequestedIdentity:   "service.example",
+		Port:                443,
+		ApplicationProtocol: protocol,
+		TransportProtocol:   model.TransportTCP,
+	}}
+}
+
+func TestDiagnoseObservationsUsesProtocolAwareApplicationSemantics(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  model.Observations
+		want   model.FailureReason
+		layer  model.Layer
+		result bool
+	}{
+		{
+			name: "HTTP status",
+			value: func() model.Observations {
+				value := canonicalApplicationEnvelope(model.ApplicationProtocolHTTP)
+				value.Application = model.ApplicationObservation{Applicability: model.ObservationApplicabilityApplicable, Protocol: model.ApplicationProtocolHTTP, RequestAttempted: true, ResponseReceived: true, Result: model.HTTPResultStatusFailure, StatusCode: 503, EvidenceIDs: []string{"http-status"}}
+				return value
+			}(),
+			want: model.FailureReasonHTTPStatusCode, layer: model.LayerHTTP,
+		},
+		{
+			name:  "DNS refusal",
+			value: dnsApplicationObservation("refused", "dns_service_refused"),
+			want:  model.FailureReason("dns_service_refused"), layer: model.LayerDNS,
+		},
+		{
+			name:  "DNS SERVFAIL",
+			value: dnsApplicationObservation("servfail", "dns_service_servfail"),
+			want:  model.FailureReason("dns_service_servfail"), layer: model.LayerDNS,
+		},
+		{
+			name:  "DNS malformed",
+			value: dnsApplicationObservation("malformed_response", "dns_service_malformed_response"),
+			want:  model.FailureReason("dns_service_malformed_response"), layer: model.LayerDNS,
+		},
+		{
+			name:  "DNS timeout",
+			value: dnsApplicationObservation("timeout", "dns_service_timeout"),
+			want:  model.FailureReason("dns_service_timeout"), layer: model.LayerDNS,
+		},
+		{
+			name:  "SSH timeout",
+			value: protocolApplicationObservation(model.ApplicationProtocolSSH, model.ApplicationProtocolResultTimeout),
+			want:  model.FailureReasonSSHTimeout, layer: model.LayerSSH,
+		},
+		{
+			name:  "RDP rejection",
+			value: protocolApplicationObservation(model.ApplicationProtocolRDP, model.ApplicationProtocolResultRejected),
+			want:  model.FailureReasonRDPNegotiationRejected, layer: model.LayerRDP,
+		},
+		{
+			name:  "SMB rejection",
+			value: smbApplicationObservation(model.SMBResultProtocolRejection, model.FailureReasonNone),
+			want:  model.FailureReasonSMBProtocolRejection, layer: model.LayerSMB,
+		},
+		{
+			name:  "SMB TCP refusal",
+			value: smbApplicationObservation(model.SMBResultTCPFailure, model.FailureReasonTCPConnectionRefused),
+			want:  model.FailureReasonTCPConnectionRefused, layer: model.LayerTCP,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := DiagnoseObservations(test.value)
+			if len(got) != 1 || got[0].FailureReason != test.want || got[0].Layer != test.layer {
+				t.Fatalf("diagnosis = %#v, want %q at %q", got, test.want, test.layer)
+			}
+		})
+	}
+}
+
+func TestDiagnoseObservationsTreatsDNSLaneDivergenceAsSuccessBoundary(t *testing.T) {
+	value := canonicalApplicationEnvelope(model.ApplicationProtocolDNS)
+	value.Application = model.ApplicationObservation{
+		Applicability:    model.ObservationApplicabilityApplicable,
+		Protocol:         model.ApplicationProtocolDNS,
+		RequestAttempted: true,
+		ResponseReceived: true,
+		EvidenceIDs:      []string{"dns-udp", "dns-tcp"},
+		DNS: &model.DNSApplicationObservation{
+			Result: model.DNSApplicationResultPartial, Divergence: true,
+			UDP: model.DNSApplicationTransportObservation{Attempted: true, ResponseReceived: true, Outcome: "success"},
+			TCP: model.DNSApplicationTransportObservation{Attempted: true, ResponseReceived: true, Outcome: "refused", FailureReason: model.FailureReason("dns_service_refused")},
+		},
+	}
+	if got := DiagnoseObservations(value); got != nil {
+		t.Fatalf("partial DNS divergence became a failure: %#v", got)
+	}
+}
+
+func TestDiagnoseReportDoesNotReintroduceStaleBuiltInApplicationProbeFacts(t *testing.T) {
+	value := canonicalApplicationEnvelope(model.ApplicationProtocolSSH)
+	value.Application = model.ApplicationObservation{
+		Applicability:      model.ObservationApplicabilityApplicable,
+		Protocol:           model.ApplicationProtocolSSH,
+		RequestAttempted:   true,
+		ResponseReceived:   true,
+		HandshakeAttempted: true,
+		HandshakeComplete:  true,
+		ProtocolResult:     model.ApplicationProtocolResultSuccess,
+		EvidenceIDs:        []string{"ssh-success"},
+	}
+	report := model.DiagnosticReport{Target: valueToTarget(value), Observations: value, Probes: []model.ProbeResult{{
+		Name: "stale-ssh", Status: model.ProbeStatusFailed,
+		Interpretation: model.ProbeInterpretation{FailureReason: model.FailureReasonSSHNonSSHResponse, Layer: model.LayerSSH, FaultDomain: model.FaultDomainSSH},
+	}}}
+	if got := DiagnoseReport(report); got.Findings != nil {
+		t.Fatalf("stale SSH interpretation overrode canonical success: %#v", got.Findings)
+	}
+}
+
+func TestDiagnoseObservationsDoesNotTreatCustomTLSOrTCPAsHTTP(t *testing.T) {
+	for _, protocol := range []model.ApplicationProtocol{model.ApplicationProtocolTLS, model.ApplicationProtocolCustom} {
+		value := canonicalApplicationEnvelope(protocol)
+		value.Application = model.ApplicationObservation{Applicability: model.ObservationApplicabilityInapplicable, Protocol: protocol, RequestAttempted: true, Result: model.HTTPResultRequestFailure, FailureReason: model.FailureReasonHTTPFailure}
+		if got := DiagnoseObservations(value); got != nil {
+			t.Fatalf("%s application became HTTP diagnosis: %#v", protocol, got)
+		}
+	}
+}
+
+func dnsApplicationObservation(outcome, reason string) model.Observations {
+	value := canonicalApplicationEnvelope(model.ApplicationProtocolDNS)
+	value.Application = model.ApplicationObservation{
+		Applicability: model.ObservationApplicabilityApplicable, Protocol: model.ApplicationProtocolDNS,
+		RequestAttempted: true, ResponseReceived: true, EvidenceIDs: []string{"dns-udp", "dns-tcp"},
+		DNS: &model.DNSApplicationObservation{Result: model.DNSApplicationResultFailure, FailureReason: model.FailureReason(reason),
+			UDP: model.DNSApplicationTransportObservation{Attempted: true, ResponseReceived: true, Outcome: outcome, FailureReason: model.FailureReason(reason)},
+			TCP: model.DNSApplicationTransportObservation{Attempted: true, ResponseReceived: true, Outcome: outcome, FailureReason: model.FailureReason(reason)}},
+	}
+	return value
+}
+
+func protocolApplicationObservation(protocol model.ApplicationProtocol, result model.ApplicationProtocolResult) model.Observations {
+	value := canonicalApplicationEnvelope(protocol)
+	value.Application = model.ApplicationObservation{Applicability: model.ObservationApplicabilityApplicable, Protocol: protocol, RequestAttempted: true, HandshakeAttempted: true, ProtocolResult: result, EvidenceIDs: []string{"protocol"}}
+	return value
+}
+
+func smbApplicationObservation(result model.SMBResult, reason model.FailureReason) model.Observations {
+	value := canonicalApplicationEnvelope(model.ApplicationProtocolSMB)
+	value.Application = model.ApplicationObservation{Applicability: model.ObservationApplicabilityApplicable, Protocol: model.ApplicationProtocolSMB, RequestAttempted: true, FailureReason: reason, EvidenceIDs: []string{"smb"}, SMB: &model.SMBApplicationObservation{Result: result}}
+	return value
+}

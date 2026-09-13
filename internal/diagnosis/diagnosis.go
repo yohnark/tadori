@@ -340,6 +340,48 @@ func collectSecurity(state *diagnosisState, value model.SecurityObservation, tar
 func collectApplication(state *diagnosisState, value model.ApplicationObservation, target model.Target) {
 	target = mergeTarget(target, targetFromEndpoint(value.EndpointUsed, nil, ""))
 	refs := candidateRefs{probeNames: value.ProbeNames, evidenceIDs: value.EvidenceIDs}
+	if value.Applicability == model.ObservationApplicabilityInapplicable || value.Applicability == model.ObservationApplicabilityUnsupported || value.Applicability == model.ObservationApplicabilityNotAttempted {
+		return
+	}
+	protocol := value.Protocol
+	if protocol == model.ApplicationProtocolNone {
+		protocol = target.ApplicationProtocol
+	}
+	if protocol == model.ApplicationProtocolNone {
+		switch {
+		case value.DNS != nil:
+			protocol = model.ApplicationProtocolDNS
+		case value.SMB != nil:
+			protocol = model.ApplicationProtocolSMB
+		case value.ServerIdentification != "" || applicationProtocolResultObserved(value.ProtocolResult):
+			protocol = target.ApplicationProtocol
+		default:
+			protocol = model.ApplicationProtocolHTTP
+		}
+	}
+
+	switch protocol {
+	case model.ApplicationProtocolHTTP, model.ApplicationProtocolHTTPS:
+		collectHTTPApplication(state, value, target, refs)
+	case model.ApplicationProtocolDNS:
+		collectDNSApplication(state, value, target, refs)
+	case model.ApplicationProtocolSMB:
+		collectSMBApplication(state, value, target, refs)
+	case model.ApplicationProtocolSSH, model.ApplicationProtocolRDP:
+		collectProtocolApplication(state, value, target, refs, protocol)
+	case model.ApplicationProtocolTLS, model.ApplicationProtocolCustom:
+		// TLS and custom TCP own their applicable boundaries in Security and
+		// Transport respectively. Application is intentionally inapplicable.
+	default:
+		// Unknown/opaque application extensions retain an explicitly supplied
+		// failure reason, but never get HTTP semantics by accident.
+		if activeReason(value.FailureReason) {
+			addReasonCandidate(state, value.FailureReason, model.LayerUnknown, value.FaultDomain, target, refs, false)
+		}
+	}
+}
+
+func collectHTTPApplication(state *diagnosisState, value model.ApplicationObservation, target model.Target, refs candidateRefs) {
 	if value.ResponseReceived && value.Result == model.HTTPResultSuccess && value.StatusCode < 400 {
 		state.successes = append(state.successes, success{layer: model.LayerHTTP, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
 		return
@@ -353,9 +395,104 @@ func collectApplication(state *diagnosisState, value model.ApplicationObservatio
 			reason = model.FailureReasonHTTPFailure
 		}
 	}
-	if activeReason(reason) && value.Applicability != model.ObservationApplicabilityUnsupported {
+	if activeReason(reason) {
 		addReasonCandidate(state, reason, model.LayerHTTP, value.FaultDomain, target, refs, false)
 	}
+}
+
+func collectDNSApplication(state *diagnosisState, value model.ApplicationObservation, target model.Target, refs candidateRefs) {
+	if value.DNS != nil {
+		if value.DNS.Result == model.DNSApplicationResultSuccess || value.DNS.Result == model.DNSApplicationResultPartial {
+			state.successes = append(state.successes, success{layer: model.LayerDNS, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+			return
+		}
+	}
+	reason := value.FailureReason
+	if value.DNS != nil {
+		if !activeReason(reason) {
+			reason = value.DNS.FailureReason
+		}
+		if !activeReason(reason) {
+			reason = firstApplicationDNSFailure(value.DNS.UDP, value.DNS.TCP)
+		}
+	}
+	if activeReason(reason) {
+		addReasonCandidate(state, reason, model.LayerDNS, value.FaultDomain, target, refs, false)
+	}
+}
+
+func collectSMBApplication(state *diagnosisState, value model.ApplicationObservation, target model.Target, refs candidateRefs) {
+	if value.SMB != nil && value.SMB.Result == model.SMBResultNegotiated {
+		state.successes = append(state.successes, success{layer: model.LayerSMB, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+		return
+	}
+	reason := value.FailureReason
+	if !activeReason(reason) && value.SMB != nil {
+		switch value.SMB.Result {
+		case model.SMBResultProtocolRejection:
+			reason = model.FailureReasonSMBProtocolRejection
+		case model.SMBResultMalformedResponse:
+			reason = model.FailureReasonSMBMalformedResponse
+		case model.SMBResultTimeout:
+			reason = model.FailureReasonSMBTimeout
+		case model.SMBResultTCPFailure:
+			reason = transportReason(state.value.Transport.ConnectionOutcome)
+		}
+	}
+	if activeReason(reason) {
+		addReasonCandidate(state, reason, model.LayerSMB, value.FaultDomain, target, refs, false)
+	}
+}
+
+func collectProtocolApplication(state *diagnosisState, value model.ApplicationObservation, target model.Target, refs candidateRefs, protocol model.ApplicationProtocol) {
+	layer := model.LayerSSH
+	if protocol == model.ApplicationProtocolRDP {
+		layer = model.LayerRDP
+	}
+	if value.ProtocolResult == model.ApplicationProtocolResultSuccess || value.HandshakeComplete {
+		state.successes = append(state.successes, success{layer: layer, target: target, probeNames: refs.probeNames, evidenceIDs: refs.evidenceIDs})
+		return
+	}
+	reason := value.FailureReason
+	if !activeReason(reason) {
+		if protocol == model.ApplicationProtocolSSH {
+			switch value.ProtocolResult {
+			case model.ApplicationProtocolResultTimeout:
+				reason = model.FailureReasonSSHTimeout
+			case model.ApplicationProtocolResultMalformed:
+				reason = model.FailureReasonSSHBannerMalformed
+			case model.ApplicationProtocolResultFailure:
+				if value.ResponseReceived && value.ServerIdentification == "" {
+					reason = model.FailureReasonSSHNonSSHResponse
+				} else {
+					reason = model.FailureReasonSSHHandshakeFailure
+				}
+			}
+		} else {
+			switch value.ProtocolResult {
+			case model.ApplicationProtocolResultTimeout:
+				reason = model.FailureReasonRDPTimeout
+			case model.ApplicationProtocolResultRejected:
+				reason = model.FailureReasonRDPNegotiationRejected
+			case model.ApplicationProtocolResultMalformed:
+				reason = model.FailureReasonRDPNegotiationMalformed
+			case model.ApplicationProtocolResultFailure:
+				reason = model.FailureReasonRDPNegotiationFailure
+			}
+		}
+	}
+	if activeReason(reason) {
+		addReasonCandidate(state, reason, layer, value.FaultDomain, target, refs, false)
+	}
+}
+
+func firstApplicationDNSFailure(udp, tcp model.DNSApplicationTransportObservation) model.FailureReason {
+	for _, lane := range []model.DNSApplicationTransportObservation{udp, tcp} {
+		if activeReason(lane.FailureReason) {
+			return lane.FailureReason
+		}
+	}
+	return model.FailureReasonNone
 }
 
 func collectEnterprise(state *diagnosisState, value model.EnterprisePolicyObservation, target model.Target) {
@@ -993,12 +1130,19 @@ func compatibilityReasonAllowed(reason model.FailureReason, value model.Observat
 	case model.FailureReasonDNSNXDomain, model.FailureReasonDNSNoAnswer, model.FailureReasonDNSTimeout, model.FailureReasonDNSResolverFailure:
 		return !activeReason(value.NameResolution.FailureReason)
 	case model.FailureReasonTCPTimeout, model.FailureReasonTCPConnectionRefused, model.FailureReasonTCPConnectionReset, model.FailureReasonTCPSYNNotObserved, model.FailureReasonNetworkUnreachable:
-		return !transportHasObservation(value.Transport) && !strongPacketFlow(value, reason, targetFromObservations(value))
+		return !transportHasObservation(value.Transport) && !strongPacketFlow(value, reason, targetFromObservations(value)) && !applicationHasObservation(value.Application)
 	case model.FailureReasonTLSHandshakeFailure, model.FailureReasonCertificateValidationFailure, model.FailureReasonTLSTrustStoreMismatch, model.FailureReasonTLSInterceptionSuspected:
 		return !securityHasObservation(value.Security) && !value.EnterprisePolicy.TLS.PossibleInterception
 	case model.FailureReasonHTTPStatusCode, model.FailureReasonHTTPFailure:
+		return !applicationHasObservation(value.Application) || applicationProtocol(value) != model.ApplicationProtocolHTTP && applicationProtocol(value) != model.ApplicationProtocolHTTPS
+	case model.FailureReasonSSHTimeout, model.FailureReasonSSHBannerMalformed, model.FailureReasonSSHNonSSHResponse, model.FailureReasonSSHHandshakeFailure,
+		model.FailureReasonRDPTimeout, model.FailureReasonRDPNegotiationRejected, model.FailureReasonRDPNegotiationMalformed, model.FailureReasonRDPNegotiationFailure,
+		model.FailureReasonSMBConnectionRefused, model.FailureReasonSMBTimeout, model.FailureReasonSMBProtocolRejection, model.FailureReasonSMBMalformedResponse:
 		return !applicationHasObservation(value.Application)
 	default:
+		if strings.HasPrefix(string(reason), "dns_service_") {
+			return !applicationHasObservation(value.Application)
+		}
 		return true
 	}
 }
@@ -1031,13 +1175,22 @@ func securityHasObservation(value model.SecurityObservation) bool {
 }
 
 func applicationHasObservation(value model.ApplicationObservation) bool {
-	return value.RequestAttempted || value.ResponseReceived || activeReason(value.FailureReason) || len(value.EvidenceIDs) != 0
+	return value.RequestAttempted || value.ResponseReceived || value.HandshakeAttempted || value.HandshakeComplete || activeReason(value.FailureReason) || len(value.EvidenceIDs) != 0 || value.DNS != nil || value.SMB != nil || applicationProtocolResultObserved(value.ProtocolResult)
+}
+
+func applicationProtocolResultObserved(result model.ApplicationProtocolResult) bool {
+	switch result {
+	case "", model.ApplicationProtocolResultUnknown, model.ApplicationProtocolResultNotAttempted:
+		return false
+	default:
+		return true
+	}
 }
 
 func canonicalLayerPresent(value model.Observations, layer model.Layer) bool {
 	switch layer {
 	case model.LayerDNS:
-		return value.NameResolution.RequestedName != "" || value.NameResolution.FailureReason != "" || len(value.NameResolution.EvidenceIDs) != 0 || nameResolutionSucceeded(value.NameResolution)
+		return value.NameResolution.RequestedName != "" || value.NameResolution.FailureReason != "" || len(value.NameResolution.EvidenceIDs) != 0 || nameResolutionSucceeded(value.NameResolution) || applicationProtocol(value) == model.ApplicationProtocolDNS && applicationHasObservation(value.Application)
 	case model.LayerRoute, model.LayerInterface, model.LayerIPConfiguration:
 		return value.NetworkContext.RequestedIdentity != "" || value.NetworkContext.EffectiveRoute != "" && value.NetworkContext.EffectiveRoute != model.RouteDispositionUnknown || value.NetworkContext.FailureReason != "" || len(value.NetworkContext.EvidenceIDs) != 0
 	case model.LayerTCP:
@@ -1045,10 +1198,32 @@ func canonicalLayerPresent(value model.Observations, layer model.Layer) bool {
 	case model.LayerTLS:
 		return securityHasObservation(value.Security) || value.EnterprisePolicy.TLS.PossibleInterception
 	case model.LayerHTTP:
-		return applicationHasObservation(value.Application)
+		return (applicationProtocol(value) == model.ApplicationProtocolHTTP || applicationProtocol(value) == model.ApplicationProtocolHTTPS) && applicationHasObservation(value.Application)
+	case model.LayerSSH:
+		return applicationProtocol(value) == model.ApplicationProtocolSSH && applicationHasObservation(value.Application)
+	case model.LayerRDP:
+		return applicationProtocol(value) == model.ApplicationProtocolRDP && applicationHasObservation(value.Application)
+	case model.LayerSMB:
+		return applicationProtocol(value) == model.ApplicationProtocolSMB && applicationHasObservation(value.Application)
 	default:
 		return false
 	}
+}
+
+func applicationProtocol(value model.Observations) model.ApplicationProtocol {
+	protocol := value.Application.Protocol
+	if protocol == model.ApplicationProtocolNone {
+		protocol = value.Endpoint.ApplicationProtocol
+	}
+	if protocol == model.ApplicationProtocolNone {
+		switch {
+		case value.Application.DNS != nil:
+			return model.ApplicationProtocolDNS
+		case value.Application.SMB != nil:
+			return model.ApplicationProtocolSMB
+		}
+	}
+	return protocol
 }
 
 func compatibilitySuccessCanFillGap(value model.Observations, layer model.Layer) bool {
@@ -1059,7 +1234,7 @@ func compatibilitySuccessCanFillGap(value model.Observations, layer model.Layer)
 }
 
 func hasCanonicalObservations(value model.Observations) bool {
-	return value.Endpoint.RequestedIdentity != "" || value.Endpoint.Port != 0 || len(value.Endpoint.ResolvedCandidates) != 0 || len(value.Endpoint.CandidateAttempts) != 0 || value.NameResolution.RequestedName != "" || len(value.NameResolution.EvidenceIDs) != 0 || value.NetworkContext.RequestedIdentity != "" || value.NetworkContext.EffectiveRoute != "" && value.NetworkContext.EffectiveRoute != model.RouteDispositionUnknown || len(value.NetworkContext.EvidenceIDs) != 0 || activeReason(value.Transport.FailureReason) || value.Transport.ConnectionOutcome != "" && value.Transport.ConnectionOutcome != model.TransportConnectionOutcomeUnknown || value.Security.FailureReason != "" || value.Security.Attempted || value.Application.FailureReason != "" || value.Application.RequestAttempted || value.EnterprisePolicy.State != "" && value.EnterprisePolicy.State != model.EnterpriseObservationStateUnknown || len(value.Paths) != 0 || len(value.PacketFlows) != 0
+	return value.Endpoint.RequestedIdentity != "" || value.Endpoint.Port != 0 || len(value.Endpoint.ResolvedCandidates) != 0 || len(value.Endpoint.CandidateAttempts) != 0 || value.NameResolution.RequestedName != "" || len(value.NameResolution.EvidenceIDs) != 0 || value.NetworkContext.RequestedIdentity != "" || value.NetworkContext.EffectiveRoute != "" && value.NetworkContext.EffectiveRoute != model.RouteDispositionUnknown || len(value.NetworkContext.EvidenceIDs) != 0 || activeReason(value.Transport.FailureReason) || value.Transport.ConnectionOutcome != "" && value.Transport.ConnectionOutcome != model.TransportConnectionOutcomeUnknown || value.Security.FailureReason != "" || value.Security.Attempted || applicationHasObservation(value.Application) || value.Application.Applicability != model.ObservationApplicabilityUnknown || value.EnterprisePolicy.State != "" && value.EnterprisePolicy.State != model.EnterpriseObservationStateUnknown || len(value.Paths) != 0 || len(value.PacketFlows) != 0
 }
 
 func enterpriseConflictEvidenceIDs(value model.EnterprisePolicyObservation) []string {
