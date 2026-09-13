@@ -114,7 +114,7 @@ func (p SystemProvider) Snapshot(ctx context.Context) (Snapshot, error) {
 		snapshot.Interfaces = append(snapshot.Interfaces, state)
 	}
 
-	servers, resolverSource, resolverErr := readConfiguredDNSServers(p.ResolverConfigPath)
+	servers, resolverSource, resolverErr := readConfiguredDNSServers(ctx, p.ResolverConfigPath)
 	if resolverErr != nil && !errors.Is(resolverErr, ErrUnsupported) {
 		// Interface observations remain useful even if resolver configuration
 		// cannot be read.  Keep the error for the dedicated DNS config probe,

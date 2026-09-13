@@ -42,7 +42,9 @@ type RouteTableFunc func(context.Context) ([]Route, error)
 func (f RouteTableFunc) Routes(ctx context.Context) ([]Route, error) { return f(ctx) }
 
 // ReachabilityChecker tests a gateway. It should only provide supporting
-// evidence; callers must not use its failure as an end-to-end conclusion.
+// evidence; callers must not use its failure as an end-to-end conclusion. The
+// default checker reports unsupported because UDP setup is not reachability;
+// callers may inject a platform-native bounded ICMP checker.
 type ReachabilityChecker func(context.Context, netip.Addr) error
 
 const defaultProbeTimeout = 2 * time.Second

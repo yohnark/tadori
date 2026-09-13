@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +46,35 @@ func TestSelectRejectsInvalidOrUnmatchedTarget(t *testing.T) {
 	}
 	if _, ok := Select([]Route{{Destination: netip.MustParsePrefix("192.0.2.0/24")}}, netip.MustParseAddr("198.51.100.4")); ok {
 		t.Fatal("unmatched route unexpectedly selected")
+	}
+}
+
+func TestParseWindowsRouteOutputIsStructuredAndOffline(t *testing.T) {
+	ipv4 := `IPv4 Route Table
+Network Destination        Netmask          Gateway       Interface  Metric
+          0.0.0.0          0.0.0.0      192.0.2.1      192.0.2.10     25
+        192.0.2.0    255.255.255.0         On-link      192.0.2.10    281`
+	routes := parseWindowsRouteOutput(ipv4, 4)
+	if len(routes) != 2 || routes[0].Destination.String() != "0.0.0.0/0" || routes[0].Metric != 25 {
+		t.Fatalf("IPv4 parsed routes = %#v", routes)
+	}
+	if routes[1].Gateway.IsValid() {
+		t.Fatalf("On-link gateway should be absent: %#v", routes[1])
+	}
+	ipv6 := `IPv6 Route Table
+Active Routes:
+ If Metric Network Destination      Gateway
+ 11    331 ::/0                     fe80::1
+ No Manual 256 2001:db8::/64        16`
+	routes = parseWindowsRouteOutput(ipv6, 6)
+	if len(routes) != 2 {
+		t.Fatalf("IPv6 parsed routes = %#v", routes)
+	}
+	if routes[0].Destination.String() != "::/0" || routes[0].Gateway.String() != "fe80::1" || routes[0].Metric != 331 || routes[0].InterfaceIndex != 11 {
+		t.Fatalf("IPv6 default route = %#v", routes[0])
+	}
+	if routes[1].Destination.String() != "2001:db8::/64" || routes[1].Metric != 256 || routes[1].InterfaceIndex != 16 {
+		t.Fatalf("IPv6 verbose route = %#v", routes[1])
 	}
 }
 
@@ -111,6 +141,17 @@ func TestGatewayProbeSuccessAndFailureAreSupportingEvidence(t *testing.T) {
 	}
 	if string(got.Evidence[0].Raw) == "" {
 		t.Fatal("gateway evidence absent")
+	}
+}
+
+func TestGatewayProbeDefaultIsHonestAboutUnsupportedICMP(t *testing.T) {
+	p := NewGatewayProbe(fixtureRouteTable{routes: fixtureRoutes()})
+	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "192.0.2.200"}})
+	if got.Status != model.ProbeStatusError || got.Interpretation.FailureReason != model.FailureReasonUnsupported {
+		t.Fatalf("default checker result = %#v", got)
+	}
+	if len(got.Evidence) != 1 || !strings.Contains(string(got.Evidence[0].Raw), "supporting_only") {
+		t.Fatalf("unsupported gateway evidence = %#v", got.Evidence)
 	}
 }
 

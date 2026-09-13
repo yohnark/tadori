@@ -4,13 +4,17 @@ package interfacecfg
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"net/netip"
 	"os"
 	"strings"
 )
 
-func readConfiguredDNSServers(path string) ([]netip.Addr, string, error) {
+func readConfiguredDNSServers(ctx context.Context, path string) ([]netip.Addr, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "resolv.conf", err
+	}
 	if path == "" {
 		path = "/etc/resolv.conf"
 	}
@@ -26,6 +30,9 @@ func readConfiguredDNSServers(path string) ([]netip.Addr, string, error) {
 	servers := make([]netip.Addr, 0, 3)
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, "resolv.conf", err
+		}
 		line := strings.TrimSpace(strings.SplitN(scanner.Text(), "#", 2)[0])
 		fields := strings.Fields(line)
 		if len(fields) < 2 || fields[0] != "nameserver" {

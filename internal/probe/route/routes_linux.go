@@ -91,6 +91,7 @@ func parseLinuxIPv4Routes(path string) ([]Route, error) {
 		if !ok {
 			continue
 		}
+		// /proc/net/route's metric is displayed as a decimal field.
 		metric := 0
 		if len(fields) > 6 {
 			metric, _ = strconv.Atoi(fields[6])
@@ -142,7 +143,13 @@ func parseLinuxIPv6Routes(path string) ([]Route, error) {
 		if !ok {
 			continue
 		}
-		metric, _ := strconv.Atoi(fields[5])
+		// /proc/net/ipv6_route stores metric as an eight-digit hexadecimal
+		// value (unlike the IPv4 table's decimal metric).
+		metricValue, metricErr := strconv.ParseUint(fields[5], 16, 32)
+		metric := 0
+		if metricErr == nil {
+			metric = int(metricValue)
+		}
 		name := fields[9]
 		routes = append(routes, Route{
 			Destination:    netip.PrefixFrom(destination, prefix).Masked(),

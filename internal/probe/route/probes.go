@@ -171,7 +171,7 @@ func (p *GatewayProbe) Run(ctx context.Context, execution probe.ExecutionContext
 	routes, err := p.routes(callCtx)
 	completed := time.Now().UTC()
 	if err != nil {
-		evidence := []model.Evidence{routeErrorEvidence("gateway-reachability-1", err)}
+		evidence := []model.Evidence{routeEvidence("gateway-reachability-1", map[string]any{"error": err.Error(), "supporting_only": true})}
 		return routeResult(execution.Target, p.Name(), started, completed, evidence, statusForError(err), reasonForError(err), model.LayerGateway, model.FaultDomainGateway)
 	}
 	var selected Route
@@ -207,7 +207,11 @@ func (p *GatewayProbe) Run(ctx context.Context, execution probe.ExecutionContext
 	raw["supporting_only"] = true
 	if err != nil {
 		raw["error"] = err.Error()
-		return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("gateway-reachability-1", raw)}, model.ProbeStatusFailed, gatewayReason(err), model.LayerGateway, model.FaultDomainGateway)
+		status := model.ProbeStatusFailed
+		if errors.Is(err, ErrUnsupported) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			status = model.ProbeStatusError
+		}
+		return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("gateway-reachability-1", raw)}, status, gatewayReason(err), model.LayerGateway, model.FaultDomainGateway)
 	}
 	return routeResult(execution.Target, p.Name(), started, completed, []model.Evidence{routeEvidence("gateway-reachability-1", raw)}, model.ProbeStatusPassed, model.FailureReasonNone, model.LayerGateway, model.FaultDomainGateway)
 }
@@ -261,18 +265,17 @@ func targetFamily(target model.Target) int {
 }
 
 func defaultGatewayChecker(ctx context.Context, gateway netip.Addr) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !gateway.IsValid() {
 		return errors.New("gateway address is invalid")
 	}
-	// UDP connect asks the kernel to resolve the local next hop without
-	// requiring raw-socket privileges. It is supporting evidence only; a
-	// successful UDP connect does not prove that the application target works.
-	address := net.JoinHostPort(gateway.String(), "33434")
-	connection, err := (&net.Dialer{}).DialContext(ctx, "udp", address)
-	if err != nil {
-		return err
-	}
-	return connection.Close()
+	// The standard library does not expose a portable ICMP echo API. Do not
+	// substitute a UDP connect: UDP connect only performs local route setup and
+	// cannot establish gateway reachability. Platform callers can inject a
+	// native ICMP checker through GatewayProbe.Checker.
+	return ErrUnsupported
 }
 
 func selectedRouteEvidence(routeType string, selected Route, target string) map[string]any {
@@ -343,6 +346,9 @@ func gatewayReason(err error) model.FailureReason {
 	var timeoutError net.Error
 	if errors.As(err, &timeoutError) && timeoutError.Timeout() {
 		return model.FailureReason(FailureReasonProbeTimeout)
+	}
+	if errors.Is(err, ErrUnsupported) {
+		return model.FailureReasonUnsupported
 	}
 	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
 		return model.FailureReason(FailureReasonInsufficientPrivilege)
