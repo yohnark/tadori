@@ -91,6 +91,26 @@ func TestRunAgainstLocalFixture(t *testing.T) {
 	if tcpResult.Status != model.ProbeStatusPassed {
 		t.Errorf("tcp probe status = %s, want passed", tcpResult.Status)
 	}
+	for _, name := range []string{"tcp", "path"} {
+		probeResult := findProbe(t, got.Probes, name)
+		var packetEvidence model.Evidence
+		for _, evidence := range probeResult.Evidence {
+			if evidence.Kind == model.EvidenceKindPacketFlow {
+				packetEvidence = evidence
+				break
+			}
+		}
+		if packetEvidence.ID == "" {
+			t.Fatalf("%s probe has no packet-flow evidence", name)
+		}
+		flow, err := model.DecodePacketFlowEvidence(packetEvidence)
+		if err != nil {
+			t.Fatalf("decode %s packet-flow evidence: %v", name, err)
+		}
+		if flow.SessionID != got.SessionID || flow.ProbeID != name || flow.CorrelationID != got.SessionID+"/"+name {
+			t.Errorf("%s flow identity = %#v, report session = %q", name, flow, got.SessionID)
+		}
+	}
 }
 
 func TestRunProgressHooksTrackEveryCanonicalProbe(t *testing.T) {

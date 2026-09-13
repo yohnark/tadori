@@ -84,6 +84,7 @@ const (
 	FailureReasonTCPTimeout                   FailureReason = "tcp_timeout"
 	FailureReasonTCPConnectionRefused         FailureReason = "tcp_connection_refused"
 	FailureReasonTCPConnectionReset           FailureReason = "tcp_connection_reset"
+	FailureReasonTCPSYNNotObserved            FailureReason = "tcp_syn_not_observed"
 	FailureReasonTLSHandshakeFailure          FailureReason = "tls_handshake_failure"
 	FailureReasonCertificateValidationFailure FailureReason = "certificate_validation_failure"
 	FailureReasonTLSTrustStoreMismatch        FailureReason = "tls_trust_store_mismatch"
@@ -166,6 +167,7 @@ const (
 	EvidenceKindAdapterRouting      EvidenceKind = "adapter_routing"
 	EvidenceKindRouteComparison     EvidenceKind = "route_comparison"
 	EvidenceKindICMP                EvidenceKind = "icmp"
+	EvidenceKindPacketFlow          EvidenceKind = "packet_flow"
 )
 
 // Timing records execution timing. Timestamps are optional to support probes
@@ -204,6 +206,9 @@ type ProbeInterpretation struct {
 type ProbeResult struct {
 	Name           string              `json:"name"`
 	Target         Target              `json:"target"`
+	SessionID      string              `json:"session_id,omitempty"`
+	ProbeID        string              `json:"probe_id,omitempty"`
+	CorrelationID  string              `json:"correlation_id,omitempty"`
 	Status         ProbeStatus         `json:"status"`
 	Timing         Timing              `json:"timing"`
 	Evidence       []Evidence          `json:"evidence,omitempty"`
@@ -227,6 +232,7 @@ type DiagnosticFinding struct {
 type DiagnosticReport struct {
 	SchemaVersion string              `json:"schema_version"`
 	Target        Target              `json:"target"`
+	SessionID     string              `json:"session_id,omitempty"`
 	Status        ReportStatus        `json:"status"`
 	StartedAt     *time.Time          `json:"started_at,omitempty"`
 	CompletedAt   *time.Time          `json:"completed_at,omitempty"`

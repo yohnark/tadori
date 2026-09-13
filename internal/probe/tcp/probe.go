@@ -123,7 +123,7 @@ func (p Probe) Run(ctx context.Context, execution probecontract.ExecutionContext
 			Error:             addressErr.Error(),
 			ErrorType:         fmt.Sprintf("%T", addressErr),
 		}
-		return p.result(target, start, completed, model.ProbeStatusError, FailureReasonTCPInvalidAddress, model.FaultDomainLocal, observation)
+		return p.result(execution, start, completed, model.ProbeStatusError, FailureReasonTCPInvalidAddress, model.FaultDomainLocal, observation)
 	}
 
 	// Check before constructing the child context so an already-cancelled
@@ -139,7 +139,7 @@ func (p Probe) Run(ctx context.Context, execution probecontract.ExecutionContext
 		if errors.Is(err, context.DeadlineExceeded) {
 			reason = model.FailureReasonTCPTimeout
 		}
-		return p.result(target, start, completed, model.ProbeStatusError, reason, faultDomainFor(reason), observation)
+		return p.result(execution, start, completed, model.ProbeStatusError, reason, faultDomainFor(reason), observation)
 	}
 
 	timeout := boundedTimeout(p.Timeout)
@@ -167,7 +167,7 @@ func (p Probe) Run(ctx context.Context, execution probecontract.ExecutionContext
 			err = errors.New("dialer returned a nil connection without an error")
 		}
 		if err == nil {
-			return p.result(target, start, completed, model.ProbeStatusPassed, model.FailureReasonNone, model.FaultDomainTransport, observation)
+			return p.result(execution, start, completed, model.ProbeStatusPassed, model.FailureReasonNone, model.FaultDomainTransport, observation)
 		}
 	}
 
@@ -180,7 +180,7 @@ func (p Probe) Run(ctx context.Context, execution probecontract.ExecutionContext
 		ErrorType:         fmt.Sprintf("%T", err),
 	}
 	addErrorDetails(&observation, err)
-	return p.result(target, start, completed, status, reason, faultDomainFor(reason), observation)
+	return p.result(execution, start, completed, status, reason, faultDomainFor(reason), observation)
 }
 
 // RunTarget is a convenience one-shot operation for callers that do not need
@@ -203,7 +203,8 @@ type tcpObservation struct {
 	Network           string `json:"network,omitempty"`
 }
 
-func (Probe) result(target model.Target, start, completed time.Time, status model.ProbeStatus, reason model.FailureReason, domain model.FaultDomain, observation tcpObservation) model.ProbeResult {
+func (Probe) result(execution probecontract.ExecutionContext, start, completed time.Time, status model.ProbeStatus, reason model.FailureReason, domain model.FaultDomain, observation tcpObservation) model.ProbeResult {
+	target := execution.Target
 	elapsed := completed.Sub(start)
 	if elapsed < 0 {
 		elapsed = 0
@@ -219,9 +220,12 @@ func (Probe) result(target model.Target, start, completed time.Time, status mode
 	startedAt := start.UTC()
 	completedAt := completed.UTC()
 	return model.ProbeResult{
-		Name:   "tcp",
-		Target: target,
-		Status: status,
+		Name:          "tcp",
+		Target:        target,
+		SessionID:     execution.SessionID,
+		ProbeID:       execution.ProbeID,
+		CorrelationID: execution.CorrelationID,
+		Status:        status,
 		Timing: model.Timing{
 			StartedAt:   &startedAt,
 			CompletedAt: &completedAt,

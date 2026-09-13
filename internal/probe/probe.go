@@ -12,7 +12,10 @@ import (
 // Cancellation and deadlines belong in ctx, following the standard Go
 // context contract.
 type ExecutionContext struct {
-	Target model.Target
+	Target        model.Target
+	SessionID     string
+	ProbeID       string
+	CorrelationID string
 }
 
 // Probe executes one kind of observation for an endpoint.

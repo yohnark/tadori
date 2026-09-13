@@ -97,6 +97,9 @@ type Snapshot struct {
 // production adapter passes these callbacks into orchestrate.Run; test or
 // future runners can use the same contract without depending on HTTP.
 type Progress struct {
+	// SessionID is the manager-owned identity that packet evidence and other
+	// scoped orchestration lanes may use for deterministic correlation.
+	SessionID      string
 	ProbeStarted   func(name string)
 	ProbeCompleted func(result model.ProbeResult)
 	// Emit lets a future orchestration lane publish a typed extension event,
@@ -378,6 +381,7 @@ func (m *Manager) execute(s *managedSession) {
 	ctx, cancel := context.WithTimeout(s.ctx, m.timeout)
 	defer cancel()
 	progress := Progress{
+		SessionID: s.id,
 		ProbeStarted: func(name string) {
 			s.emit(Event{Type: EventProbeStarted, ProbeName: name})
 		},
