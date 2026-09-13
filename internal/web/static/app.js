@@ -34,58 +34,34 @@
   const evidence = document.querySelector("#evidence");
   const evidenceHeading = document.querySelector("#evidence-heading");
   const canonicalJSON = document.querySelector("#canonical-json");
+  const composer = globalThis.TadoriTargetComposer;
 
   let currentView = null;
   let activeSessionID = "";
   let eventSource = null;
   const progressItems = new Map();
-  let portWasEdited = false;
+  let composerState = composer.createState({ service: serviceInput.value });
 
-  function selectedServiceOption() {
-    return serviceInput.options[serviceInput.selectedIndex];
+  function renderComposerState() {
+    serviceInput.value = composerState.service.value || "";
+    portInput.value = composerState.port.value === null ? "" : String(composerState.port.value);
   }
 
-  function applyServiceDefaultPort() {
-    if (!portWasEdited) {
-      portInput.value = selectedServiceOption()?.dataset.defaultPort || "";
-    }
-  }
-
-  function updateComposerFromExplicitInput() {
-    const value = targetInput.value.trim();
-    const lower = value.toLowerCase();
-    let explicitService = "";
-    if (lower.startsWith("https://")) {
-      explicitService = "https";
-    } else if (lower.startsWith("http://")) {
-      explicitService = "http";
-    } else if (value.startsWith("\\")) {
-      explicitService = "smb";
-    }
-    if (explicitService) {
-      serviceInput.value = explicitService;
-      applyServiceDefaultPort();
-      try {
-        const parsed = new URL(value);
-        if (parsed.port) {
-          portInput.value = parsed.port;
-          portWasEdited = true;
-        }
-      } catch (_) {
-        // Backend normalization remains authoritative for incomplete input.
-      }
-    }
+  function transitionComposer(event) {
+    composerState = composer.transition(composerState, event);
+    renderComposerState();
   }
 
   serviceInput.addEventListener("change", () => {
-    portWasEdited = false;
-    applyServiceDefaultPort();
+    transitionComposer({ type: composer.EVENT.SERVICE_CHANGED, value: serviceInput.value });
   });
   portInput.addEventListener("input", () => {
-    portWasEdited = true;
+    transitionComposer({ type: composer.EVENT.PORT_CHANGED, value: portInput.value });
   });
-  targetInput.addEventListener("input", updateComposerFromExplicitInput);
-  applyServiceDefaultPort();
+  targetInput.addEventListener("input", () => {
+    transitionComposer({ type: composer.EVENT.TARGET_CHANGED, value: targetInput.value });
+  });
+  renderComposerState();
 
   function text(value) {
     return value === undefined || value === null ? "" : String(value);
@@ -895,13 +871,7 @@
       const response = await fetch("/api/diagnoses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          target: {
-            input: targetInput.value,
-            service: serviceInput.value,
-            ...(portWasEdited && portInput.value ? { port: Number(portInput.value) } : {}),
-          },
-        }),
+        body: JSON.stringify(composer.serialize(composerState)),
       });
       const snapshot = await readResponse(response);
       activeSessionID = text(snapshot.id);
