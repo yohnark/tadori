@@ -39,8 +39,8 @@ type Options struct {
 // per-probe timeouts, and returns a diagnosed report. A probe that fails or
 // errors does not prevent the other probes' results from being collected:
 // every probe result reaching the report is preserved even when other probes
-// fail, so the returned report is complete whenever at least the requested
-// probes had a chance to run within ctx.
+// fail. Report status is then aggregated from the canonical probe results;
+// diagnosis remains a separate interpretation of those results.
 func Run(ctx context.Context, target model.Target, opts Options) model.DiagnosticReport {
 	now := opts.Now
 	if now == nil {
@@ -213,10 +213,40 @@ func reportStatus(results []model.ProbeResult) model.ReportStatus {
 	if len(results) == 0 {
 		return model.ReportStatusUnknown
 	}
+
+	// A successful HTTP observation establishes the end-to-end result. In
+	// particular, a successful response must not be downgraded because a
+	// weaker supporting probe could not run. Only a canonical successful
+	// interpretation has this early-dominance rule; an actual failure still
+	// participates in the incomplete-evidence check below.
 	for _, result := range results {
-		if result.Status == model.ProbeStatusError {
+		if result.Interpretation.Layer == model.LayerHTTP &&
+			result.Status == model.ProbeStatusPassed &&
+			result.Interpretation.FailureReason == model.FailureReasonNone {
+			return model.ReportStatusComplete
+		}
+	}
+
+	for _, result := range results {
+		if (result.Status == model.ProbeStatusError || result.Status == model.ProbeStatusSkipped) && !nonFatalUnavailable(result) {
 			return model.ReportStatusIncomplete
 		}
 	}
 	return model.ReportStatusComplete
+}
+
+// nonFatalUnavailable identifies probes whose absence is expected on some
+// platforms and does not, by itself, make the collected connectivity evidence
+// inconclusive. The classification is derived from the structured
+// interpretation, never from probe names or raw evidence.
+func nonFatalUnavailable(result model.ProbeResult) bool {
+	if result.Interpretation.FailureReason != model.FailureReasonUnsupported {
+		return false
+	}
+	switch result.Interpretation.Layer {
+	case model.LayerGateway, model.LayerICMP, model.LayerProxy:
+		return true
+	default:
+		return false
+	}
 }
