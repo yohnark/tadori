@@ -131,27 +131,36 @@ type SecurityObservation struct {
 // from client-side transport failures. HTTP fields remain populated for HTTP;
 // DNS service details use DNS.
 type ApplicationObservation struct {
-	Applicability     ObservationApplicability   `json:"applicability"`
-	RequestAttempted  bool                       `json:"request_attempted"`
-	ResponseReceived  bool                       `json:"response_received"`
-	HTTPVersion       string                     `json:"http_version,omitempty"`
-	StatusCode        int                        `json:"status_code,omitempty"`
-	Status            string                     `json:"status,omitempty"`
-	Result            ApplicationResult          `json:"result"`
-	Timing            Timing                     `json:"timing"`
-	RequestedResource string                     `json:"requested_resource,omitempty"`
-	EndpointUsed      *Endpoint                  `json:"endpoint_used,omitempty"`
-	URL               string                     `json:"url,omitempty"`
-	Redirects         []HTTPRedirectObservation  `json:"redirects,omitempty"`
-	DNS               *DNSApplicationObservation `json:"dns,omitempty"`
-	FailureReason     FailureReason              `json:"failure_reason"`
-	FaultDomain       FaultDomain                `json:"fault_domain"`
-	Provenance        []string                   `json:"provenance,omitempty"`
-	Certainty         ObservationCertainty       `json:"certainty"`
-	ProbeNames        []string                   `json:"probe_names,omitempty"`
-	EvidenceIDs       []string                   `json:"evidence_ids,omitempty"`
-	Limitations       []string                   `json:"limitations,omitempty"`
-	Conflicts         []ObservationConflict      `json:"conflicts,omitempty"`
+	Applicability              ObservationApplicability   `json:"applicability"`
+	RequestAttempted           bool                       `json:"request_attempted"`
+	ResponseReceived           bool                       `json:"response_received"`
+	TransportConnected         bool                       `json:"transport_connected,omitempty"`
+	Protocol                   ApplicationProtocol        `json:"protocol,omitempty"`
+	HandshakeAttempted         bool                       `json:"handshake_attempted,omitempty"`
+	HandshakeComplete          bool                       `json:"handshake_complete,omitempty"`
+	ProtocolResult             ApplicationProtocolResult  `json:"protocol_result,omitempty"`
+	ServerIdentification       string                     `json:"server_identification,omitempty"`
+	RequestedSecurityProtocols []string                   `json:"requested_security_protocols,omitempty"`
+	NegotiatedSecurityProtocol string                     `json:"negotiated_security_protocol,omitempty"`
+	HTTPVersion                string                     `json:"http_version,omitempty"`
+	StatusCode                 int                        `json:"status_code,omitempty"`
+	Status                     string                     `json:"status,omitempty"`
+	Result                     HTTPResult                 `json:"result"`
+	Timing                     Timing                     `json:"timing"`
+	RequestedResource          string                     `json:"requested_resource,omitempty"`
+	EndpointUsed               *Endpoint                  `json:"endpoint_used,omitempty"`
+	URL                        string                     `json:"url,omitempty"`
+	Redirects                  []HTTPRedirectObservation  `json:"redirects,omitempty"`
+	DNS                        *DNSApplicationObservation `json:"dns,omitempty"`
+	FailureReason              FailureReason              `json:"failure_reason"`
+	FaultDomain                FaultDomain                `json:"fault_domain"`
+	Provenance                 []string                   `json:"provenance,omitempty"`
+	Certainty                  ObservationCertainty       `json:"certainty"`
+	ProbeNames                 []string                   `json:"probe_names,omitempty"`
+	EvidenceIDs                []string                   `json:"evidence_ids,omitempty"`
+	Limitations                []string                   `json:"limitations,omitempty"`
+	Conflicts                  []ObservationConflict      `json:"conflicts,omitempty"`
+	SMB                        *SMBApplicationObservation `json:"smb,omitempty"`
 }
 
 // ApplicationResult is shared by application protocols. HTTPResult remains a
@@ -159,6 +168,21 @@ type ApplicationObservation struct {
 type ApplicationResult string
 
 type HTTPResult = ApplicationResult
+
+// ApplicationProtocolResult is used by non-HTTP service handshakes. HTTP
+// retains HTTPResult for wire compatibility with the existing contract.
+type ApplicationProtocolResult string
+
+const (
+	ApplicationProtocolResultUnknown      ApplicationProtocolResult = "unknown"
+	ApplicationProtocolResultSuccess      ApplicationProtocolResult = "success"
+	ApplicationProtocolResultFailure      ApplicationProtocolResult = "failure"
+	ApplicationProtocolResultRejected     ApplicationProtocolResult = "rejected"
+	ApplicationProtocolResultMalformed    ApplicationProtocolResult = "malformed"
+	ApplicationProtocolResultTimeout      ApplicationProtocolResult = "timeout"
+	ApplicationProtocolResultNotAttempted ApplicationProtocolResult = "not_attempted"
+	ApplicationProtocolResultUnsupported  ApplicationProtocolResult = "unsupported"
+)
 
 const (
 	HTTPResultUnknown        ApplicationResult = "unknown"
@@ -295,6 +319,7 @@ func NormalizeApplicationObservation(value ApplicationObservation) ApplicationOb
 	value.Provenance = append([]string(nil), value.Provenance...)
 	value.ProbeNames = append([]string(nil), value.ProbeNames...)
 	value.EvidenceIDs = append([]string(nil), value.EvidenceIDs...)
+	value.RequestedSecurityProtocols = append([]string(nil), value.RequestedSecurityProtocols...)
 	value.Limitations = append([]string(nil), value.Limitations...)
 	value.Conflicts = cloneObservationConflicts(value.Conflicts)
 	value.Redirects = append([]HTTPRedirectObservation(nil), value.Redirects...)
@@ -311,6 +336,11 @@ func NormalizeApplicationObservation(value ApplicationObservation) ApplicationOb
 		dns.UDP = normalizeDNSApplicationTransportObservation(dns.UDP)
 		dns.TCP = normalizeDNSApplicationTransportObservation(dns.TCP)
 		value.DNS = &dns
+	}
+	if value.SMB != nil {
+		smb := *value.SMB
+		smb.Capabilities = append([]string(nil), smb.Capabilities...)
+		value.SMB = &smb
 	}
 	return value
 }

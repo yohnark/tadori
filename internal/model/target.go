@@ -42,8 +42,7 @@ const (
 )
 
 // ProbeIntent describes the applicable higher-layer observation. Profiles
-// describe intent while the orchestrator dispatches the probe implementations
-// owned by each supported protocol package.
+// describe intent while the orchestrator dispatches bounded protocol probes.
 type ProbeIntent string
 
 const (

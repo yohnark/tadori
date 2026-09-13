@@ -21,6 +21,12 @@
   const destinationReferences = document.querySelector("#destination-references");
   const overallStatus = document.querySelector("#overall-status");
   const reportTarget = document.querySelector("#report-target");
+  const endpointObservation = document.querySelector("#endpoint-observation");
+  const endpointCandidates = document.querySelector("#endpoint-candidates");
+  const transportObservation = document.querySelector("#transport-observation");
+  const securityObservation = document.querySelector("#security-observation");
+  const applicationObservation = document.querySelector("#application-observation");
+  const policyObservation = document.querySelector("#policy-observation");
   const nameResolution = document.querySelector("#name-resolution");
   const nameResolutionEmpty = document.querySelector("#name-resolution-empty");
   const networkContextPanel = document.querySelector("#network-context-panel");
@@ -371,17 +377,320 @@
     }
   }
 
+  function renderEndpointObservation(endpoint) {
+    endpointObservation.replaceChildren();
+    endpointCandidates.replaceChildren();
+    if (!endpoint || !endpoint.requested_identity) {
+      endpointObservation.appendChild(element("div", "empty-state compact", "No normalized endpoint observation is available."));
+      return;
+    }
+    appendObservationRows(endpointObservation, [
+      ["Original input", endpoint.original_input],
+      ["Requested identity", endpoint.requested_identity],
+      ["Literal IP", endpoint.literal_ip],
+      ["Service", endpoint.service && (endpoint.service.label || endpoint.service.id)],
+      ["Application protocol", endpoint.application_protocol],
+      ["Transport protocol", endpoint.transport_protocol],
+      ["Port", endpoint.port || "not specified"],
+      ["Resource", endpoint.resource],
+      ["Selected endpoint", endpointText(endpoint.selected_endpoint)],
+      ["Tested endpoint", endpointText(endpoint.tested_endpoint)],
+      ["Certainty", endpoint.certainty],
+      ["Provenance", listText(endpoint.provenance)],
+      ["Evidence", referenceValue(endpoint.evidence_ids)],
+    ]);
+    renderCandidateTable(endpointCandidates, "Resolved candidates", endpoint.resolved_candidates);
+    renderCandidateTable(endpointCandidates, "Probe candidates", endpoint.probe_candidates);
+    if (endpoint.candidate_attempts && endpoint.candidate_attempts.length) {
+      const title = element("h3", "observation-subheading", "Candidate attempts");
+      endpointCandidates.appendChild(title);
+      const table = element("table", "observation-grid");
+      appendTableHeader(table, ["Candidate", "Status", "Failure", "Evidence"]);
+      const body = table.querySelector("tbody");
+      for (const attempt of endpoint.candidate_attempts) {
+        const row = element("tr");
+        row.appendChild(element("td", "", endpointText(attempt.candidate)));
+        row.appendChild(element("td", "", attempt.status));
+        row.appendChild(element("td", "", attempt.failure_reason || "none"));
+        row.appendChild(referenceCell(attempt.evidence_ids));
+        body.appendChild(row);
+      }
+      endpointCandidates.appendChild(table);
+    }
+  }
+
+  function renderCandidateTable(container, title, candidates) {
+    if (!candidates || !candidates.length) {
+      return;
+    }
+    container.appendChild(element("h3", "observation-subheading", title));
+    const table = element("table", "observation-grid");
+    appendTableHeader(table, ["Address", "Family", "Order", "Certainty", "Provenance", "Evidence"]);
+    const body = table.querySelector("tbody");
+    for (const candidate of candidates) {
+      const row = element("tr");
+      row.appendChild(element("td", "", candidate.address));
+      row.appendChild(element("td", "", candidate.family));
+      row.appendChild(element("td", "", candidate.order));
+      row.appendChild(element("td", "", candidate.certainty || "unknown"));
+      row.appendChild(element("td", "", candidate.provenance || "not specified"));
+      row.appendChild(referenceCell(candidate.evidence_ids));
+      body.appendChild(row);
+    }
+    container.appendChild(table);
+  }
+
+  function renderOperationalObservations(observations) {
+    renderTransportObservation(observations && observations.transport);
+    renderSecurityObservation(observations && observations.security);
+    renderApplicationObservation(observations && observations.application);
+  }
+
+  function renderTransportObservation(observation) {
+    renderObservationOrEmpty(transportObservation, observation, [
+      ["Applicability", "applicability"],
+      ["Requested endpoint", "requested_endpoint"],
+      ["Probe endpoint", "probe_endpoint", endpointText],
+      ["Tested endpoint", "tested_endpoint", endpointText],
+      ["Connection outcome", "connection_outcome"],
+      ["Connected", "connected", booleanText],
+      ["Local endpoint", "local_endpoint"],
+      ["Remote endpoint", "remote_endpoint", endpointText],
+      ["Failure reason", "failure_reason"],
+      ["Fault domain", "fault_domain"],
+      ["Certainty", "certainty"],
+      ["Limitations", "limitations", listText],
+      ["Evidence", "evidence_ids", referenceValue],
+    ]);
+  }
+
+  function renderSecurityObservation(observation) {
+    renderObservationOrEmpty(securityObservation, observation, [
+      ["Applicability", "applicability"],
+      ["Attempted", "attempted", booleanText],
+      ["Handshake complete", "handshake_complete", booleanText],
+      ["TLS version", "tls_version"],
+      ["Cipher suite", "cipher_suite"],
+      ["Negotiated protocol", "negotiated_protocol"],
+      ["Server name", "server_name"],
+      ["Endpoint used", "endpoint_used", endpointText],
+      ["Certificate validation", "certificate_validation"],
+      ["Peer certificates", "peer_certificate_count"],
+      ["Failure reason", "failure_reason"],
+      ["Fault domain", "fault_domain"],
+      ["Certainty", "certainty"],
+      ["Limitations", "limitations", listText],
+      ["Evidence", "evidence_ids", referenceValue],
+    ]);
+  }
+
+  function renderApplicationObservation(observation) {
+    renderObservationOrEmpty(applicationObservation, observation, [
+      ["Applicability", "applicability"],
+      ["Request attempted", "request_attempted", booleanText],
+      ["Response received", "response_received", booleanText],
+      ["Result", "result"],
+      ["HTTP version", "http_version"],
+      ["Status code", "status_code"],
+      ["Status", "status"],
+      ["Requested resource", "requested_resource"],
+      ["Endpoint used", "endpoint_used", endpointText],
+      ["URL", "url"],
+      ["Redirects", "redirects", redirectText],
+      ["Failure reason", "failure_reason"],
+      ["Fault domain", "fault_domain"],
+      ["Certainty", "certainty"],
+      ["Limitations", "limitations", listText],
+      ["Evidence", "evidence_ids", referenceValue],
+    ]);
+  }
+
+  function renderPolicyObservation(observation) {
+    policyObservation.replaceChildren();
+    if (!observation || (!observation.requested_identity && !observation.state && !(observation.paths || []).length)) {
+      policyObservation.appendChild(element("div", "empty-state compact", "No canonical proxy or policy observation is available."));
+      return;
+    }
+    appendObservationRows(policyObservation, [
+      ["Requested identity", observation.requested_identity],
+      ["State", observation.state],
+      ["Unsupported", booleanText(observation.unsupported)],
+      ["Proxy configuration diverges", booleanText(observation.proxy_configuration_diverges)],
+      ["Divergence known", booleanText(observation.proxy_configuration_divergence_known)],
+      ["Direct vs proxy", comparisonText(observation.direct_vs_proxy)],
+      ["Firewall", observation.firewall && observation.firewall.state],
+      ["TLS policy state", observation.tls && observation.tls.state],
+      ["Possible interception", observation.tls && booleanText(observation.tls.possible_interception)],
+      ["Interception suspicion", observation.tls && observation.tls.interception_suspicion],
+      ["Certainty", observation.certainty],
+      ["Provenance", listText(observation.provenance)],
+      ["Evidence", referenceValue(observation.evidence_ids)],
+    ]);
+
+    renderProxySource(policyObservation, "WinHTTP", observation.winhttp);
+    renderProxySource(policyObservation, "WinINET", observation.wininet);
+    if (observation.paths && observation.paths.length) {
+      policyObservation.appendChild(element("h3", "observation-subheading", "Direct, browser, and service paths"));
+      const table = element("table", "observation-grid");
+      appendTableHeader(table, ["Path", "Mode", "Endpoint", "TCP", "HTTP", "TLS", "Failure", "Evidence"]);
+      const body = table.querySelector("tbody");
+      for (const path of observation.paths) {
+        const row = element("tr");
+        row.appendChild(element("td", "", path.name));
+        row.appendChild(element("td", "", path.mode));
+        row.appendChild(element("td", "", path.endpoint || "not specified"));
+        row.appendChild(element("td", "", booleanText(path.tcp_connected)));
+        row.appendChild(element("td", "", path.http_response ? text(path.http_status_code || "received") : "no"));
+        row.appendChild(element("td", "", booleanText(path.tls_handshake)));
+        row.appendChild(element("td", "", path.failure_reason || "none"));
+        row.appendChild(referenceCell(path.evidence_ids));
+        body.appendChild(row);
+      }
+      policyObservation.appendChild(table);
+    }
+    if (observation.firewall && observation.firewall.profiles && observation.firewall.profiles.length) {
+      policyObservation.appendChild(element("h3", "observation-subheading", "Firewall profiles"));
+      const table = element("table", "observation-grid");
+      appendTableHeader(table, ["Profile", "Enabled", "Policy present", "Causality", "Evidence"]);
+      const body = table.querySelector("tbody");
+      for (const profile of observation.firewall.profiles) {
+        const row = element("tr");
+        row.appendChild(element("td", "", profile.name));
+        row.appendChild(element("td", "", profile.firewall_enabled === undefined ? "unknown" : booleanText(profile.firewall_enabled)));
+        row.appendChild(element("td", "", booleanText(profile.policy_present)));
+        row.appendChild(element("td", "", profile.block_causality || "not established"));
+        row.appendChild(referenceCell(profile.evidence_ids));
+        body.appendChild(row);
+      }
+      policyObservation.appendChild(table);
+    }
+  }
+
+  function renderProxySource(container, label, source) {
+    if (!source || (!source.source && !source.configuration && !source.effective)) {
+      return;
+    }
+    container.appendChild(element("h3", "observation-subheading", label));
+    appendObservationRows(container, [
+      ["Source", source.source],
+      ["Configuration", source.configuration && source.configuration.state],
+      ["Configured proxy endpoints", source.configuration && listText(source.configuration.proxy_endpoints)],
+      ["PAC configured", source.configuration && booleanText(source.configuration.pac_configured)],
+      ["Effective mode", source.effective && source.effective.mode],
+      ["Effective endpoint", source.effective && source.effective.endpoint],
+      ["Effective resolution", source.effective && booleanText(source.effective.resolution_ok)],
+      ["PAC used", source.effective && booleanText(source.effective.pac_used)],
+      ["Evidence", referenceValue(source.evidence_ids)],
+    ]);
+  }
+
+  function comparisonText(comparison) {
+    if (!comparison) {
+      return "not observed";
+    }
+    return comparison.state || "unknown";
+  }
+
+  function renderObservationOrEmpty(container, observation, fields) {
+    container.replaceChildren();
+    if (!observation || !observation.applicability) {
+      container.appendChild(element("div", "empty-state compact", "No canonical observation is available."));
+      return;
+    }
+    const rows = [];
+    for (const [label, key, formatter] of fields) {
+      const value = observation[key];
+      if (value === undefined || value === null || value === "") {
+        continue;
+      }
+      rows.push([label, formatter ? formatter(value) : value]);
+    }
+    appendObservationRows(container, rows);
+  }
+
+  function appendObservationRows(container, rows) {
+    const table = element("div", "observation-rows");
+    for (const [label, value] of rows) {
+      if (value === undefined || value === null || value === "") {
+        continue;
+      }
+      const row = element("div", "observation-row");
+      row.appendChild(element("span", "observation-label", label));
+      if (value && typeof value === "object" && value.nodeType) {
+        row.appendChild(value);
+      } else {
+        row.appendChild(element("span", "observation-value", value));
+      }
+      table.appendChild(row);
+    }
+    container.appendChild(table);
+  }
+
+  function appendTableHeader(table, labels) {
+    const head = element("thead");
+    const row = element("tr");
+    for (const label of labels) {
+      row.appendChild(element("th", "", label));
+    }
+    head.appendChild(row);
+    table.appendChild(head);
+    table.appendChild(element("tbody"));
+  }
+
+  function referenceCell(ids) {
+    const cell = element("td", "");
+    if (ids && ids.length) {
+      cell.appendChild(referenceGroup(ids));
+    } else {
+      cell.textContent = "not available";
+    }
+    return cell;
+  }
+
+  function referenceValue(ids) {
+    if (!ids || !ids.length) {
+      return "not available";
+    }
+    return referenceGroup(ids);
+  }
+
+  function endpointText(endpoint) {
+    if (!endpoint) {
+      return "not observed";
+    }
+    if (typeof endpoint === "string") {
+      return endpoint;
+    }
+    if (!endpoint.address) {
+      return "not observed";
+    }
+    const address = endpoint.address.includes(":") && endpoint.port ? `[${endpoint.address}]` : endpoint.address;
+    return endpoint.port ? `${address}:${endpoint.port}` : address;
+  }
+
+  function booleanText(value) {
+    return value ? "yes" : "no";
+  }
+
+  function redirectText(values) {
+    if (!values || !values.length) {
+      return "none";
+    }
+    return values.map((value) => `${value.status_code} ${value.url}${value.to_url ? ` → ${value.to_url}` : ""}`).join("; ");
+  }
+
   function renderNameResolution(resolution) {
     nameResolution.replaceChildren();
-    nameResolutionEmpty.hidden = Boolean(resolution);
-    if (!resolution) {
+    const available = resolution && (resolution.requested_name || (resolution.paths && resolution.paths.length) || resolution.effective_path);
+    nameResolutionEmpty.hidden = Boolean(available);
+    if (!available) {
       return;
     }
 
     const effective = resolution.effective_path || {};
     const fields = [
       ["Requested name", resolution.requested_name || "not observable"],
-      ["Resolution path", effective.label || "not observed"],
+      ["Resolution path", effective.mechanism || "not observed"],
       ["Interface", effective.interface || "not observable"],
       ["Resolver", effective.resolver || "not observable"],
       ["Policy", policyText(effective)],
@@ -423,7 +732,7 @@
       const list = element("div", "resolution-candidate-list");
       for (const path of candidates) {
         const row = element("div", "resolution-candidate");
-        row.appendChild(badge(path.label || path.mechanism, path.state === "policy_candidate" ? "warning" : "neutral"));
+        row.appendChild(element("span", "resolution-candidate-state", path.state || "unknown"));
         const description = [
           path.resolver || "resolver not observable",
           path.interface || "interface not observable",
@@ -498,32 +807,35 @@
 
   function renderPath(path, index) {
     const card = element("article", "path-card");
-    card.dataset.evidenceId = text(path.evidence_id);
+    const evidenceIDs = path.evidence_ids || (path.evidence_id ? [path.evidence_id] : []);
+    card.dataset.evidenceId = text(evidenceIDs[0]);
     const header = element("div", "path-heading");
     const heading = element("div");
-    heading.appendChild(element("h3", "card-title", `${index + 1}. ${path.protocol_label} observation`));
+    heading.appendChild(element("h3", "card-title", `${index + 1}. ${text(path.protocol).toUpperCase()} observation`));
     heading.appendChild(element("p", "path-endpoint", `${text(path.destination)} · ${portText(path.destination_port)}`));
     header.appendChild(heading);
-    header.appendChild(badge(path.observation_label, path.observation_tone));
+    header.appendChild(element("span", toneClass("observation-status", path.observation_status), path.observation_status || "unknown"));
     card.appendChild(header);
 
     const pathNote = element("p", "path-note", observationNote(path));
     card.appendChild(pathNote);
 
-    const destination = element("div", toneClass("path-destination", destinationTone(path.destination_state)));
+    const destination = element("div", "path-destination");
     destination.appendChild(element("span", "destination-marker", "◆"));
     const destinationCopy = element("div");
-    destinationCopy.appendChild(element("strong", "destination-title", path.destination_label));
-    destinationCopy.appendChild(element("span", "destination-copy", path.destination_detail));
+    destinationCopy.appendChild(element("strong", "destination-title", "Destination observation"));
+    destinationCopy.appendChild(element("span", "destination-copy", `Reached: ${booleanText(path.destination_reached)} · TCP connected: ${booleanText(path.destination_tcp_connected)}`));
     destination.appendChild(destinationCopy);
-    destination.appendChild(referenceButton(path.evidence_id, "Evidence"));
+    if (evidenceIDs.length) {
+      destination.appendChild(referenceGroup(evidenceIDs));
+    }
     card.appendChild(destination);
 
     if (path.hops && path.hops.length) {
       const track = element("div", "path-track");
       track.appendChild(pathOrigin());
       for (const hop of path.hops) {
-        track.appendChild(renderHop(hop, path.evidence_id));
+        track.appendChild(renderHop(hop, evidenceIDs[0]));
       }
       track.appendChild(destinationTrackNode(path));
       card.appendChild(track);
@@ -537,7 +849,7 @@
       segmentDetails.appendChild(summary);
       const segmentList = element("div", "segment-list");
       for (const segment of path.segments) {
-        segmentList.appendChild(renderSegment(segment, path.evidence_id));
+        segmentList.appendChild(renderSegment(segment, evidenceIDs[0]));
       }
       segmentDetails.appendChild(segmentList);
       card.appendChild(segmentDetails);
@@ -575,10 +887,10 @@
   }
 
   function destinationTrackNode(path) {
-    const node = element("div", toneClass("track-node destination-node", destinationTone(path.destination_state)));
+    const node = element("div", "track-node destination-node");
     node.appendChild(element("span", "node-marker", "◆"));
     node.appendChild(element("strong", "node-title", "Destination"));
-    node.appendChild(element("span", "node-detail", path.destination_label));
+    node.appendChild(element("span", "node-detail", `Reached: ${booleanText(path.destination_reached)} · TCP connected: ${booleanText(path.destination_tcp_connected)}`));
     return node;
   }
 
@@ -635,7 +947,7 @@
     const table = element("table", "comparison-table");
     const head = element("thead");
     const headerRow = element("tr");
-    for (const label of ["Protocol", "Observation", "Endpoint state", "TTL responders", "Evidence"]) {
+    for (const label of ["Protocol", "Observation", "Port aware", "Destination reached", "TCP connected", "TTL responders", "Evidence"]) {
       headerRow.appendChild(element("th", "", label));
     }
     head.appendChild(headerRow);
@@ -645,9 +957,9 @@
       const row = element("tr");
       row.appendChild(element("td", "protocol-cell", text(observation.protocol).toUpperCase()));
       row.appendChild(element("td", "", text(observation.status)));
-      const stateCell = element("td", "");
-      stateCell.appendChild(badge(observation.destination_label, destinationTone(observation.destination_state)));
-      row.appendChild(stateCell);
+      row.appendChild(element("td", "", booleanText(observation.port_aware)));
+      row.appendChild(element("td", "", booleanText(observation.destination_reached)));
+      row.appendChild(element("td", "", booleanText(observation.destination_tcp_connected)));
       const hops = [];
       if (observation.responder_count) {
         hops.push(`${observation.responder_count} responder${observation.responder_count === 1 ? "" : "s"}`);
@@ -657,7 +969,9 @@
       }
       row.appendChild(element("td", "", hops.join(" · ") || "No hop detail"));
       const evidenceCell = element("td", "");
-      evidenceCell.appendChild(referenceButton(observation.evidence_id));
+      if (observation.evidence_ids && observation.evidence_ids.length) {
+        evidenceCell.appendChild(referenceGroup(observation.evidence_ids));
+      }
       row.appendChild(evidenceCell);
       body.appendChild(row);
     }
@@ -706,14 +1020,18 @@
   function renderView(view) {
     currentView = view;
     const overall = view.overall || {};
+    const observations = view.observations || {};
     diagnosisLabel.textContent = text(overall.diagnosis_label);
     diagnosisDetail.textContent = diagnosisDetailText(overall);
     diagnosisCard.className = toneClass("overview-card panel", overall.tone);
     overallStatus.textContent = text(overall.execution_label || overall.execution_status);
-    renderTargetDetails(view.report && view.report.target);
-    renderNetworkContext(view.network_context);
+    renderTargetDetails(observations.endpoint || (view.report && view.report.target));
+    renderEndpointObservation(observations.endpoint);
+    renderOperationalObservations(observations);
+    renderPolicyObservation(observations.enterprise_policy);
+    renderNetworkContext(observations.network_context || view.network_context);
     renderDestination(overall.destination || {});
-    renderNameResolution(view.name_resolution);
+    renderNameResolution(observations.name_resolution || view.name_resolution);
 
     probes.replaceChildren();
     const probeViews = view.probes || [];
@@ -765,8 +1083,9 @@
 
   function renderNetworkContext(context) {
     networkContext.replaceChildren();
-    networkContextPanel.hidden = !context;
-    if (!context) {
+    const available = context && (context.requested_identity || context.selected_destination_address || context.network_scope || context.effective_route || (context.provenance && context.provenance.length) || (context.evidence_ids && context.evidence_ids.length));
+    networkContextPanel.hidden = !available;
+    if (!available) {
       return;
     }
     const fields = [
@@ -780,16 +1099,13 @@
       ["Next hop", context.next_hop],
       ["Gateway", context.gateway || "Not applicable"],
       ["Route metric", context.route_metric],
+      ["Certainty", context.certainty],
+      ["Provenance", listText(context.provenance)],
+      ["Evidence", referenceValue(context.evidence_ids)],
     ];
-    if (context.vpn_or_tunnel_involvement) {
-      fields.push(["VPN / tunnel", "Observed"]);
-    }
-    if (context.virtual_adapter_involvement) {
-      fields.push(["Virtual adapter", "Observed"]);
-    }
-    if (context.route_selection_ambiguous) {
-      fields.push(["Selection", "Ambiguous"]);
-    }
+    fields.push(["VPN / tunnel involvement", booleanText(context.vpn_or_tunnel_involvement)]);
+    fields.push(["Virtual adapter involvement", booleanText(context.virtual_adapter_involvement)]);
+    fields.push(["Route selection ambiguous", booleanText(context.route_selection_ambiguous)]);
     if (context.neighbor) {
       fields.push(["Neighbor cache", context.neighbor.observation]);
     }
@@ -799,7 +1115,11 @@
       }
       const item = element("div", "context-item");
       item.appendChild(element("span", "context-label", label));
-      item.appendChild(element("code", "context-value", value));
+      if (value && typeof value === "object" && value.nodeType) {
+        item.appendChild(value);
+      } else {
+        item.appendChild(element("code", "context-value", value));
+      }
       networkContext.appendChild(item);
     }
     if (context.competing_routes && context.competing_routes.length) {

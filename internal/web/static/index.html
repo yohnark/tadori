@@ -102,6 +102,52 @@
 
       <div class="workbench-grid">
         <div class="workbench-main">
+          <section class="panel section-panel endpoint-panel">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Endpoint</p>
+                <h2>Identity and candidate selection</h2>
+              </div>
+            </div>
+            <div id="endpoint-observation" class="observation-table"></div>
+            <div id="endpoint-candidates" class="observation-table"></div>
+          </section>
+
+          <section class="panel section-panel operational-panel">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Operational state</p>
+                <h2>Transport, security, and application</h2>
+              </div>
+              <span class="not-topology">Canonical observations</span>
+            </div>
+            <div class="operational-grid">
+              <section class="observation-pane">
+                <h3>Transport</h3>
+                <div id="transport-observation" class="observation-table"></div>
+              </section>
+              <section class="observation-pane">
+                <h3>Security / TLS</h3>
+                <div id="security-observation" class="observation-table"></div>
+              </section>
+              <section class="observation-pane">
+                <h3>Application / HTTP</h3>
+                <div id="application-observation" class="observation-table"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="panel section-panel policy-panel">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Proxy / policy</p>
+                <h2>Enterprise path observations</h2>
+              </div>
+              <span class="not-topology">Configuration and runtime evidence</span>
+            </div>
+            <div id="policy-observation" class="observation-table"></div>
+          </section>
+
           <section class="panel section-panel resolution-panel">
             <div class="section-heading">
               <div>
