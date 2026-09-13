@@ -2,6 +2,7 @@ package route
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"strings"
@@ -144,16 +145,38 @@ func TestGatewayProbeSuccessAndFailureAreSupportingEvidence(t *testing.T) {
 	if string(got.Evidence[0].Raw) == "" {
 		t.Fatal("gateway evidence absent")
 	}
+	var raw map[string]any
+	if err := json.Unmarshal(got.Evidence[0].Raw, &raw); err != nil {
+		t.Fatalf("decode gateway evidence: %v", err)
+	}
+	if raw["supporting_only"] != true || raw["gateway_tested"] != true || raw["reachable"] != false {
+		t.Fatalf("gateway failure evidence = %#v", raw)
+	}
 }
 
-func TestGatewayProbeDefaultIsHonestAboutUnsupportedICMP(t *testing.T) {
+func TestGatewayProbeRouteSuccessWithUnsupportedCheckIsSkipped(t *testing.T) {
 	p := NewGatewayProbe(fixtureRouteTable{routes: fixtureRoutes()})
+	p.Checker = func(context.Context, netip.Addr) error { return ErrGatewayReachabilityUnsupported }
 	got := p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "192.0.2.200"}})
-	if got.Status != model.ProbeStatusError || got.Interpretation.FailureReason != model.FailureReasonUnsupported {
-		t.Fatalf("default checker result = %#v", got)
+	if got.Status != model.ProbeStatusSkipped || got.Interpretation.FailureReason != model.FailureReasonUnsupported {
+		t.Fatalf("unsupported checker result = %#v", got)
 	}
-	if len(got.Evidence) != 1 || !strings.Contains(string(got.Evidence[0].Raw), "supporting_only") {
+	if len(got.Evidence) != 1 {
 		t.Fatalf("unsupported gateway evidence = %#v", got.Evidence)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(got.Evidence[0].Raw, &raw); err != nil {
+		t.Fatalf("decode unsupported gateway evidence: %v", err)
+	}
+	if raw["gateway"] != "192.0.2.129" || raw["supporting_only"] != true {
+		t.Fatalf("route discovery was not preserved: %#v", raw)
+	}
+	if raw["gateway_tested"] != false || raw["reachable"] != nil {
+		t.Fatalf("unsupported gateway evidence = %#v", raw)
+	}
+	errorText, ok := raw["error"].(string)
+	if !ok || strings.Contains(errorText, "route inspection") {
+		t.Fatalf("unsupported gateway check claimed route inspection failed: %#v", raw)
 	}
 }
 

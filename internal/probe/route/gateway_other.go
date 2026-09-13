@@ -18,5 +18,5 @@ func defaultGatewayChecker(ctx context.Context, gateway netip.Addr) error {
 	if !gateway.IsValid() {
 		return errors.New("gateway address is invalid")
 	}
-	return ErrUnsupported
+	return ErrGatewayReachabilityUnsupported
 }

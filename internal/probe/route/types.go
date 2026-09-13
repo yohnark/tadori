@@ -20,6 +20,12 @@ const FailureReasonInsufficientPrivilege model.FailureReason = "insufficient_pri
 // ErrUnsupported indicates that the host has no supported native route API.
 var ErrUnsupported = errors.New("route inspection is unsupported")
 
+// ErrGatewayReachabilityUnsupported indicates that route discovery succeeded,
+// but the optional gateway reachability check is not available on this host.
+// It is deliberately distinct from ErrUnsupported so a gateway result cannot
+// describe an unavailable reachability check as a route-inspection failure.
+var ErrGatewayReachabilityUnsupported = errors.New("gateway reachability checking is unsupported")
+
 // Route is one kernel route entry. Destination is always a valid network
 // prefix; a zero Gateway means the destination is directly connected.
 type Route struct {
