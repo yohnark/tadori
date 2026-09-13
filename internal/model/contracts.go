@@ -13,7 +13,7 @@ import (
 
 // DiagnosticSchemaVersion is the schema version emitted in a
 // DiagnosticReport. It changes only when the canonical JSON contract changes.
-const DiagnosticSchemaVersion = "1"
+const DiagnosticSchemaVersion = "2"
 
 // ProbeStatus describes what happened when a probe ran. Failed means that the
 // probe observed a negative result; Error means that it could not produce a
@@ -215,9 +215,9 @@ type DiagnosticFinding struct {
 	EvidenceIDs   []string      `json:"evidence_ids,omitempty"`
 }
 
-// DiagnosticReport is the top-level canonical JSON document. Probes contain
-// raw evidence and per-probe interpretation; Findings contains the optional
-// cross-probe interpretation supplied by the diagnosis lane.
+// DiagnosticReport is the top-level canonical JSON document. Observations is
+// the canonical cross-probe world model; probes retain raw evidence and
+// per-probe interpretation, while Findings contains optional diagnosis.
 type DiagnosticReport struct {
 	SchemaVersion string              `json:"schema_version"`
 	Target        Target              `json:"target"`
@@ -226,5 +226,6 @@ type DiagnosticReport struct {
 	StartedAt     *time.Time          `json:"started_at,omitempty"`
 	CompletedAt   *time.Time          `json:"completed_at,omitempty"`
 	Probes        []ProbeResult       `json:"probes"`
+	Observations  Observations        `json:"observations"`
 	Findings      []DiagnosticFinding `json:"findings,omitempty"`
 }
