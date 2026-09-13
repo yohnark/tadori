@@ -6,6 +6,7 @@ import (
 	stdhttp "net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,6 +90,56 @@ func TestRunAgainstLocalFixture(t *testing.T) {
 	if tcpResult.Status != model.ProbeStatusPassed {
 		t.Errorf("tcp probe status = %s, want passed", tcpResult.Status)
 	}
+}
+
+func TestRunProgressHooksTrackEveryCanonicalProbe(t *testing.T) {
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		w.WriteHeader(stdhttp.StatusOK)
+	}))
+	defer server.Close()
+
+	target, err := ParseTarget(server.URL)
+	if err != nil {
+		t.Fatalf("ParseTarget(%q): %v", server.URL, err)
+	}
+	var mu sync.Mutex
+	started := make([]string, 0, 10)
+	completed := make([]string, 0, 10)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	got := Run(ctx, target, Options{
+		ProbeTimeout:     2 * time.Second,
+		ProbeConcurrency: 1,
+		OnProbeStarted: func(name string) {
+			mu.Lock()
+			started = append(started, name)
+			mu.Unlock()
+		},
+		OnProbeCompleted: func(result model.ProbeResult) {
+			mu.Lock()
+			completed = append(completed, result.Name)
+			mu.Unlock()
+		},
+	})
+
+	wantCount := len(got.Probes)
+	if len(started) != wantCount || len(completed) != wantCount {
+		t.Fatalf("progress hook counts = started %d, completed %d; want %d each", len(started), len(completed), wantCount)
+	}
+	for _, probe := range got.Probes {
+		if !orchestrateTestContainsString(completed, probe.Name) {
+			t.Errorf("canonical probe %q had no completion event", probe.Name)
+		}
+	}
+}
+
+func orchestrateTestContainsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestRunPreservesPartialResultsOnUnreachableTarget confirms that a probe

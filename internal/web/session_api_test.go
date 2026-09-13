@@ -1,0 +1,237 @@
+package web
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/yohnark/tadori/internal/model"
+	"github.com/yohnark/tadori/internal/session"
+)
+
+func TestSessionAPIStreamsProgressAndReturnsCanonicalReport(t *testing.T) {
+	release := make(chan struct{})
+	runnerStarted := make(chan struct{})
+	target := model.Target{URL: "https://example.com", Scheme: "https", Host: "example.com", Port: 443}
+	wantReport := fixtureReport(target)
+	handler := NewHandler(HandlerOptions{
+		OverallTimeout: time.Second,
+		SessionRun: func(ctx context.Context, gotTarget model.Target, progress session.Progress) model.DiagnosticReport {
+			progress.ProbeStarted("fake")
+			progress.ProbeCompleted(wantReport.Probes[0])
+			close(runnerStarted)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return fixtureReport(gotTarget)
+		},
+	})
+	defer handler.Close()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/api/diagnoses", "application/json", strings.NewReader(`{"target":"https://example.com"}`))
+	if err != nil {
+		t.Fatalf("POST /api/diagnoses: %v", err)
+	}
+	var created session.Snapshot
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		response.Body.Close()
+		t.Fatalf("decode create response: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("create status = %d, want 202", response.StatusCode)
+	}
+	if created.ID == "" || created.State != session.StateRunning {
+		t.Fatalf("created snapshot = %#v", created)
+	}
+	if got := response.Header.Get("Location"); got != "/api/diagnoses/"+created.ID {
+		t.Fatalf("Location = %q", got)
+	}
+
+	eventNames := make(chan string, 16)
+	streamDone := make(chan struct{})
+	go func() {
+		defer close(streamDone)
+		streamResponse, streamErr := server.Client().Get(server.URL + "/api/diagnoses/" + created.ID + "/events")
+		if streamErr != nil {
+			eventNames <- "error:" + streamErr.Error()
+			return
+		}
+		defer streamResponse.Body.Close()
+		if streamResponse.StatusCode != http.StatusOK {
+			eventNames <- "status:" + streamResponse.Status
+			return
+		}
+		scanner := bufio.NewScanner(streamResponse.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "event: ") {
+				eventNames <- strings.TrimPrefix(line, "event: ")
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			eventNames <- "error:" + err.Error()
+		}
+	}()
+
+	select {
+	case <-runnerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start")
+	}
+	seen := make(map[string]bool)
+	for len(seen) < 3 {
+		select {
+		case eventName := <-eventNames:
+			if strings.HasPrefix(eventName, "error:") || strings.HasPrefix(eventName, "status:") {
+				t.Fatal(eventName)
+			}
+			seen[eventName] = true
+			if eventName == string(session.EventProbeCompleted) {
+				close(release)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for progress events; seen = %#v", seen)
+		}
+	}
+	select {
+	case <-streamDone:
+	case <-time.After(time.Second):
+		t.Fatal("SSE stream did not close after completion")
+	}
+
+	getResponse, err := server.Client().Get(server.URL + "/api/diagnoses/" + created.ID)
+	if err != nil {
+		t.Fatalf("GET session: %v", err)
+	}
+	defer getResponse.Body.Close()
+	var completed session.Snapshot
+	if err := json.NewDecoder(getResponse.Body).Decode(&completed); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	if completed.State != session.StateCompleted || completed.Report == nil {
+		t.Fatalf("completed snapshot = %#v", completed)
+	}
+	if !webTestReportsEqual(completed.Report, &wantReport) {
+		t.Fatalf("session report differs from canonical runner report\n got: %#v\nwant: %#v", completed.Report, &wantReport)
+	}
+}
+
+func TestSessionAPIValidationAndCancellation(t *testing.T) {
+	started := make(chan struct{})
+	cancelObserved := make(chan struct{})
+	handler := NewHandler(HandlerOptions{
+		SessionRun: func(ctx context.Context, target model.Target, _ session.Progress) model.DiagnosticReport {
+			close(started)
+			<-ctx.Done()
+			close(cancelObserved)
+			return model.DiagnosticReport{
+				SchemaVersion: model.DiagnosticSchemaVersion,
+				Target:        target,
+				Status:        model.ReportStatusIncomplete,
+				Probes:        []model.ProbeResult{},
+			}
+		},
+	})
+	defer handler.Close()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	client := server.Client()
+
+	invalid, err := client.Post(server.URL+"/api/diagnoses", "application/json", strings.NewReader(`{"target":"javascript:alert(1)"}`))
+	if err != nil {
+		t.Fatalf("invalid POST: %v", err)
+	}
+	if invalid.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid target status = %d, want 400", invalid.StatusCode)
+	}
+	invalid.Body.Close()
+
+	tooLarge, err := client.Post(server.URL+"/api/diagnoses", "application/json", strings.NewReader(`{"target":"http://example.com/`+strings.Repeat("x", 9000)+`"}`))
+	if err != nil {
+		t.Fatalf("large POST: %v", err)
+	}
+	if tooLarge.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("large body status = %d, want 413", tooLarge.StatusCode)
+	}
+	tooLarge.Body.Close()
+
+	createdResponse, err := client.Post(server.URL+"/api/diagnoses", "application/json", strings.NewReader(`{"target":"http://example.com"}`))
+	if err != nil {
+		t.Fatalf("valid POST: %v", err)
+	}
+	var created session.Snapshot
+	if err := json.NewDecoder(createdResponse.Body).Decode(&created); err != nil {
+		createdResponse.Body.Close()
+		t.Fatalf("decode valid response: %v", err)
+	}
+	createdResponse.Body.Close()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cancellable runner did not start")
+	}
+
+	deleteRequest, err := http.NewRequest(http.MethodDelete, server.URL+"/api/diagnoses/"+created.ID, nil)
+	if err != nil {
+		t.Fatalf("new DELETE: %v", err)
+	}
+	deleteResponse, err := client.Do(deleteRequest)
+	if err != nil {
+		t.Fatalf("DELETE session: %v", err)
+	}
+	if deleteResponse.StatusCode != http.StatusAccepted {
+		t.Fatalf("DELETE status = %d, want 202", deleteResponse.StatusCode)
+	}
+	deleteResponse.Body.Close()
+	select {
+	case <-cancelObserved:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not observe cancellation")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for {
+		getResponse, err := client.Get(server.URL + "/api/diagnoses/" + created.ID)
+		if err != nil {
+			t.Fatalf("GET cancelled session: %v", err)
+		}
+		var snapshot session.Snapshot
+		decodeErr := json.NewDecoder(getResponse.Body).Decode(&snapshot)
+		getResponse.Body.Close()
+		if decodeErr != nil {
+			t.Fatalf("decode cancelled session: %v", decodeErr)
+		}
+		if snapshot.State == session.StateCancelled {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("cancelled session did not reach terminal state: %#v", snapshot)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	methodRequest := httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil)
+	methodRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(methodRecorder, methodRequest)
+	if methodRecorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET collection status = %d, want 405", methodRecorder.Code)
+	}
+}
+
+func webTestReportsEqual(left, right *model.DiagnosticReport) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)
+}

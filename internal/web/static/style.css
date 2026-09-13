@@ -60,6 +60,18 @@ li,
   background: white;
 }
 
+#session {
+  margin-top: 1.5rem;
+}
+
+#progress {
+  min-height: 2rem;
+}
+
+#cancel-button {
+  background: #a33b2f;
+}
+
 li + li,
 .evidence-card + .evidence-card {
   margin-top: 0.5rem;

@@ -13,12 +13,22 @@
     <form id="diagnose-form">
       <label for="target">Target</label>
       <div class="target-row">
-        <input id="target" name="target" type="url" placeholder="https://example.com" required autocomplete="url">
+        <input id="target" name="target" type="text" placeholder="https://example.com or host:port" required autocomplete="url">
         <button type="submit">Diagnose</button>
       </div>
     </form>
 
     <p id="error" class="error" role="alert" hidden></p>
+
+    <section id="session" hidden>
+      <p class="summary">Session state: <strong id="session-state"></strong></p>
+      <p>Session ID: <code id="session-id"></code></p>
+      <p>Target: <code id="session-target"></code></p>
+      <button id="cancel-button" type="button" hidden>Cancel</button>
+
+      <h2>Live probe progress</h2>
+      <ol id="progress"></ol>
+    </section>
 
     <section id="report" hidden>
       <p class="summary">Overall status: <strong id="overall-status"></strong></p>
