@@ -18,8 +18,5 @@ yarn-error.log*
 
 .vscode/*
 !.vscode/extensions.json
-.idea/
 
-coverage/
-
-.mottainai
+tadori
