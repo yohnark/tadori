@@ -41,6 +41,32 @@ func TestSelectUsesLongestPrefixThenMetric(t *testing.T) {
 	}
 }
 
+func TestSelectMatchesMappedIPv4TargetAndCanonicalizesRouteInterface(t *testing.T) {
+	routes := []Route{
+		{
+			Destination:    netip.MustParsePrefix("::ffff:192.0.2.0/120"),
+			Gateway:        netip.MustParseAddr("::ffff:192.0.2.1"),
+			Interface:      "::ffff:192.0.2.10",
+			InterfaceIndex: 3,
+		},
+		{Destination: netip.MustParsePrefix("0.0.0.0/0"), Interface: "backup", InterfaceIndex: 4},
+	}
+
+	selected, ok := Select(routes, netip.MustParseAddr("::ffff:192.0.2.10"))
+	if !ok {
+		t.Fatal("mapped IPv4 target did not match route")
+	}
+	if selected.Destination.String() != "192.0.2.0/24" {
+		t.Fatalf("destination = %s, want 192.0.2.0/24", selected.Destination)
+	}
+	if selected.Gateway.String() != "192.0.2.1" {
+		t.Fatalf("gateway = %s, want 192.0.2.1", selected.Gateway)
+	}
+	if selected.Interface != "192.0.2.10" {
+		t.Fatalf("interface = %q, want 192.0.2.10", selected.Interface)
+	}
+}
+
 func TestSelectRejectsInvalidOrUnmatchedTarget(t *testing.T) {
 	if _, ok := Select(fixtureRoutes(), netip.Addr{}); ok {
 		t.Fatal("invalid target unexpectedly selected a route")
@@ -78,6 +104,10 @@ Active Routes:
 	}
 	if routes[1].Destination.String() != "2001:db8::/64" || routes[1].Metric != 256 || routes[1].InterfaceIndex != 16 {
 		t.Fatalf("IPv6 verbose route = %#v", routes[1])
+	}
+	mapped := parseWindowsRouteOutput("11 331 ::ffff:192.0.2.0/120 ::ffff:192.0.2.1", 6)
+	if len(mapped) != 1 || mapped[0].Destination.String() != "192.0.2.0/24" || mapped[0].Gateway.String() != "192.0.2.1" {
+		t.Fatalf("mapped IPv4 route = %#v", mapped)
 	}
 }
 

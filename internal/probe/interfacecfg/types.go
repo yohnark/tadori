@@ -168,18 +168,18 @@ func parseAddress(address net.Addr) (Address, bool) {
 		if prefix < 0 {
 			return Address{}, false
 		}
-		return Address{IP: ip, Prefix: prefix}, true
+		return normalizeAddress(Address{IP: ip, Prefix: prefix}), true
 	}
 	if ipaddr, ok := address.(*net.IPAddr); ok {
 		ip, ok := netip.AddrFromSlice(ipaddr.IP)
 		if !ok {
 			return Address{}, false
 		}
-		bits := 128
-		if ip.Is4() {
-			bits = 32
+		bits := 32
+		if !ip.Is4() && !ip.Is4In6() {
+			bits = 128
 		}
-		return Address{IP: ip, Prefix: bits}, true
+		return normalizeAddress(Address{IP: ip, Prefix: bits}), true
 	}
 	// A few platform implementations return a textual CIDR type.  Parsing
 	// this representation keeps the collector useful without shelling out.
@@ -190,19 +190,22 @@ func parseAddress(address net.Addr) (Address, bool) {
 			return Address{}, false
 		}
 		prefix, _ := network.Mask.Size()
-		return Address{IP: parsed, Prefix: prefix}, true
+		if prefix < 0 {
+			return Address{}, false
+		}
+		return normalizeAddress(Address{IP: parsed, Prefix: prefix}), true
 	}
 	if ip, err := netip.ParseAddr(text); err == nil {
 		bits := 128
-		if ip.Is4() {
+		if ip.Is4() || ip.Is4In6() {
 			bits = 32
 		}
-		return Address{IP: ip, Prefix: bits}, true
+		return normalizeAddress(Address{IP: ip, Prefix: bits}), true
 	}
 	return Address{}, false
 }
 
 func usableAddress(address Address) bool {
-	ip := address.IP
+	ip := model.NormalizeAddr(address.IP)
 	return ip.IsValid() && !ip.IsUnspecified() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
 }

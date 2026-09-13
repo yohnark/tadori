@@ -14,6 +14,7 @@ func TestParseTarget(t *testing.T) {
 		{name: "https default port", input: "https://example.com", wantHost: "example.com", wantPort: 443, wantScheme: "https"},
 		{name: "http default port", input: "http://example.com", wantHost: "example.com", wantPort: 80, wantScheme: "http"},
 		{name: "explicit port", input: "https://example.com:8443/path", wantHost: "example.com", wantPort: 8443, wantScheme: "https"},
+		{name: "mapped IPv4 literal", input: "http://[::ffff:10.0.10.10]:8080", wantHost: "10.0.10.10", wantPort: 8080, wantScheme: "http"},
 		{name: "empty", input: "", wantErr: true},
 		{name: "whitespace", input: " https://example.com", wantErr: true},
 		{name: "unsupported scheme", input: "ftp://example.com", wantErr: true},

@@ -42,6 +42,7 @@ type Options struct {
 // fail. Report status is then aggregated from the canonical probe results;
 // diagnosis remains a separate interpretation of those results.
 func Run(ctx context.Context, target model.Target, opts Options) model.DiagnosticReport {
+	target = model.NormalizeTarget(target)
 	now := opts.Now
 	if now == nil {
 		now = time.Now
