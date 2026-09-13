@@ -290,7 +290,11 @@ func representativeUIFixtures() map[string]model.DiagnosticReport {
 }
 
 func fixtureTarget(port uint16) model.Target {
-	return model.Target{URL: fmt.Sprintf("https://203.0.113.10:%d/health", port), Scheme: "https", Host: "203.0.113.10", Port: port, Path: "/health"}
+	target, err := model.ParseTarget(model.TargetIntent{Input: fmt.Sprintf("https://203.0.113.10:%d/health", port)})
+	if err != nil {
+		panic(err)
+	}
+	return target
 }
 
 func representativeReport(target model.Target, status model.ReportStatus, probes ...model.ProbeResult) model.DiagnosticReport {

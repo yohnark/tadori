@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -194,9 +193,10 @@ var _ probe.Probe = (*Probe)(nil)
 // and resolution observations are always kept as separate evidence records.
 func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 	started := p.clockNow()
+	target := model.NormalizeTarget(execution.Target)
 	result := model.ProbeResult{
 		Name:   probeName,
-		Target: execution.Target,
+		Target: target,
 		Status: model.ProbeStatusError,
 		Interpretation: model.ProbeInterpretation{
 			FailureReason: model.FailureReasonProbeExecution,
@@ -219,6 +219,27 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 	host, err := targetHost(execution.Target)
 	if err != nil {
 		result.Evidence = append(result.Evidence, makeResolutionEvidence("", nil, nil, nil, err, "malformed_target"))
+		return finish()
+	}
+	if target.LiteralIP != "" {
+		resolution := resolutionEvidence{Host: host}
+		if address, parseErr := netip.ParseAddr(target.LiteralIP); parseErr == nil {
+			if address.Is4() {
+				resolution.A = []string{target.LiteralIP}
+			} else {
+				resolution.AAAA = []string{target.LiteralIP}
+			}
+		}
+		result.Status = model.ProbeStatusPassed
+		result.Interpretation = model.ProbeInterpretation{
+			FailureReason: model.FailureReasonNone,
+			Layer:         model.LayerDNS,
+			FaultDomain:   model.FaultDomainDNS,
+		}
+		result.Evidence = append(result.Evidence, model.Evidence{
+			ID: "dns-resolution", Kind: model.EvidenceKindDNSResolution, Source: "canonical-literal",
+			Raw: mustJSON(resolution),
+		})
 		return finish()
 	}
 
@@ -417,48 +438,13 @@ func resolutionStatus(r lookupResult) (model.ProbeStatus, model.FailureReason) {
 }
 
 func targetHost(target model.Target) (string, error) {
-	host := strings.TrimSpace(target.Host)
-	if host == "" && target.URL != "" {
-		u, err := url.Parse(target.URL)
-		if err != nil || u.Hostname() == "" {
-			if err == nil {
-				err = errors.New("target URL has no host")
-			}
-			return "", fmt.Errorf("malformed target: %w", err)
-		}
-		host = u.Hostname()
+	target = model.NormalizeTarget(target)
+	if err := target.Validate(); err != nil {
+		return "", fmt.Errorf("malformed target: %w", err)
 	}
+	host := strings.TrimSpace(target.RequestedIdentity)
 	if host == "" {
-		return "", errors.New("malformed target: host is empty")
-	}
-	if strings.ContainsAny(host, " \t\r\n") {
-		return "", errors.New("malformed target: host contains whitespace")
-	}
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	} else if strings.Count(host, ":") == 1 {
-		if splitHost, _, err := net.SplitHostPort(host); err == nil {
-			host = splitHost
-		}
-	}
-	if host == "" || len(host) > 253 {
-		return "", errors.New("malformed target: invalid host length")
-	}
-	if ip, err := netip.ParseAddr(host); err == nil {
-		return model.NormalizeAddr(ip).String(), nil
-	}
-	if strings.Contains(host, "..") {
-		return "", errors.New("malformed target: empty host label")
-	}
-	for _, label := range strings.Split(strings.TrimSuffix(host, "."), ".") {
-		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return "", errors.New("malformed target: invalid host label")
-		}
-		for _, r := range label {
-			if !(r == '-' || r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r > 127) {
-				return "", errors.New("malformed target: invalid host character")
-			}
-		}
+		return "", errors.New("malformed target: identity is empty")
 	}
 	return host, nil
 }

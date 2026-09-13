@@ -35,8 +35,8 @@ func TestRunDiagnoseJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout.read(t)), &report); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v", err)
 	}
-	if report.Target.URL != server.URL {
-		t.Errorf("Target.URL = %q, want %q", report.Target.URL, server.URL)
+	if report.Target.OriginalInput != server.URL || report.Target.RequestedIdentity != "127.0.0.1" {
+		t.Errorf("canonical target = %#v, want original input and loopback identity", report.Target)
 	}
 	if len(report.Probes) == 0 {
 		t.Errorf("expected at least one probe result in the report")
@@ -58,7 +58,7 @@ func TestRunDiagnoseHuman(t *testing.T) {
 		t.Fatalf("run() exit code = %d, want 0; stderr=%s", code, stderr.read(t))
 	}
 	out := stdout.read(t)
-	if !strings.Contains(out, "Status:") || !strings.Contains(out, "Target: "+server.URL) {
+	if !strings.Contains(out, "Status:") || !strings.Contains(out, "Target: 127.0.0.1") || !strings.Contains(out, "Service: HTTP") {
 		t.Errorf("human output missing expected sections:\n%s", out)
 	}
 }
@@ -91,7 +91,7 @@ func TestRunDiagnoseHostPortJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout.read(t)), &report); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v", err)
 	}
-	if report.Target.URL != "" || report.Target.Host != "127.0.0.1" || report.Target.Port != uint16(listener.Addr().(*net.TCPAddr).Port) {
+	if report.Target.OriginalInput == "" || report.Target.RequestedIdentity != "127.0.0.1" || report.Target.Port != uint16(listener.Addr().(*net.TCPAddr).Port) {
 		t.Fatalf("host:port target was not preserved: %#v", report.Target)
 	}
 	if !strings.Contains(stdout.read(t), `"kind":"path_observation"`) {
@@ -101,7 +101,7 @@ func TestRunDiagnoseHostPortJSON(t *testing.T) {
 
 func TestRunDiagnoseRejectsBadTarget(t *testing.T) {
 	stdout, stderr := captureFiles(t)
-	code := run([]string{"diagnose", "not-a-url"}, stdout.w, stderr.w)
+	code := run([]string{"diagnose", "javascript:alert(1)"}, stdout.w, stderr.w)
 	stdout.close()
 	stderr.close()
 

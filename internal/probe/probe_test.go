@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/yohnark/tadori/internal/model"
@@ -27,13 +28,16 @@ func (fixtureProbe) Run(_ context.Context, execution ExecutionContext) model.Pro
 
 func TestProbeContractPassesExecutionTargetToResult(t *testing.T) {
 	var p Probe = fixtureProbe{}
-	wantTarget := model.Target{Scheme: "https", Host: "example.com", Port: 443}
+	wantTarget, err := model.ParseTarget(model.TargetIntent{Input: "https://example.com"})
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
 	got := p.Run(context.Background(), ExecutionContext{Target: wantTarget})
 
 	if got.Name != p.Name() {
 		t.Fatalf("probe name = %q, want %q", got.Name, p.Name())
 	}
-	if got.Target != wantTarget {
+	if !reflect.DeepEqual(got.Target, wantTarget) {
 		t.Fatalf("probe target = %#v, want %#v", got.Target, wantTarget)
 	}
 }

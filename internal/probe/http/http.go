@@ -1,8 +1,9 @@
 // Package http implements the HTTP-layer connectivity probe.
 //
-// The probe accepts an explicit URL in model.Target.URL and records an HTTP
-// response (including non-success status codes) separately from failures that
-// happen while the HTTP client is resolving, connecting, or negotiating TLS.
+// The probe accepts an HTTP-family service profile in model.Target and records
+// an HTTP response (including non-success status codes) separately from
+// failures that happen while the HTTP client is resolving, connecting, or
+// negotiating TLS.
 // Response bodies are not read unless a positive limit is configured.
 package http
 
@@ -12,11 +13,9 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	stdhttp "net/http"
-	"net/url"
 	"strings"
 	"syscall"
 	"time"
@@ -149,20 +148,24 @@ func (*Probe) Name() string { return HTTPProbeName }
 // ProbeURL performs a one-off request to an explicit URL with default bounds.
 // It is a convenience wrapper around Probe.Run.
 func ProbeURL(ctx context.Context, targetURL string) model.ProbeResult {
-	return New().Run(ctx, probe.ExecutionContext{Target: model.Target{URL: targetURL}})
+	target, err := model.ParseTarget(model.TargetIntent{Input: targetURL})
+	if err != nil {
+		return New().Run(ctx, probe.ExecutionContext{Target: model.Target{OriginalInput: targetURL}})
+	}
+	return New().Run(ctx, probe.ExecutionContext{Target: target})
 }
 
-// Run implements probe.Probe. Target.URL is required; Host/Port fields alone
-// are intentionally not converted into a URL because this lane must never
-// guess a scheme or silently probe a different endpoint.
+// Run implements probe.Probe. The canonical target owns URL construction;
+// this probe does not reinterpret an opaque input string.
 func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	started := time.Now().UTC()
+	target := model.NormalizeTarget(execution.Target)
 	result := model.ProbeResult{
 		Name:   p.Name(),
-		Target: execution.Target,
+		Target: target,
 		Status: model.ProbeStatusError,
 		Timing: model.Timing{StartedAt: timePtr(started)},
 		Interpretation: model.ProbeInterpretation{
@@ -181,14 +184,14 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 
 	if err := ctx.Err(); err != nil {
 		result.Interpretation = interpretationForContext(err)
-		result.Evidence = []model.Evidence{errorEvidence(execution.Target.URL, result.Interpretation, err)}
+		result.Evidence = []model.Evidence{errorEvidence(target.OriginalInput, result.Interpretation, err)}
 		return finish()
 	}
 
-	targetURL, err := parseTargetURL(execution.Target.URL)
+	targetURL, err := target.HTTPURL()
 	if err != nil {
 		result.Interpretation.FailureReason = FailureReasonMalformedURL
-		result.Evidence = []model.Evidence{errorEvidence(execution.Target.URL, result.Interpretation, err)}
+		result.Evidence = []model.Evidence{errorEvidence(target.OriginalInput, result.Interpretation, err)}
 		return finish()
 	}
 
@@ -199,10 +202,10 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	request, err := stdhttp.NewRequestWithContext(requestCtx, stdhttp.MethodGet, targetURL.String(), nil)
+	request, err := stdhttp.NewRequestWithContext(requestCtx, stdhttp.MethodGet, targetURL, nil)
 	if err != nil {
 		result.Interpretation.FailureReason = FailureReasonMalformedURL
-		result.Evidence = []model.Evidence{errorEvidence(targetURL.String(), result.Interpretation, err)}
+		result.Evidence = []model.Evidence{errorEvidence(targetURL, result.Interpretation, err)}
 		return finish()
 	}
 
@@ -256,9 +259,9 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 	if err != nil {
 		interpretation := classifyRequestError(err, requestCtx, ctx, redirectLimitErr, redirectCallbackFailed, observations.hasRedirect())
 		result.Interpretation = interpretation
-		result.Evidence = []model.Evidence{errorEvidence(targetURL.String(), interpretation, err)}
+		result.Evidence = []model.Evidence{errorEvidence(targetURL, interpretation, err)}
 		if observations.hasRedirect() {
-			result.Evidence[0] = errorEvidenceWithRedirects(targetURL.String(), interpretation, err, observations.snapshot(), redirectTargets)
+			result.Evidence[0] = errorEvidenceWithRedirects(targetURL, interpretation, err, observations.snapshot(), redirectTargets)
 		}
 		return finish()
 	}
@@ -269,7 +272,7 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 
 	metadata := responseMetadata{
 		ResponseReceived: true,
-		URL:              targetURL.String(),
+		URL:              targetURL,
 		StatusCode:       response.StatusCode,
 		Status:           response.Status,
 		Protocol:         response.Proto,
@@ -280,7 +283,7 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 		metadata.URL = response.Request.URL.String()
 	}
 	if metadata.URL == "" {
-		metadata.URL = targetURL.String()
+		metadata.URL = targetURL
 	}
 	if p.MaxBodyBytes > 0 {
 		body, readErr := readBoundedBody(response.Body, p.MaxBodyBytes)
@@ -378,26 +381,6 @@ func errorEvidenceWithRedirects(targetURL string, interpretation model.ProbeInte
 	}
 	evidence.Raw, _ = json.Marshal(metadata)
 	return evidence
-}
-
-func parseTargetURL(raw string) (*url.URL, error) {
-	if strings.TrimSpace(raw) != raw || raw == "" {
-		return nil, errors.New("target URL must be explicit and must not contain surrounding whitespace")
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("parse target URL: %w", err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported URL scheme %q", u.Scheme)
-	}
-	if u.Host == "" || u.Hostname() == "" {
-		return nil, errors.New("target URL must include a host")
-	}
-	if u.User != nil {
-		return nil, errors.New("URL user information is not allowed")
-	}
-	return u, nil
 }
 
 func classifyRequestError(err error, requestCtx, callerCtx context.Context, redirectLimitErr error, redirectCallbackFailed, hadRedirect bool) model.ProbeInterpretation {

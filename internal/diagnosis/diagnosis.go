@@ -1,9 +1,7 @@
 package diagnosis
 
 import (
-	"net/netip"
 	"sort"
-	"strings"
 
 	"github.com/yohnark/tadori/internal/model"
 )
@@ -227,7 +225,7 @@ func packetFlowBelongsToResult(flow model.PacketFlowEvidence, result model.Probe
 	if flow.CorrelationID != "" && result.CorrelationID != "" && flow.CorrelationID != result.CorrelationID {
 		return false
 	}
-	if result.Target.Host != "" && flow.Target.Host != "" && !targetsCorrelate(result.Target, flow.Target, model.LayerTCP) {
+	if result.Target.RequestedIdentity != "" && flow.Target.RequestedIdentity != "" && !targetsCorrelate(result.Target, flow.Target, model.LayerTCP) {
 		return false
 	}
 	return true
@@ -586,7 +584,8 @@ func contradicted(candidate observation, observations []observation) bool {
 }
 
 func targetsCorrelate(left, right model.Target, layer model.Layer) bool {
-	if left.Host != "" && right.Host != "" && canonicalHost(left.Host) != canonicalHost(right.Host) {
+	if left.RequestedIdentity != "" && right.RequestedIdentity != "" &&
+		!left.MatchesAddress(right.RequestedIdentity) && !right.MatchesAddress(left.RequestedIdentity) {
 		return false
 	}
 	if transportEndpointLayer(layer) && left.Port != 0 && right.Port != 0 && left.Port != right.Port {
@@ -602,12 +601,4 @@ func transportEndpointLayer(layer model.Layer) bool {
 	default:
 		return false
 	}
-}
-
-func canonicalHost(host string) string {
-	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
-	if address, err := netip.ParseAddr(host); err == nil {
-		return model.NormalizeAddr(address).String()
-	}
-	return strings.ToLower(host)
 }

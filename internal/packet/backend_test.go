@@ -16,7 +16,7 @@ func testScope(probeType ProbeType) Scope {
 			ProbeID:       string(probeType),
 			CorrelationID: "session-1/" + string(probeType),
 		},
-		Target:        model.Target{Host: "203.0.113.10", Port: 443},
+		Target:        model.NewTarget("203.0.113.10", 443),
 		ProbeType:     probeType,
 		ProcessID:     42,
 		WindowStarted: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),

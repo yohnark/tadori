@@ -34,7 +34,7 @@ func TestProbeKeepsWinHTTPAndWinINETEvidenceSeparateAndDoesNotExecutePAC(t *test
 		Now:               func() time.Time { return time.Date(2026, 9, 13, 1, 2, 3, 0, time.UTC) },
 	})
 
-	result := probe.Run(context.Background(), parentprobe.ExecutionContext{Target: model.Target{Host: "service.example", Port: 443}})
+	result := probe.Run(context.Background(), parentprobe.ExecutionContext{Target: model.NewTarget("service.example", 443)})
 	if result.Status != model.ProbeStatusPassed {
 		t.Fatalf("status = %s, want passed", result.Status)
 	}

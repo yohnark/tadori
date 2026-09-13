@@ -26,7 +26,11 @@ func (f *fakeResolver) LookupNetIP(_ context.Context, network, _ string) ([]neti
 }
 
 func target() model.Target {
-	return model.Target{URL: "https://service.example.test/path", Scheme: "https", Host: "service.example.test", Port: 443}
+	parsed, err := model.ParseTarget(model.TargetIntent{Input: "https://service.example.test/path"})
+	if err != nil {
+		panic(err)
+	}
+	return parsed
 }
 
 func deterministicClock() func() time.Time {
@@ -170,7 +174,7 @@ func TestProbeResolverFailureAndNoConfiguredResolver(t *testing.T) {
 func TestProbeMalformedTargetDoesNotCallResolver(t *testing.T) {
 	resolver := &fakeResolver{}
 	p := New(WithResolver(resolver), WithResolverConfig(StaticResolverConfig{"192.0.2.53"}))
-	result := p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{Host: "bad..name"}})
+	result := p.Run(context.Background(), probe.ExecutionContext{Target: model.Target{RequestedIdentity: "bad..name"}})
 	if result.Status != model.ProbeStatusError || result.Interpretation.FailureReason != model.FailureReasonProbeExecution {
 		t.Fatalf("malformed result = status %q reason %q", result.Status, result.Interpretation.FailureReason)
 	}
@@ -179,6 +183,24 @@ func TestProbeMalformedTargetDoesNotCallResolver(t *testing.T) {
 	}
 	if !evidenceContains(result.Evidence, "malformed_target") {
 		t.Fatalf("malformed result did not preserve malformed_target evidence")
+	}
+}
+
+func TestLiteralIPUsesCanonicalAddressWithoutResolver(t *testing.T) {
+	resolver := &fakeResolver{}
+	target, err := model.ParseTarget(model.TargetIntent{Input: "10.0.10.25"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := New(WithResolver(resolver), WithResolverConfig(StaticResolverConfig{"192.0.2.53"})).Run(context.Background(), probe.ExecutionContext{Target: target})
+	if result.Status != model.ProbeStatusPassed || result.Interpretation.FailureReason != model.FailureReasonNone {
+		t.Fatalf("literal result = %#v", result)
+	}
+	if len(resolver.calls) != 0 {
+		t.Fatalf("literal target invoked resolver: %#v", resolver.calls)
+	}
+	if !evidenceContains(result.Evidence, "10.0.10.25") {
+		t.Fatalf("literal resolution evidence missing address: %#v", result.Evidence)
 	}
 }
 

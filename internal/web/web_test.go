@@ -6,12 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/yohnark/tadori/internal/model"
-	"github.com/yohnark/tadori/internal/orchestrate"
 	"github.com/yohnark/tadori/internal/session"
 )
 
@@ -70,7 +70,7 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 		t.Errorf("diagnose Content-Type = %q", got)
 	}
 
-	parsedTarget, err := orchestrate.ParseTarget(targetURL)
+	parsedTarget, err := model.ParseTarget(model.TargetIntent{Input: targetURL})
 	if err != nil {
 		t.Fatalf("parse expected target: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	if !called {
 		t.Fatal("diagnostic runner was not invoked")
 	}
-	if gotTarget != parsedTarget {
+	if !reflect.DeepEqual(gotTarget, parsedTarget) {
 		t.Errorf("runner target = %+v, want %+v", gotTarget, parsedTarget)
 	}
 }
@@ -142,6 +142,32 @@ func TestDiagnosticViewEndpointKeepsCanonicalReportAndAcceptsProgressAdapter(t *
 	}
 }
 
+func TestStructuredTargetIntentRoundTripsThroughAPI(t *testing.T) {
+	var received model.Target
+	handler := NewHandler(HandlerOptions{Run: func(_ context.Context, target model.Target) model.DiagnosticReport {
+		received = target
+		return fixtureReport(target)
+	}})
+	defer handler.Close()
+
+	request := httptest.NewRequest(http.MethodPost, "/api/diagnose", strings.NewReader(`{"target":{"input":"fileserver01","service":"smb","port":1445}}`))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("structured target status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if received.OriginalInput != "fileserver01" || received.RequestedIdentity != "fileserver01" || received.Service.ID != model.ServiceProfileSMB || received.Port != 1445 {
+		t.Fatalf("structured target was not normalized authoritatively: %#v", received)
+	}
+	var report model.DiagnosticReport
+	if err := json.Unmarshal(recorder.Body.Bytes(), &report); err != nil {
+		t.Fatalf("decode structured target report: %v", err)
+	}
+	if !reflect.DeepEqual(report.Target, received) {
+		t.Fatalf("structured target did not round-trip in report: got %#v want %#v", report.Target, received)
+	}
+}
+
 func TestSessionViewEndpointProjectsTerminalCanonicalReport(t *testing.T) {
 	target := fixtureTarget(443)
 	representative := representativeUIFixtures()["icmp-unobservable-tcp-reaches"]
@@ -185,7 +211,7 @@ func TestSessionViewEndpointProjectsTerminalCanonicalReport(t *testing.T) {
 	if err := json.NewDecoder(viewResponse.Body).Decode(&view); err != nil {
 		t.Fatalf("decode session view: %v", err)
 	}
-	if len(view.Paths) != 2 || view.Overall.Destination.State != "confirmed" || view.Report.Target != target {
+	if len(view.Paths) != 2 || view.Overall.Destination.State != "confirmed" || !reflect.DeepEqual(view.Report.Target, target) {
 		t.Fatalf("session view projection = paths %d, destination %q, target %#v", len(view.Paths), view.Overall.Destination.State, view.Report.Target)
 	}
 }

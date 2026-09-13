@@ -1,60 +1,115 @@
 package orchestrate
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
 
-func TestParseTarget(t *testing.T) {
+	"github.com/yohnark/tadori/internal/model"
+)
+
+func TestCanonicalTargetParsing(t *testing.T) {
 	cases := []struct {
-		name       string
-		input      string
-		wantHost   string
-		wantPort   uint16
-		wantScheme string
-		wantErr    bool
+		name          string
+		input         string
+		service       model.ServiceProfileID
+		port          *uint16
+		wantIdentity  string
+		wantLiteral   string
+		wantService   model.ServiceProfileID
+		wantProtocol  model.ApplicationProtocol
+		wantTransport model.TransportProtocol
+		wantPort      uint16
+		wantResource  string
+		wantErr       string
 	}{
-		{name: "https default port", input: "https://example.com", wantHost: "example.com", wantPort: 443, wantScheme: "https"},
-		{name: "http default port", input: "http://example.com", wantHost: "example.com", wantPort: 80, wantScheme: "http"},
-		{name: "explicit port", input: "https://example.com:8443/path", wantHost: "example.com", wantPort: 8443, wantScheme: "https"},
-		{name: "arbitrary host port", input: "example.com:9443", wantHost: "example.com", wantPort: 9443},
-		{name: "IPv4 host port", input: "127.0.0.1:1", wantHost: "127.0.0.1", wantPort: 1},
-		{name: "IPv6 host port", input: "[2001:db8::1]:9443", wantHost: "2001:db8::1", wantPort: 9443},
-		{name: "mapped IPv4 literal", input: "http://[::ffff:10.0.10.10]:8080", wantHost: "10.0.10.10", wantPort: 8080, wantScheme: "http"},
-		{name: "empty", input: "", wantErr: true},
-		{name: "whitespace", input: " https://example.com", wantErr: true},
-		{name: "unsupported scheme", input: "ftp://example.com", wantErr: true},
-		{name: "missing host", input: "https:///path", wantErr: true},
-		{name: "invalid port", input: "https://example.com:notaport", wantErr: true},
-		{name: "host port missing brackets", input: "2001:db8::1:443", wantErr: true},
-		{name: "host port zero", input: "example.com:0", wantErr: true},
-		{name: "host port missing", input: "example.com", wantErr: true},
+		{name: "https default port", input: "https://example.com/path", wantIdentity: "example.com", wantService: model.ServiceProfileHTTPS, wantProtocol: model.ApplicationProtocolHTTPS, wantTransport: model.TransportTCP, wantPort: 443, wantResource: "/path"},
+		{name: "http default port", input: "http://example.com", wantIdentity: "example.com", wantService: model.ServiceProfileHTTP, wantProtocol: model.ApplicationProtocolHTTP, wantTransport: model.TransportTCP, wantPort: 80},
+		{name: "URL explicit non-default port", input: "https://example.com:8443/foo", wantIdentity: "example.com", wantService: model.ServiceProfileHTTPS, wantPort: 8443, wantResource: "/foo"},
+		{name: "hostname only", input: "example.com", wantIdentity: "example.com", wantService: model.ServiceProfileHTTP, wantPort: 80},
+		{name: "hostname port remains ambiguous", input: "example.com:443", wantIdentity: "example.com", wantService: model.ServiceProfileHTTP, wantProtocol: model.ApplicationProtocolHTTP, wantPort: 443},
+		{name: "IPv4", input: "10.0.10.25", wantIdentity: "10.0.10.25", wantLiteral: "10.0.10.25", wantService: model.ServiceProfileHTTP, wantPort: 80},
+		{name: "IPv4 explicit port", input: "10.0.10.25:445", wantIdentity: "10.0.10.25", wantLiteral: "10.0.10.25", wantService: model.ServiceProfileHTTP, wantPort: 445},
+		{name: "IPv6 literal", input: "2001:db8::1", wantIdentity: "2001:db8::1", wantLiteral: "2001:db8::1", wantService: model.ServiceProfileHTTP, wantPort: 80},
+		{name: "IPv6 literal explicit port", input: "[2001:db8::1]:8443", wantIdentity: "2001:db8::1", wantLiteral: "2001:db8::1", wantService: model.ServiceProfileHTTP, wantPort: 8443},
+		{name: "UNC share", input: `\fileserver01\share`, wantIdentity: "fileserver01", wantService: model.ServiceProfileSMB, wantProtocol: model.ApplicationProtocolSMB, wantPort: 445, wantResource: "/share"},
+		{name: "explicit SMB port override", input: "fileserver01", service: model.ServiceProfileSMB, port: uint16Pointer(1445), wantIdentity: "fileserver01", wantService: model.ServiceProfileSMB, wantPort: 1445},
+		{name: "DNS has both transports", input: "resolver.example", service: model.ServiceProfileDNS, wantIdentity: "resolver.example", wantService: model.ServiceProfileDNS, wantTransport: model.TransportUDPAndTCP, wantPort: 53},
+		{name: "conflicting URL service", input: "https://example.com", service: model.ServiceProfileHTTP, wantErr: "conflicting explicit service"},
+		{name: "conflicting URL and API port", input: "https://example.com:8443", port: uint16Pointer(9443), wantErr: "conflicting explicit ports"},
+		{name: "custom service requires port", input: "example.com", service: model.ServiceProfileCustomTCP, wantErr: "requires an explicit port"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			target, err := ParseTarget(tc.input)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("ParseTarget(%q) = %+v, want error", tc.input, target)
+			target, err := model.ParseTarget(model.TargetIntent{Input: tc.input, Service: tc.service, Port: tc.port})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("ParseTarget() error = %v, want substring %q", err, tc.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("ParseTarget(%q) unexpected error: %v", tc.input, err)
+				t.Fatalf("ParseTarget() error = %v", err)
 			}
-			if target.Host != tc.wantHost {
-				t.Errorf("Host = %q, want %q", target.Host, tc.wantHost)
+			if target.OriginalInput != tc.input {
+				t.Errorf("OriginalInput = %q, want %q", target.OriginalInput, tc.input)
 			}
-			if target.Port != tc.wantPort {
-				t.Errorf("Port = %d, want %d", target.Port, tc.wantPort)
+			if target.RequestedIdentity != tc.wantIdentity || target.LiteralIP != tc.wantLiteral {
+				t.Errorf("identity/literal = %q/%q, want %q/%q", target.RequestedIdentity, target.LiteralIP, tc.wantIdentity, tc.wantLiteral)
 			}
-			if target.Scheme != tc.wantScheme {
-				t.Errorf("Scheme = %q, want %q", target.Scheme, tc.wantScheme)
+			if target.Service.ID != tc.wantService || target.Port != tc.wantPort {
+				t.Errorf("service/port = %q/%d, want %q/%d", target.Service.ID, target.Port, tc.wantService, tc.wantPort)
 			}
-			if tc.wantScheme != "" && target.URL != tc.input {
-				t.Errorf("URL = %q, want %q", target.URL, tc.input)
+			if tc.wantProtocol != "" && target.ApplicationProtocol != tc.wantProtocol {
+				t.Errorf("application protocol = %q, want %q", target.ApplicationProtocol, tc.wantProtocol)
 			}
-			if tc.wantScheme == "" && target.URL != "" {
-				t.Errorf("host:port target URL = %q, want empty", target.URL)
+			if tc.wantTransport != "" && target.TransportProtocol != tc.wantTransport {
+				t.Errorf("transport = %q, want %q", target.TransportProtocol, tc.wantTransport)
+			}
+			if target.Resource != tc.wantResource {
+				t.Errorf("resource = %q, want %q", target.Resource, tc.wantResource)
 			}
 		})
 	}
 }
+
+func TestServiceProfilesAreExtensibleAndPortDefaultsAreProfileOwned(t *testing.T) {
+	profiles := model.ServiceProfiles()
+	if len(profiles) < 8 {
+		t.Fatalf("profiles = %d, want at least 8", len(profiles))
+	}
+	for _, profile := range profiles {
+		if profile.ID == "" || profile.Label == "" || len(profile.ApplicableTransports) == 0 {
+			t.Errorf("incomplete profile: %#v", profile)
+		}
+	}
+	target, err := model.ParseTarget(model.TargetIntent{Input: "server.example", Service: model.ServiceProfileSMB, Port: uint16Pointer(1445)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Port != 1445 || target.Service.DefaultPort != 445 {
+		t.Fatalf("explicit service port override = %#v", target)
+	}
+	if !reflect.DeepEqual(target.ResolvedAddresses, []string(nil)) {
+		t.Fatalf("parser populated resolution facts: %#v", target.ResolvedAddresses)
+	}
+}
+
+func TestLiteralTargetDoesNotRequireNameResolution(t *testing.T) {
+	target, err := model.ParseTarget(model.TargetIntent{Input: "10.0.10.25:445"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.LiteralIP == "" {
+		t.Fatal("literal IP was not recorded")
+	}
+	if target.RequestedIdentity != target.LiteralIP {
+		t.Fatalf("literal identity = %q, literal = %q", target.RequestedIdentity, target.LiteralIP)
+	}
+	if !target.MatchesAddress("10.0.10.25") {
+		t.Fatal("literal target did not match its concrete address")
+	}
+}
+
+func uint16Pointer(value uint16) *uint16 { return &value }

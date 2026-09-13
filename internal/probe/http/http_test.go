@@ -27,7 +27,7 @@ func TestProbeCapturesResponseAndSafeMetadataWithoutBodyByDefault(t *testing.T) 
 	}))
 	defer server.Close()
 
-	target := model.Target{URL: server.URL + "/missing"}
+	target := parsedTarget(t, server.URL+"/missing")
 	result := New().Run(context.Background(), probe.ExecutionContext{Target: target})
 
 	if result.Status != model.ProbeStatusFailed {
@@ -66,7 +66,7 @@ func TestProbeBoundsOptionalResponseBody(t *testing.T) {
 	defer server.Close()
 
 	result := New(Config{MaxBodyBytes: 4}).Run(context.Background(), probe.ExecutionContext{
-		Target: model.Target{URL: server.URL},
+		Target: parsedTarget(t, server.URL),
 	})
 	metadata := decodeEvidence[responseMetadata](t, result)
 	if metadata.Body != "0123" || metadata.BodyBytes != 4 || !metadata.BodyTruncated {
@@ -89,7 +89,7 @@ func TestProbeCapturesRedirectBehavior(t *testing.T) {
 	defer server.Close()
 
 	result := New().Run(context.Background(), probe.ExecutionContext{
-		Target: model.Target{URL: server.URL + "/start"},
+		Target: parsedTarget(t, server.URL+"/start"),
 	})
 	if result.Status != model.ProbeStatusPassed || result.Interpretation.FailureReason != model.FailureReasonNone {
 		t.Fatalf("result = %#v, want successful redirected response", result)
@@ -111,7 +111,7 @@ func TestProbeNormalizesRedirectLoop(t *testing.T) {
 	defer server.Close()
 
 	result := New(Config{MaxRedirects: 2}).Run(context.Background(), probe.ExecutionContext{
-		Target: model.Target{URL: server.URL + "/loop"},
+		Target: parsedTarget(t, server.URL+"/loop"),
 	})
 	if result.Status != model.ProbeStatusError {
 		t.Fatalf("status = %q, want error", result.Status)
@@ -132,7 +132,7 @@ func TestProbeNormalizesRequestTimeout(t *testing.T) {
 	defer server.Close()
 
 	result := New(Config{Timeout: 20 * time.Millisecond}).Run(context.Background(), probe.ExecutionContext{
-		Target: model.Target{URL: server.URL},
+		Target: parsedTarget(t, server.URL),
 	})
 	if result.Status != model.ProbeStatusError || result.Interpretation.FailureReason != FailureReasonRequestTimeout {
 		t.Fatalf("result = %#v, want request timeout", result)
@@ -146,7 +146,7 @@ func TestProbeNormalizesRequestTimeout(t *testing.T) {
 func TestProbeHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	result := New().Run(ctx, probe.ExecutionContext{Target: model.Target{URL: "http://127.0.0.1:1"}})
+	result := New().Run(ctx, probe.ExecutionContext{Target: parsedTarget(t, "http://127.0.0.1:1")})
 	if result.Status != model.ProbeStatusError || result.Interpretation.FailureReason != FailureReasonCancellation {
 		t.Fatalf("result = %#v, want cancellation", result)
 	}
@@ -154,7 +154,7 @@ func TestProbeHonorsCancellation(t *testing.T) {
 
 func TestProbeRejectsMalformedAndNonHTTPURLs(t *testing.T) {
 	for _, targetURL := range []string{"", "not a URL", "ftp://example.test/file", "http://", " http://example.test"} {
-		result := New().Run(context.Background(), probe.ExecutionContext{Target: model.Target{URL: targetURL}})
+		result := New().Run(context.Background(), probe.ExecutionContext{Target: model.Target{OriginalInput: targetURL}})
 		if result.Status != model.ProbeStatusError || result.Interpretation.FailureReason != FailureReasonMalformedURL {
 			t.Errorf("URL %q result = %#v, want malformed URL", targetURL, result)
 		}
@@ -168,7 +168,7 @@ func TestProbeKeepsDNSFailureAtDNSLayer(t *testing.T) {
 		}}
 	})
 	result := New(Config{Client: &stdhttp.Client{Transport: transport}}).Run(context.Background(), probe.ExecutionContext{
-		Target: model.Target{URL: "http://local.invalid/"},
+		Target: parsedTarget(t, "http://local.invalid/"),
 	})
 	if result.Interpretation.FailureReason != model.FailureReasonDNSNXDomain || result.Interpretation.Layer != model.LayerDNS {
 		t.Fatalf("interpretation = %#v, want DNS NXDOMAIN at DNS layer", result.Interpretation)
@@ -188,7 +188,7 @@ func TestProbeKeepsTransportFailureAtTCPLayer(t *testing.T) {
 		}}
 	})
 	result := New(Config{Client: &stdhttp.Client{Transport: transport}}).Run(context.Background(), probe.ExecutionContext{
-		Target: model.Target{URL: "http://127.0.0.1:9/"},
+		Target: parsedTarget(t, "http://127.0.0.1:9/"),
 	})
 	if result.Interpretation.FailureReason != model.FailureReasonTCPConnectionRefused || result.Interpretation.Layer != model.LayerTCP {
 		t.Fatalf("interpretation = %#v, want TCP refused at TCP layer", result.Interpretation)
@@ -202,7 +202,7 @@ func TestProbeKeepsTLSFailureAtTLSLayer(t *testing.T) {
 	defer server.Close()
 
 	result := New().Run(context.Background(), probe.ExecutionContext{
-		Target: model.Target{URL: server.URL},
+		Target: parsedTarget(t, server.URL),
 	})
 	if result.Interpretation.FailureReason != model.FailureReasonCertificateValidationFailure || result.Interpretation.Layer != model.LayerTLS {
 		t.Fatalf("interpretation = %#v, want TLS certificate failure", result.Interpretation)
@@ -218,7 +218,7 @@ func TestProbeTLSHandshakeFailureIsNotHTTPResponse(t *testing.T) {
 	result := New(Config{Client: &stdhttp.Client{Transport: &stdhttp.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // local fixture only
 	}}}).Run(context.Background(), probe.ExecutionContext{
-		Target: model.Target{URL: "https://" + strings.TrimPrefix(server.URL, "http://")},
+		Target: parsedTarget(t, "https://"+strings.TrimPrefix(server.URL, "http://")),
 	})
 	if result.Interpretation.FailureReason != model.FailureReasonTLSHandshakeFailure || result.Interpretation.Layer != model.LayerTLS {
 		t.Fatalf("interpretation = %#v, want TLS handshake failure", result.Interpretation)
@@ -233,6 +233,15 @@ func TestProbeImplementsSharedProbeContract(t *testing.T) {
 }
 
 type roundTripperFunc func(*stdhttp.Request) (*stdhttp.Response, error)
+
+func parsedTarget(t *testing.T, raw string) model.Target {
+	t.Helper()
+	target, err := model.ParseTarget(model.TargetIntent{Input: raw})
+	if err != nil {
+		t.Fatalf("parse target %q: %v", raw, err)
+	}
+	return target
+}
 
 func (function roundTripperFunc) RoundTrip(request *stdhttp.Request) (*stdhttp.Response, error) {
 	return function(request)

@@ -19,7 +19,7 @@ import (
 )
 
 func observeNativeICMP(ctx context.Context, request Request) (Observation, error) {
-	destination, address, err := nativeDestination(ctx, request.Target.Host)
+	destination, address, err := nativeDestination(ctx, request.Target.RequestedIdentity)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -118,7 +118,7 @@ func setICMPTTL(conn *net.IPConn, ttl int) error {
 }
 
 func observeNativeTCP(ctx context.Context, request Request) (Observation, error) {
-	destination, address, err := nativeDestination(ctx, request.Target.Host)
+	destination, address, err := nativeDestination(ctx, request.Target.RequestedIdentity)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -134,7 +134,7 @@ func observeNativeTCP(ctx context.Context, request Request) (Observation, error)
 			network = "tcp6"
 		}
 	}
-	host := strings.TrimPrefix(strings.TrimSuffix(request.Target.Host, "]"), "[")
+	host := strings.TrimPrefix(strings.TrimSuffix(request.Target.RequestedIdentity, "]"), "[")
 	dialer := net.Dialer{Timeout: request.Timeout}
 	dialer.Control = func(network, _ string, raw syscall.RawConn) error {
 		var controlErr error

@@ -598,7 +598,7 @@ func etwSocketAddress(data []byte) (string, uint16) {
 
 func etwTargetCandidate(observation model.PacketObservation, scope Scope) bool {
 	target := scope.Target
-	expected := strings.Trim(strings.TrimSpace(target.Host), "[]")
+	expected := strings.Trim(strings.TrimSpace(target.RequestedIdentity), "[]")
 	if address, err := netip.ParseAddr(expected); err == nil {
 		expected = model.NormalizeAddr(address).String()
 		for _, candidate := range []string{observation.SourceAddress, observation.DestinationAddress} {

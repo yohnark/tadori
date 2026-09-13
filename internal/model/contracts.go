@@ -15,18 +15,6 @@ import (
 // DiagnosticReport. It changes only when the canonical JSON contract changes.
 const DiagnosticSchemaVersion = "1"
 
-// Target identifies the endpoint being diagnosed. URL is the original
-// endpoint when one was supplied; the remaining fields are the parsed values
-// used by individual probes. A target without a URL can still be used by
-// lower-level probes with Host and Port populated.
-type Target struct {
-	URL    string `json:"url,omitempty"`
-	Scheme string `json:"scheme,omitempty"`
-	Host   string `json:"host"`
-	Port   uint16 `json:"port"`
-	Path   string `json:"path,omitempty"`
-}
-
 // ProbeStatus describes what happened when a probe ran. Failed means that the
 // probe observed a negative result; Error means that it could not produce a
 // valid observation. The normalized reason for either case belongs in

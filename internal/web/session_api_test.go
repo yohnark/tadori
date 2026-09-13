@@ -17,7 +17,10 @@ import (
 func TestSessionAPIStreamsProgressAndReturnsCanonicalReport(t *testing.T) {
 	release := make(chan struct{})
 	runnerStarted := make(chan struct{})
-	target := model.Target{URL: "https://example.com", Scheme: "https", Host: "example.com", Port: 443}
+	target, err := model.ParseTarget(model.TargetIntent{Input: "https://example.com"})
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
 	wantReport := fixtureReport(target)
 	handler := NewHandler(HandlerOptions{
 		OverallTimeout: time.Second,

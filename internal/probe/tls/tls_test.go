@@ -278,7 +278,11 @@ func startTLSServer(t *testing.T, certificate *cryptotls.Certificate, hold bool)
 func targetFor(address, host string) model.Target {
 	_, portString, _ := net.SplitHostPort(address)
 	port, _ := strconv.Atoi(portString)
-	return model.Target{Scheme: "https", Host: host, Port: uint16(port)}
+	target, err := model.ParseTarget(model.TargetIntent{Input: "https://" + net.JoinHostPort(host, strconv.Itoa(port))})
+	if err != nil {
+		panic(err)
+	}
+	return target
 }
 
 func decodeEvidence(t *testing.T, evidence model.Evidence, target any) {

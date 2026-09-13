@@ -3,6 +3,8 @@
 
   const form = document.querySelector("#diagnose-form");
   const targetInput = document.querySelector("#target");
+  const serviceInput = document.querySelector("#service");
+  const portInput = document.querySelector("#port");
   const button = form.querySelector("button[type=submit]");
   const cancelButton = document.querySelector("#cancel-button");
   const error = document.querySelector("#error");
@@ -33,6 +35,53 @@
   let activeSessionID = "";
   let eventSource = null;
   const progressItems = new Map();
+  let portWasEdited = false;
+
+  function selectedServiceOption() {
+    return serviceInput.options[serviceInput.selectedIndex];
+  }
+
+  function applyServiceDefaultPort() {
+    if (!portWasEdited) {
+      portInput.value = selectedServiceOption()?.dataset.defaultPort || "";
+    }
+  }
+
+  function updateComposerFromExplicitInput() {
+    const value = targetInput.value.trim();
+    const lower = value.toLowerCase();
+    let explicitService = "";
+    if (lower.startsWith("https://")) {
+      explicitService = "https";
+    } else if (lower.startsWith("http://")) {
+      explicitService = "http";
+    } else if (value.startsWith("\\")) {
+      explicitService = "smb";
+    }
+    if (explicitService) {
+      serviceInput.value = explicitService;
+      applyServiceDefaultPort();
+      try {
+        const parsed = new URL(value);
+        if (parsed.port) {
+          portInput.value = parsed.port;
+          portWasEdited = true;
+        }
+      } catch (_) {
+        // Backend normalization remains authoritative for incomplete input.
+      }
+    }
+  }
+
+  serviceInput.addEventListener("change", () => {
+    portWasEdited = false;
+    applyServiceDefaultPort();
+  });
+  portInput.addEventListener("input", () => {
+    portWasEdited = true;
+  });
+  targetInput.addEventListener("input", updateComposerFromExplicitInput);
+  applyServiceDefaultPort();
 
   function text(value) {
     return value === undefined || value === null ? "" : String(value);
@@ -589,7 +638,7 @@
     diagnosisDetail.textContent = diagnosisDetailText(overall);
     diagnosisCard.className = toneClass("overview-card panel", overall.tone);
     overallStatus.textContent = text(overall.execution_label || overall.execution_status);
-    reportTarget.textContent = formatTarget(view.report && view.report.target);
+    renderTargetDetails(view.report && view.report.target);
     renderDestination(overall.destination || {});
 
     probes.replaceChildren();
@@ -645,15 +694,28 @@
     return `${text(overall.diagnosis_state)}.${destination}`;
   }
 
-  function formatTarget(target) {
+  function renderTargetDetails(target) {
+    reportTarget.replaceChildren();
     if (!target) {
-      return "Target unavailable";
+      reportTarget.appendChild(element("div", "target-detail", "Target unavailable"));
+      return;
     }
-    if (target.url) {
-      return target.url;
+    const service = target.service || {};
+    const fields = [
+      ["Target", target.requested_identity || "identity unavailable"],
+      ["Service", service.label || target.application_protocol || "not specified"],
+      ["Transport", target.transport_protocol || "not specified"],
+      ["Port", target.port || "not specified"],
+    ];
+    if (target.resource) {
+      fields.push(["Resource", target.resource]);
     }
-    const host = target.host || "host unavailable";
-    return target.port ? `${host}:${target.port}` : host;
+    for (const [label, value] of fields) {
+      const row = element("div", "target-detail");
+      row.appendChild(element("span", "target-detail-label", label));
+      row.appendChild(element("span", "target-detail-value", value));
+      reportTarget.appendChild(row);
+    }
   }
 
   function focusEvidence(id) {
@@ -690,7 +752,13 @@
       const response = await fetch("/api/diagnoses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target: targetInput.value }),
+        body: JSON.stringify({
+          target: {
+            input: targetInput.value,
+            service: serviceInput.value,
+            ...(portWasEdited && portInput.value ? { port: Number(portInput.value) } : {}),
+          },
+        }),
       });
       const snapshot = await readResponse(response);
       activeSessionID = text(snapshot.id);

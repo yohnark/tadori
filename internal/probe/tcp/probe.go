@@ -6,12 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/netip"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/yohnark/tadori/internal/model"
 	probecontract "github.com/yohnark/tadori/internal/probe"
@@ -104,7 +101,7 @@ func NewWithDialer(timeout time.Duration, dialer ContextDialer) *Probe {
 // Name returns the stable machine-readable probe name.
 func (Probe) Name() string { return "tcp" }
 
-// Run connects to execution.Target.Host and execution.Target.Port. The
+// Run connects to execution.Target's canonical identity/endpoint and port. The
 // returned result always contains timing and one TCP evidence item, including
 // the original dial error when the connection fails. Context cancellation and
 // deadlines are preserved as normalized outcomes.
@@ -247,40 +244,11 @@ func (Probe) result(execution probecontract.ExecutionContext, start, completed t
 }
 
 func targetAddress(target model.Target) (string, error) {
-	host := target.Host
-	if host == "" {
-		return "", errors.New("TCP target host is empty")
+	address, err := model.NormalizeTarget(target).EndpointAddress()
+	if err != nil {
+		return "", fmt.Errorf("TCP target endpoint: %w", err)
 	}
-	if strings.TrimSpace(host) != host {
-		return "", errors.New("TCP target host has leading or trailing whitespace")
-	}
-	if target.Port == 0 {
-		return net.JoinHostPort(host, "0"), errors.New("TCP target port must be between 1 and 65535")
-	}
-	if strings.IndexFunc(host, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
-		return "", errors.New("TCP target host contains whitespace or control characters")
-	}
-	bracketed := strings.HasPrefix(host, "[") || strings.HasSuffix(host, "]")
-	if bracketed {
-		if !(strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]")) || len(host) < 3 {
-			return "", errors.New("TCP target host has malformed brackets")
-		}
-		host = host[1 : len(host)-1]
-		if _, err := netip.ParseAddr(host); err != nil {
-			return "", errors.New("TCP target host in brackets is not a valid IPv6 address")
-		}
-	}
-	if strings.ContainsAny(host, "[]") {
-		return "", errors.New("TCP target host has malformed brackets")
-	}
-	// A colon in a hostname means a port was accidentally included. A valid
-	// IPv6 literal (including a zone) is the one exception.
-	if strings.Contains(host, ":") {
-		if _, err := netip.ParseAddr(host); err != nil {
-			return "", errors.New("TCP target host is not a valid IPv6 address")
-		}
-	}
-	return net.JoinHostPort(host, strconv.Itoa(int(target.Port))), nil
+	return address, nil
 }
 
 func boundedTimeout(timeout time.Duration) time.Duration {

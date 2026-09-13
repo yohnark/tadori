@@ -14,22 +14,20 @@ import (
 func TestMarshalJSONRoundTripsCanonicalReport(t *testing.T) {
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	completed := started.Add(12 * time.Millisecond)
+	target, err := model.ParseTarget(model.TargetIntent{Input: "https://example.com/health"})
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
 	report := model.DiagnosticReport{
 		SchemaVersion: model.DiagnosticSchemaVersion,
-		Target: model.Target{
-			URL:    "https://example.com/health",
-			Scheme: "https",
-			Host:   "example.com",
-			Port:   443,
-			Path:   "/health",
-		},
-		Status:      model.ReportStatusIncomplete,
-		StartedAt:   &started,
-		CompletedAt: &completed,
+		Target:        target,
+		Status:        model.ReportStatusIncomplete,
+		StartedAt:     &started,
+		CompletedAt:   &completed,
 		Probes: []model.ProbeResult{
 			{
 				Name:   "dns",
-				Target: model.Target{Host: "example.com", Port: 443},
+				Target: model.NewTarget("example.com", 443),
 				Status: model.ProbeStatusPassed,
 				Timing: model.Timing{StartedAt: &started, CompletedAt: &completed, DurationMS: 12},
 				Evidence: []model.Evidence{{
@@ -45,7 +43,7 @@ func TestMarshalJSONRoundTripsCanonicalReport(t *testing.T) {
 			},
 			{
 				Name:   "tcp",
-				Target: model.Target{Host: "example.com", Port: 443},
+				Target: model.NewTarget("example.com", 443),
 				Status: model.ProbeStatusError,
 				Timing: model.Timing{DurationMS: 34},
 				Evidence: []model.Evidence{{
@@ -99,7 +97,7 @@ func TestMarshalJSONRoundTripsCanonicalReport(t *testing.T) {
 func TestWriteJSONMatchesMarshalJSON(t *testing.T) {
 	report := model.DiagnosticReport{
 		SchemaVersion: model.DiagnosticSchemaVersion,
-		Target:        model.Target{Host: "example.com", Port: 443},
+		Target:        model.NewTarget("example.com", 443),
 		Status:        model.ReportStatusComplete,
 		Probes:        []model.ProbeResult{},
 	}
@@ -124,7 +122,7 @@ func TestTimestampRenderingUsesUTCAcrossReportProbeAndEvidence(t *testing.T) {
 	evidenceCaptured := time.Date(2026, time.January, 2, 20, 34, 5, 500000000, time.FixedZone("india", 5*60*60+30*60))
 	report := model.DiagnosticReport{
 		SchemaVersion: model.DiagnosticSchemaVersion,
-		Target:        model.Target{Host: "example.com", Port: 443},
+		Target:        model.NewTarget("example.com", 443),
 		Status:        model.ReportStatusComplete,
 		StartedAt:     &reportStarted,
 		CompletedAt:   &reportCompleted,
@@ -193,9 +191,13 @@ func TestTimestampRenderingUsesUTCAcrossReportProbeAndEvidence(t *testing.T) {
 }
 
 func TestRenderHumanSuccessFixture(t *testing.T) {
+	target, err := model.ParseTarget(model.TargetIntent{Input: "https://example.com"})
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
 	report := model.DiagnosticReport{
 		SchemaVersion: model.DiagnosticSchemaVersion,
-		Target:        model.Target{URL: "https://example.com"},
+		Target:        target,
 		Status:        model.ReportStatusComplete,
 		Probes: []model.ProbeResult{{
 			Name:   "dns",
@@ -212,7 +214,10 @@ func TestRenderHumanSuccessFixture(t *testing.T) {
 	got := RenderHuman(report)
 	for _, want := range []string{
 		"Status: complete",
-		"Target: https://example.com",
+		"Target: example.com",
+		"Service: HTTPS",
+		"Transport: tcp",
+		"Port: 443",
 		"1. dns: passed (duration_ms=7)",
 		"interpretation: failure_reason=none layer=dns fault_domain=dns",
 		"Evidence:\n  (none)",
@@ -227,7 +232,7 @@ func TestRenderHumanSuccessFixture(t *testing.T) {
 func TestRenderHumanPartialFailureSeparatesEvidenceAndFinding(t *testing.T) {
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	report := model.DiagnosticReport{
-		Target: model.Target{Host: "example.com", Port: 443},
+		Target: model.NewTarget("example.com", 443),
 		Status: model.ReportStatusIncomplete,
 		Probes: []model.ProbeResult{
 			{
@@ -294,7 +299,7 @@ func TestRenderHumanPartialFailureSeparatesEvidenceAndFinding(t *testing.T) {
 
 func TestRenderHumanMultiLayerFailurePreservesOrderAndDoesNotDiagnoseRawText(t *testing.T) {
 	report := model.DiagnosticReport{
-		Target: model.Target{Host: "2001:db8::1", Port: 443},
+		Target: model.NewTarget("2001:db8::1", 443),
 		Status: model.ReportStatusComplete,
 		Probes: []model.ProbeResult{
 			{
@@ -331,7 +336,7 @@ func TestRenderHumanMultiLayerFailurePreservesOrderAndDoesNotDiagnoseRawText(t *
 	}
 
 	got := RenderHuman(report)
-	if !strings.Contains(got, "Target: [2001:db8::1]:443") {
+	if !strings.Contains(got, "Target: 2001:db8::1") || !strings.Contains(got, "Port: 443") {
 		t.Fatalf("IPv6 target was not rendered safely:\n%s", got)
 	}
 	if strings.Index(got, "1. interface") > strings.Index(got, "2. tls") {

@@ -49,8 +49,8 @@ func (scope Scope) validate() error {
 	if scope.Identity.SessionID == "" || scope.Identity.ProbeID == "" || scope.Identity.CorrelationID == "" {
 		return fmt.Errorf("%w: session, probe, and correlation identity are required", ErrInvalidScope)
 	}
-	if strings.TrimSpace(scope.Target.Host) == "" || scope.Target.Port == 0 {
-		return fmt.Errorf("%w: target host and port are required", ErrInvalidScope)
+	if strings.TrimSpace(scope.Target.RequestedIdentity) == "" || scope.Target.Port == 0 {
+		return fmt.Errorf("%w: target identity and port are required", ErrInvalidScope)
 	}
 	if scope.ProbeType != ProbeTypeTCP && scope.ProbeType != ProbeTypePath {
 		return fmt.Errorf("%w: unsupported probe type %q", ErrInvalidScope, scope.ProbeType)
@@ -112,7 +112,7 @@ func Correlate(input CorrelationInput) model.PacketFlowEvidence {
 		identity.CorrelationID = input.Result.CorrelationID
 	}
 	scope.Identity = identity
-	if scope.Target == (model.Target{}) {
+	if scope.Target.OriginalInput == "" && scope.Target.RequestedIdentity == "" && scope.Target.Port == 0 {
 		scope.Target = input.Result.Target
 	}
 	scope.Target = model.NormalizeTarget(scope.Target)
@@ -185,7 +185,7 @@ func canClassifyProbeNotEmitted(scope Scope, tuple tcpTuple, result model.ProbeR
 	// With a hostname and no resolved endpoint tuple, the capture cannot
 	// separate this dial from another same-process flow. Keep emission
 	// unknown rather than promoting an incomplete match to a local finding.
-	_, err := netip.ParseAddr(strings.Trim(strings.TrimSpace(scope.Target.Host), "[]"))
+	_, err := netip.ParseAddr(strings.Trim(strings.TrimSpace(scope.Target.LiteralIP), "[]"))
 	return err == nil
 }
 
@@ -360,7 +360,11 @@ func tcpTargetMatches(observation model.PacketObservation, target model.Target, 
 	observation = model.NormalizePacketObservation(observation)
 	remote := tuple.RemoteAddress
 	if remote == "" {
-		remote = normalizeAddress(target.Host)
+		if target.SelectedEndpoint != nil {
+			remote = normalizeAddress(target.SelectedEndpoint.Address)
+		} else {
+			remote = normalizeAddress(target.LiteralIP)
+		}
 	}
 	if tuple.LocalPort != 0 {
 		localPort := observation.LocalPort
@@ -402,7 +406,7 @@ func tcpTargetMatches(observation model.PacketObservation, target model.Target, 
 	}
 	addresses := []string{observation.SourceAddress, observation.DestinationAddress}
 	for _, address := range addresses {
-		if normalizeAddress(address) == remote || strings.EqualFold(address, target.Host) {
+		if normalizeAddress(address) == remote || target.MatchesAddress(address) {
 			return true
 		}
 	}
@@ -410,7 +414,16 @@ func tcpTargetMatches(observation model.PacketObservation, target model.Target, 
 }
 
 func pathTargetMatches(observation model.PacketObservation, target model.Target) bool {
-	expected := normalizeAddress(target.Host)
+	expected := normalizeAddress(target.LiteralIP)
+	if expected == "" && target.SelectedEndpoint != nil {
+		expected = normalizeAddress(target.SelectedEndpoint.Address)
+	}
+	if expected == "" && target.LiteralIP == "" {
+		// A hostname can still be matched by the identity-aware helper below;
+		// packet correlation remains conservative when no concrete address is
+		// available.
+		expected = normalizeAddress(target.RequestedIdentity)
+	}
 	if expected == "" {
 		return false
 	}
@@ -420,7 +433,7 @@ func pathTargetMatches(observation model.PacketObservation, target model.Target)
 		observation.QuotedSourceAddress,
 		observation.QuotedDestinationAddress,
 	} {
-		if normalizeAddress(address) == expected || strings.EqualFold(address, target.Host) {
+		if normalizeAddress(address) == expected || target.MatchesAddress(address) {
 			return true
 		}
 	}

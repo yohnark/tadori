@@ -185,7 +185,7 @@ func staticHandler(name, contentType string) http.HandlerFunc {
 }
 
 type diagnoseRequest struct {
-	Target string `json:"target"`
+	Target model.TargetIntent `json:"target"`
 }
 
 type errorResponse struct {
@@ -393,7 +393,7 @@ func decodeTarget(w http.ResponseWriter, r *http.Request) (model.Target, bool) {
 		return model.Target{}, false
 	}
 
-	target, err := orchestrate.ParseTarget(request.Target)
+	target, err := model.ParseTarget(request.Target)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return model.Target{}, false

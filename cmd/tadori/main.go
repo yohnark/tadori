@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yohnark/tadori/internal/model"
 	"github.com/yohnark/tadori/internal/orchestrate"
 	"github.com/yohnark/tadori/internal/report"
 	"github.com/yohnark/tadori/internal/web"
@@ -49,7 +50,7 @@ func run(args []string, stdout, stderr *os.File) int {
 }
 
 func printUsage(w *os.File) {
-	fmt.Fprintln(w, "usage: tadori diagnose <url|host:port> [--json]")
+	fmt.Fprintln(w, "usage: tadori diagnose <url|hostname|ip|unc> [--service id] [--port port] [--json]")
 	fmt.Fprintln(w, "       tadori serve [--listen 127.0.0.1] [--port 8080] [--no-open]")
 	fmt.Fprintln(w, "       tadori serve [--addr 127.0.0.1:8080] [--no-open]")
 }
@@ -189,13 +190,24 @@ func runDiagnose(args []string, stdout, stderr *os.File) int {
 	fs := flag.NewFlagSet("diagnose", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	jsonOutput := fs.Bool("json", false, "emit the diagnostic report as canonical JSON")
+	service := fs.String("service", "", "service profile (http, https, smb, rdp, ssh, dns, custom_tcp, custom_tls)")
+	port := fs.Uint("port", 0, "override the service port")
 
 	// flag.Parse stops at the first non-flag argument, but the positional URL
 	// naturally comes before --json in the documented usage. Separating flags
 	// from positional arguments here lets both orderings work.
 	var flagArgs, positional []string
-	for _, arg := range args {
-		if len(arg) > 1 && arg[0] == '-' {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--service" || arg == "-service" || arg == "--port" || arg == "-port" {
+			flagArgs = append(flagArgs, arg)
+			if index+1 >= len(args) {
+				flagArgs = append(flagArgs, "")
+				continue
+			}
+			index++
+			flagArgs = append(flagArgs, args[index])
+		} else if len(arg) > 1 && arg[0] == '-' {
 			flagArgs = append(flagArgs, arg)
 		} else {
 			positional = append(positional, arg)
@@ -209,7 +221,16 @@ func runDiagnose(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
-	target, err := orchestrate.ParseTarget(positional[0])
+	var portOverride *uint16
+	if flagWasSet(fs, "port") {
+		if *port > 65535 {
+			fmt.Fprintln(stderr, "tadori: port must be between 1 and 65535")
+			return 2
+		}
+		value := uint16(*port)
+		portOverride = &value
+	}
+	target, err := model.ParseTarget(model.TargetIntent{Input: positional[0], Service: model.ServiceProfileID(*service), Port: portOverride})
 	if err != nil {
 		fmt.Fprintf(stderr, "tadori: %v\n", err)
 		return 2

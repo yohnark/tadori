@@ -121,14 +121,7 @@ func (platformSnapshotProvider) Snapshot(ctx context.Context, target model.Targe
 }
 
 func targetURLForSnapshot(target model.Target) (string, error) {
-	if strings.TrimSpace(target.URL) == "" {
-		return "", errors.New("target URL is required")
-	}
-	parsed, err := url.Parse(target.URL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
-		return "", errors.New("target URL is malformed")
-	}
-	return parsed.String(), nil
+	return target.HTTPURL()
 }
 
 func resolveEffectiveProxy(ctx context.Context, targetURL, source string, config proxy.SourceConfiguration) EffectiveProxy {
@@ -170,10 +163,16 @@ func resolveEffectiveProxy(ctx context.Context, targetURL, source string, config
 
 func observePath(ctx context.Context, target model.Target, name, source, mode, endpoint string) PathObservation {
 	path := PathObservation{Name: name, Source: source, Mode: mode, Endpoint: endpoint, ConnectOutcome: ConnectNotApplicable}
-	parsed, err := url.Parse(target.URL)
+	targetURL, err := target.HTTPURL()
 	if err != nil {
 		path.FailureReason = model.FailureReasonProbeExecution
-		path.Error = "target URL is malformed"
+		path.Error = err.Error()
+		return path
+	}
+	parsed, err := url.Parse(targetURL)
+	if err != nil {
+		path.FailureReason = model.FailureReasonProbeExecution
+		path.Error = "canonical target URL is malformed"
 		return path
 	}
 	if mode == PathModeProxy || mode == PathModePAC {
@@ -576,11 +575,11 @@ type mibIPForwardRow2 struct {
 
 func collectEffectiveRoutes(ctx context.Context, target model.Target, paths []PathObservation, adapters []AdapterObservation) ([]RouteObservation, []ObservationIssue) {
 	addresses := make(map[string]netip.Addr)
-	if parsed, err := url.Parse(target.URL); err == nil {
-		if ip, ok := parseNetip(parsed.Hostname()); ok {
+	if ip, ok := parseNetip(target.LiteralIP); ok {
+		addresses[PathApplicationDirect] = ip
+	} else if len(target.ResolvedAddresses) > 0 {
+		if ip, ok := parseNetip(target.ResolvedAddresses[0]); ok {
 			addresses[PathApplicationDirect] = ip
-		} else if resolved, resolveErr := net.DefaultResolver.LookupNetIP(ctx, "ip", parsed.Hostname()); resolveErr == nil && len(resolved) > 0 {
-			addresses[PathApplicationDirect] = resolved[0].Unmap()
 		}
 	}
 	for _, path := range paths {

@@ -195,7 +195,7 @@ func NewManager(opts Options) *Manager {
 }
 
 // Create validates no semantics itself; callers should pass the normalized
-// model.Target returned by orchestrate.ParseTarget. NormalizeTarget is also
+// model.Target returned by model.ParseTarget. NormalizeTarget is also
 // applied here as a defensive boundary for non-HTTP callers.
 func (m *Manager) Create(target model.Target) (Snapshot, error) {
 	target = model.NormalizeTarget(target)

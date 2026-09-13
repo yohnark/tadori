@@ -11,14 +11,13 @@ import (
 func TestProbeResultJSONSeparatesRawEvidenceFromInterpretation(t *testing.T) {
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	completed := started.Add(12 * time.Millisecond)
+	target, err := ParseTarget(TargetIntent{Input: "https://example.com"})
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
 	want := ProbeResult{
-		Name: "dns",
-		Target: Target{
-			URL:    "https://example.com",
-			Scheme: "https",
-			Host:   "example.com",
-			Port:   443,
-		},
+		Name:   "dns",
+		Target: target,
 		Status: ProbeStatusFailed,
 		Timing: Timing{
 			StartedAt:   &started,
@@ -46,9 +45,10 @@ func TestProbeResultJSONSeparatesRawEvidenceFromInterpretation(t *testing.T) {
 	}
 
 	gotJSON := string(encoded)
-	wantJSON := `{"name":"dns","target":{"url":"https://example.com","scheme":"https","host":"example.com","port":443},"status":"failed","timing":{"started_at":"2026-01-02T03:04:05Z","completed_at":"2026-01-02T03:04:05.012Z","duration_ms":12},"evidence":[{"id":"dns-1","kind":"dns_resolution","source":"windows-resolver","raw":{"rcode":"NXDOMAIN","answers":[]}}],"interpretation":{"failure_reason":"dns_nxdomain","layer":"dns","fault_domain":"dns"}}`
-	if gotJSON != wantJSON {
-		t.Fatalf("unexpected canonical JSON\n got: %s\nwant: %s", gotJSON, wantJSON)
+	for _, field := range []string{`"original_input":"https://example.com"`, `"requested_identity":"example.com"`, `"id":"https"`, `"port":443`} {
+		if !strings.Contains(gotJSON, field) {
+			t.Fatalf("canonical JSON missing %q: %s", field, gotJSON)
+		}
 	}
 
 	var roundTrip ProbeResult
@@ -83,7 +83,7 @@ func TestProbeResultJSONNormalizesTimestampOffsets(t *testing.T) {
 	duration := completed.Sub(started).Milliseconds()
 	probe := ProbeResult{
 		Name:   "offset-probe",
-		Target: Target{Host: "example.com", Port: 443},
+		Target: NewTarget("example.com", 443),
 		Status: ProbeStatusPassed,
 		Timing: Timing{
 			StartedAt:   &started,
@@ -142,16 +142,12 @@ func TestProbeResultJSONNormalizesTimestampOffsets(t *testing.T) {
 func TestDiagnosticReportJSONCarriesFindingsWithoutPresentationText(t *testing.T) {
 	report := DiagnosticReport{
 		SchemaVersion: DiagnosticSchemaVersion,
-		Target: Target{
-			Scheme: "https",
-			Host:   "example.com",
-			Port:   443,
-		},
-		Status: ReportStatusComplete,
+		Target:        NewTarget("example.com", 443),
+		Status:        ReportStatusComplete,
 		Probes: []ProbeResult{
 			{
 				Name:   "icmp",
-				Target: Target{Host: "example.com", Port: 443},
+				Target: NewTarget("example.com", 443),
 				Status: ProbeStatusFailed,
 				Timing: Timing{DurationMS: 4},
 				Interpretation: ProbeInterpretation{

@@ -44,7 +44,7 @@ func TestPacketFlowEvidenceCanonicalizesWithoutPayloadFields(t *testing.T) {
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.FixedZone("test", 9*60*60))
 	flow := PacketFlowEvidence{
 		SessionID: "session-1", ProbeID: "tcp", CorrelationID: "session-1/tcp",
-		Target: Target{Host: "203.0.113.10", Port: 443}, CaptureStatus: PacketCaptureStatusAvailable,
+		Target: NewTarget("203.0.113.10", 443), CaptureStatus: PacketCaptureStatusAvailable,
 		WindowStartedAt: when, WindowCompletedAt: when.Add(time.Second), ProbeEmission: PacketEmissionObserved,
 		Outcome: PacketFlowOutcomeTCPRST, Certainty: EvidenceCertaintyConfirmedEndpointResponse,
 		Observations: []PacketObservation{{

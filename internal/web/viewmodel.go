@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -438,7 +437,8 @@ func packetFlowForTarget(evidence model.Evidence, target model.Target) (model.Pa
 	if target.Port != 0 && flow.Target.Port != 0 && target.Port != flow.Target.Port {
 		return model.PacketFlowEvidence{}, false
 	}
-	if target.Host != "" && flow.Target.Host != "" && !strings.EqualFold(strings.Trim(target.Host, "[]"), strings.Trim(flow.Target.Host, "[]")) {
+	if target.RequestedIdentity != "" && flow.Target.RequestedIdentity != "" &&
+		!target.MatchesAddress(flow.Target.RequestedIdentity) && !flow.Target.MatchesAddress(target.RequestedIdentity) {
 		return model.PacketFlowEvidence{}, false
 	}
 	return flow, true
@@ -451,29 +451,17 @@ func pathObservationForTarget(observation model.PathObservation, target model.Ta
 	// A hostname is resolved by the path adapter, so its observed destination
 	// is expected to be an address rather than the original hostname. Literal
 	// targets can be matched exactly through the canonical model helper.
-	host := strings.Trim(target.Host, "[]")
-	if _, err := netip.ParseAddr(host); err == nil {
-		return observation.MatchesTarget(target)
-	}
-	// A hostname is resolved by the path adapter, so its observed destination
-	// is expected to be an address rather than the original hostname.
-	return observation.Destination != ""
+	return observation.MatchesTarget(target)
 }
 
 func probeMatchesTarget(probe model.ProbeResult, target model.Target) bool {
 	if target.Port != 0 && probe.Target.Port != 0 && target.Port != probe.Target.Port {
 		return false
 	}
-	if target.Host == "" || probe.Target.Host == "" {
+	if target.RequestedIdentity == "" || probe.Target.RequestedIdentity == "" {
 		return true
 	}
-	if strings.EqualFold(strings.Trim(probe.Target.Host, "[]"), strings.Trim(target.Host, "[]")) {
-		return true
-	}
-	// Orchestration preserves the requested target in every probe today. The
-	// hostname fallback keeps the projection useful for adapters that resolve
-	// the target before constructing a probe result.
-	if _, err := netip.ParseAddr(strings.Trim(target.Host, "[]")); err != nil {
+	if target.MatchesAddress(probe.Target.RequestedIdentity) || probe.Target.MatchesAddress(target.RequestedIdentity) {
 		return true
 	}
 	return false
