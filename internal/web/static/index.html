@@ -4,143 +4,144 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Local, evidence-first network diagnosis">
-  <title>tadori · diagnostic workspace</title>
+  <title>tadori · diagnostic workbench</title>
   <link rel="stylesheet" href="/style.css">
   <script defer src="/app.js"></script>
 </head>
 <body>
   <header class="site-header">
     <div class="shell header-inner">
-      <div>
-        <p class="eyebrow">LOCAL DIAGNOSTIC WORKSPACE</p>
-        <h1>tadori <span>diagnose</span></h1>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <strong>tadori</strong>
+        <span class="brand-context">diagnostic workbench</span>
       </div>
-      <p class="local-badge">Loopback only · no telemetry</p>
+      <div class="runtime-note">
+        <span class="runtime-dot" aria-hidden="true"></span>
+        Local process · loopback only
+      </div>
     </div>
   </header>
 
-  <main class="shell workspace">
-    <aside class="control-panel panel">
-      <p class="eyebrow">NEW RUN</p>
-      <h2>What should we inspect?</h2>
+  <main class="shell app-shell">
+    <section class="command-bar" aria-label="Diagnostic target">
       <form id="diagnose-form">
-        <label for="target">Target URL or host:port</label>
-        <div class="target-row">
-          <input id="target" name="target" type="text" placeholder="https://example.com" required autocomplete="url" spellcheck="false">
-          <button class="primary-button" type="submit">Diagnose <span aria-hidden="true">→</span></button>
-        </div>
-        <p class="field-note">The target is sent only to this local tadori process.</p>
+        <label for="target">Target</label>
+        <input id="target" name="target" type="text" placeholder="https://example.com or host:port" required autocomplete="url" spellcheck="false">
+        <button class="primary-button" type="submit">Diagnose</button>
       </form>
       <p id="error" class="error" role="alert" hidden></p>
+    </section>
 
-      <div class="legend-block">
-        <p class="eyebrow">PATH LEGEND</p>
-        <p><span class="legend-dot observed"></span> Observed responder</p>
-        <p><span class="legend-dot inferred"></span> Inferred TTL range</p>
-        <p><span class="legend-dot unobservable"></span> Unobservable, not packet loss</p>
-        <p><span class="legend-dot failed"></span> Failed observation</p>
-      </div>
-    </aside>
-
-    <section class="results-column" aria-live="polite">
-      <section id="run-state" class="run-state panel" aria-live="polite">
-        <div class="state-heading">
-          <div>
-            <p class="eyebrow">RUN STATE</p>
-            <h2 id="run-state-label">Ready for a diagnosis</h2>
-          </div>
-          <div class="state-actions">
-            <button id="cancel-button" class="secondary-button" type="button" hidden>Cancel run</button>
-            <span id="run-state-badge" class="badge neutral">idle</span>
-          </div>
+    <section id="run-state" class="run-state" aria-live="polite">
+      <div class="state-heading">
+        <div class="state-copy">
+          <span class="section-kicker">Run state</span>
+          <strong id="run-state-label">Ready for a diagnosis</strong>
         </div>
-        <ol id="progress-list" class="progress-list">
-          <li class="progress-item neutral"><span class="progress-marker"></span><span>Enter a target to begin.</span></li>
-        </ol>
+        <div class="state-actions">
+          <button id="cancel-button" class="secondary-button" type="button" hidden>Cancel</button>
+          <span id="run-state-badge" class="badge neutral">idle</span>
+        </div>
+      </div>
+      <ol id="progress-list" class="progress-list">
+        <li class="progress-item neutral"><span class="progress-marker"></span><span>Enter a target to begin.</span></li>
+      </ol>
+    </section>
+
+    <section id="report" hidden>
+      <section class="overview-grid" aria-label="Diagnostic summary">
+        <article class="overview-card panel" id="diagnosis-card">
+          <p class="eyebrow">Diagnosis</p>
+          <h2 id="diagnosis-label">—</h2>
+          <p id="diagnosis-detail" class="muted">—</p>
+        </article>
+        <article class="overview-card panel" id="destination-card">
+          <p class="eyebrow">Destination</p>
+          <h2 id="destination-label">—</h2>
+          <p id="destination-detail" class="muted">—</p>
+          <p id="destination-references" class="reference-line"></p>
+        </article>
+        <article class="overview-card panel">
+          <p class="eyebrow">Execution</p>
+          <h2 id="overall-status">—</h2>
+          <p id="report-target" class="target-display">—</p>
+        </article>
       </section>
 
-      <section id="report" hidden>
-        <section class="overview-grid">
-          <article class="overview-card panel" id="diagnosis-card">
-            <p class="eyebrow">OVERALL DIAGNOSIS</p>
-            <h2 id="diagnosis-label">—</h2>
-            <p id="diagnosis-detail" class="muted">—</p>
-          </article>
-          <article class="overview-card panel" id="destination-card">
-            <p class="eyebrow">DESTINATION STATE</p>
-            <h2 id="destination-label">—</h2>
-            <p id="destination-detail" class="muted">—</p>
-            <p id="destination-references" class="reference-line"></p>
-          </article>
-          <article class="overview-card panel">
-            <p class="eyebrow">EXECUTION</p>
-            <h2 id="overall-status">—</h2>
-            <p id="report-target" class="target-display">—</p>
-          </article>
-        </section>
-
-        <section class="panel section-panel">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">PROBE LANES</p>
-              <h2>What was observed</h2>
+      <div class="workbench-grid">
+        <div class="workbench-main">
+          <section class="panel section-panel path-panel">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Observed path</p>
+                <h2>Forwarding observations</h2>
+              </div>
+              <span class="not-topology">Observed responses, not physical topology</span>
             </div>
-            <span id="probe-count" class="count-label"></span>
-          </div>
-          <div id="probes" class="probe-grid"></div>
-        </section>
-
-        <section class="panel section-panel">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">INTERPRETATION</p>
-              <h2>Findings</h2>
+            <div class="path-legend" aria-label="Path legend">
+              <span><i class="legend-dot observed"></i>Responder</span>
+              <span><i class="legend-dot inferred"></i>Inferred range</span>
+              <span><i class="legend-dot unobservable"></i>Unobservable</span>
+              <span><i class="legend-dot failed"></i>Failed observation</span>
             </div>
-          </div>
-          <div id="findings" class="finding-list"></div>
-        </section>
+            <p class="section-note">A missing TTL response is unobservable evidence, not a packet-loss claim.</p>
+            <div id="paths" class="path-list"></div>
+            <div id="path-empty" class="empty-state" hidden>No structured path observation is available in this report.</div>
+          </section>
 
-        <section class="panel section-panel path-panel">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">OBSERVED NETWORK PATH</p>
-              <h2>How the path appeared</h2>
+          <section class="panel section-panel">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Protocol / port</p>
+                <h2>Endpoint comparison</h2>
+              </div>
             </div>
-            <span class="not-topology">Not exact physical topology</span>
-          </div>
-          <p class="section-note">Each protocol is shown as its own bounded observation. A missing TTL response is unobservable evidence, not a packet-loss claim.</p>
-          <div id="paths" class="path-list"></div>
-          <div id="path-empty" class="empty-state" hidden>No structured path observation is available in this report.</div>
-        </section>
+            <p class="section-note">ICMP reachability and TCP destination-port connectivity are separate observations.</p>
+            <div id="comparisons" class="comparison-list"></div>
+          </section>
 
-        <section class="panel section-panel">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">PROTOCOL / PORT COMPARISON</p>
-              <h2>Endpoint evidence side by side</h2>
+          <section class="panel section-panel">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Checks</p>
+                <h2>Probe results</h2>
+              </div>
+              <span id="probe-count" class="count-label"></span>
             </div>
-          </div>
-          <p class="section-note">ICMP reachability and TCP destination-port connectivity are separate observations. A successful port does not imply that another port is open.</p>
-          <div id="comparisons" class="comparison-list"></div>
-        </section>
+            <div id="probes" class="probe-grid"></div>
+          </section>
 
-        <section class="panel section-panel evidence-panel">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">EVIDENCE INSPECTOR</p>
-              <h2 id="evidence-heading">Raw evidence inspector</h2>
+          <section class="panel section-panel">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Interpretation</p>
+                <h2>Findings</h2>
+              </div>
             </div>
-            <span class="section-note-inline">Select a path element or finding to focus its evidence.</span>
-          </div>
-          <div id="evidence" class="evidence-list"></div>
-        </section>
+            <div id="findings" class="finding-list"></div>
+          </section>
+        </div>
 
-        <details class="panel canonical-panel">
-          <summary>Canonical JSON</summary>
-          <p class="section-note">This is the canonical report returned by the diagnostic model. It is displayed as text and is not interpreted as markup.</p>
-          <pre id="canonical-json"></pre>
-        </details>
-      </section>
+        <aside class="workbench-inspector" aria-label="Evidence inspector">
+          <section class="panel section-panel evidence-panel">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Evidence</p>
+                <h2 id="evidence-heading">Structured evidence</h2>
+              </div>
+            </div>
+            <p class="section-note">Select a path element or finding to focus its evidence.</p>
+            <div id="evidence" class="evidence-list"></div>
+          </section>
+
+          <details class="panel canonical-panel">
+            <summary>Canonical JSON</summary>
+            <p class="section-note">Canonical diagnostic report. Displayed as text only.</p>
+            <pre id="canonical-json"></pre>
+          </details>
+        </aside>
+      </div>
     </section>
   </main>
 </body>
