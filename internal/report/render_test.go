@@ -229,6 +229,54 @@ func TestRenderHumanSuccessFixture(t *testing.T) {
 	}
 }
 
+func TestRenderHumanPlacesNormalizedNameResolutionBeforeRawEvidence(t *testing.T) {
+	target, err := model.ParseTarget(model.TargetIntent{Input: "https://fileserver.corp.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := model.DiagnosticReport{
+		Target: target,
+		Probes: []model.ProbeResult{{
+			Name: "dns",
+			NameResolution: &model.NameResolutionObservation{
+				RequestedName:   "fileserver.corp.example",
+				A:               []string{"10.30.14.22"},
+				SelectedAddress: "10.30.14.22",
+				EffectivePath: &model.NameResolutionPath{
+					Mechanism:  model.NameResolutionMechanismDNS,
+					Interface:  "Contoso VPN",
+					Resolver:   "10.20.0.53",
+					VPN:        true,
+					Certainty:  model.NameResolutionCertaintyObserved,
+					Provenance: "native query API; server selection unavailable",
+				},
+			},
+			Evidence: []model.Evidence{{
+				ID:   "dns/resolution",
+				Kind: model.EvidenceKindDNSResolution,
+				Raw:  json.RawMessage(`{"a":["10.30.14.22"]}`),
+			}},
+		}},
+	}
+	got := RenderHuman(report)
+	for _, want := range []string{
+		"Name Resolution:",
+		"Requested name: fileserver.corp.example",
+		"Resolution path: VPN / Corporate DNS",
+		"Interface: Contoso VPN",
+		"Resolver: 10.20.0.53",
+		"Answers A: 10.30.14.22",
+		"Selected endpoint: 10.30.14.22",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("name-resolution output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Index(got, "Name Resolution:") >= strings.Index(got, "Evidence:") {
+		t.Fatalf("normalized section was not rendered before raw evidence:\n%s", got)
+	}
+}
+
 func TestRenderHumanPartialFailureSeparatesEvidenceAndFinding(t *testing.T) {
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	report := model.DiagnosticReport{

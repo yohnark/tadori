@@ -253,6 +253,7 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 	if transport == nil {
 		transport = stdhttp.DefaultTransport
 	}
+	transport = transportForSelectedEndpoint(transport, target)
 	clientCopy.Transport = &recordingTransport{base: transport, recorder: observations}
 
 	response, err := clientCopy.Do(request)
@@ -307,6 +308,38 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 		result.Interpretation.FailureReason = model.FailureReasonHTTPStatusCode
 	}
 	return finish()
+}
+
+func transportForSelectedEndpoint(base stdhttp.RoundTripper, target model.Target) stdhttp.RoundTripper {
+	if target.SelectedEndpoint == nil || target.SelectedEndpoint.Address == "" {
+		return base
+	}
+	transport, ok := base.(*stdhttp.Transport)
+	if !ok || transport.Proxy != nil {
+		// A custom transport or a proxy owns its own dialing semantics. Do not
+		// claim that the selected endpoint was used when this adapter cannot
+		// safely preserve those semantics.
+		return base
+	}
+	endpoint, err := target.EndpointAddress()
+	if err != nil {
+		return base
+	}
+	clone := transport.Clone()
+	dial := clone.DialContext
+	if dial == nil {
+		dialer := &net.Dialer{}
+		dial = dialer.DialContext
+	}
+	requestedHost := strings.Trim(strings.TrimSpace(target.RequestedIdentity), "[]")
+	clone.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, _, splitErr := net.SplitHostPort(address)
+		if splitErr == nil && strings.EqualFold(strings.Trim(host, "[]"), requestedHost) {
+			return dial(ctx, network, endpoint)
+		}
+		return dial(ctx, network, address)
+	}
+	return clone
 }
 
 type responseMetadata struct {

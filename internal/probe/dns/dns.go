@@ -7,9 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
@@ -52,15 +49,69 @@ func (s StaticResolverConfig) ResolverAddresses(context.Context) ([]string, erro
 	return append([]string(nil), s...), nil
 }
 
+// ResolutionInterface is the DNS-relevant portion of one host interface.
+// Its servers and suffixes are configuration candidates; they are not an
+// assertion about the path selected for a particular query.
+type ResolutionInterface struct {
+	Index          int      `json:"index"`
+	Name           string   `json:"name"`
+	Up             bool     `json:"up"`
+	Loopback       bool     `json:"loopback"`
+	VirtualAdapter bool     `json:"virtual_adapter,omitempty"`
+	VPN            bool     `json:"vpn,omitempty"`
+	DNSServers     []string `json:"dns_servers,omitempty"`
+	DNSSuffix      string   `json:"dns_suffix,omitempty"`
+	DNSSearchList  []string `json:"dns_search_list,omitempty"`
+}
+
+// ResolutionEnvironment contains host state used to assemble a normalized
+// name-resolution observation. It is an adapter boundary, not a second target
+// representation.
+type ResolutionEnvironment struct {
+	Interfaces        []ResolutionInterface            `json:"interfaces,omitempty"`
+	CandidateSuffixes []string                         `json:"candidate_suffixes,omitempty"`
+	SearchList        []string                         `json:"search_list,omitempty"`
+	NRPT              []model.NameResolutionPolicyRule `json:"nrpt,omitempty"`
+	HostsFileEntries  []model.NameResolutionHostEntry  `json:"hosts_file_entries,omitempty"`
+	Source            string                           `json:"source,omitempty"`
+	Error             string                           `json:"error,omitempty"`
+	ResolverError     string                           `json:"resolver_error,omitempty"`
+	PolicyError       string                           `json:"policy_error,omitempty"`
+	HostsFileError    string                           `json:"hosts_file_error,omitempty"`
+}
+
+// EnvironmentProvider supplies native host state relevant to name
+// resolution. Windows supplies this through interfacecfg's native snapshot;
+// tests can use a deterministic fixture provider.
+type EnvironmentProvider interface {
+	ResolutionEnvironment(context.Context) (ResolutionEnvironment, error)
+}
+
+// EffectivePathProvider can report additional provenance that a resolver API
+// actually exposes. A provider may leave resolver/interface fields empty when
+// the underlying operating system does not expose those selections.
+type EffectivePathProvider interface {
+	EffectivePath(context.Context, string) (model.NameResolutionPath, error)
+}
+
+// EnvironmentProviderFunc adapts a function to EnvironmentProvider.
+type EnvironmentProviderFunc func(context.Context) (ResolutionEnvironment, error)
+
+func (f EnvironmentProviderFunc) ResolutionEnvironment(ctx context.Context) (ResolutionEnvironment, error) {
+	return f(ctx)
+}
+
 // Probe collects resolver configuration and A/AAAA observations for a target.
 // It implements probe.Probe.
 type Probe struct {
-	resolver    Resolver
-	config      ResolverConfigProvider
-	timeout     time.Duration
-	now         func() time.Time
-	resolverSet bool
-	configSet   bool
+	resolver       Resolver
+	config         ResolverConfigProvider
+	environment    EnvironmentProvider
+	timeout        time.Duration
+	now            func() time.Time
+	resolverSet    bool
+	configSet      bool
+	environmentSet bool
 }
 
 // DNSProbe is an expressive alias for Probe.
@@ -69,14 +120,15 @@ type DNSProbe = Probe
 // Option configures a DNS Probe.
 type Option func(*Probe)
 
-// New constructs a DNS probe using the host resolver configuration and Go's
-// default resolver. Lookup time is bounded to five seconds by default.
+// New constructs a DNS probe using the platform resolver and host
+// configuration adapters. Lookup time is bounded to five seconds by default.
 func New(opts ...Option) *Probe {
 	p := &Probe{
-		resolver: net.DefaultResolver,
-		config:   SystemResolverConfig{},
-		timeout:  defaultLookupTimeout,
-		now:      time.Now,
+		resolver:    newSystemResolver(),
+		config:      SystemResolverConfig{},
+		environment: newSystemEnvironmentProvider(),
+		timeout:     defaultLookupTimeout,
+		now:         time.Now,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -84,7 +136,7 @@ func New(opts ...Option) *Probe {
 		}
 	}
 	if p.resolver == nil {
-		p.resolver = net.DefaultResolver
+		p.resolver = newSystemResolver()
 	}
 	if p.config == nil {
 		p.config = SystemResolverConfig{}
@@ -141,6 +193,21 @@ func WithNow(now func() time.Time) Option {
 			p.now = now
 		}
 	}
+}
+
+// WithEnvironmentProvider supplies deterministic or embedded host state for
+// path assembly. A nil provider disables environment collection.
+func WithEnvironmentProvider(provider EnvironmentProvider) Option {
+	return func(p *Probe) {
+		p.environment = provider
+		p.environmentSet = true
+	}
+}
+
+// WithResolutionEnvironment is a function-oriented synonym for
+// WithEnvironmentProvider.
+func WithResolutionEnvironment(provider func(context.Context) (ResolutionEnvironment, error)) Option {
+	return WithEnvironmentProvider(EnvironmentProviderFunc(provider))
 }
 
 // WithResolverConfig supplies a resolver configuration source. In addition to
@@ -240,14 +307,27 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 			ID: "dns-resolution", Kind: model.EvidenceKindDNSResolution, Source: "canonical-literal",
 			Raw: mustJSON(resolution),
 		})
+		result.NameResolution = literalNameResolution(target, host)
 		return finish()
 	}
 
 	lookupCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
+	environment, environmentErr := p.environmentBounded(lookupCtx)
+	if environmentErr != nil && !errors.Is(environmentErr, context.Canceled) && !errors.Is(environmentErr, context.DeadlineExceeded) {
+		// Environment collection is supporting context. Preserve the error in
+		// configuration evidence while allowing the resolver lane to make its
+		// own observation. Do not overwrite a native source label.
+		if environment.Error == "" {
+			environment.Error = environmentErr.Error()
+		}
+		if environment.Source == "" {
+			environment.Source = "environment-error"
+		}
+	}
 	addresses, configErr := p.configAddressesBounded(lookupCtx)
-	configEvidence := resolverConfigEvidence(addresses, configErr, p.configSource())
+	configEvidence := resolverConfigEvidence(addresses, configErr, p.configSource(), environment)
 	result.Evidence = append(result.Evidence, configEvidence)
 	if configErr != nil {
 		kind := errorKind(configErr)
@@ -259,12 +339,14 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 			result.Status = model.ProbeStatusError
 		}
 		result.Evidence = append(result.Evidence, makeResolutionEvidence(host, nil, nil, nil, configErr, kind))
+		result.NameResolution = buildNameResolution(lookupCtx, host, addresses, environment, p.resolver, lookupResult{}, configErr, result.Evidence)
 		return finish()
 	}
 	if err := lookupCtx.Err(); err != nil {
 		result.Interpretation.FailureReason = contextReason(err)
 		result.Status = model.ProbeStatusFailed
 		result.Evidence = append(result.Evidence, makeResolutionEvidence(host, nil, nil, nil, err, errorKind(err)))
+		result.NameResolution = buildNameResolution(lookupCtx, host, addresses, environment, p.resolver, lookupResult{}, err, result.Evidence)
 		return finish()
 	}
 	if len(addresses) == 0 && (!p.resolverSet || p.configSet) {
@@ -275,6 +357,7 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 		result.Interpretation.FailureReason = model.FailureReasonDNSResolverFailure
 		result.Status = model.ProbeStatusError
 		result.Evidence = append(result.Evidence, makeResolutionEvidence(host, nil, nil, nil, err, "no_configured_resolver"))
+		result.NameResolution = buildNameResolution(lookupCtx, host, addresses, environment, p.resolver, lookupResult{}, err, result.Evidence)
 		return finish()
 	}
 
@@ -283,6 +366,7 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 		result.Interpretation.FailureReason = contextReason(lookupErr)
 		result.Status = model.ProbeStatusFailed
 		result.Evidence = append(result.Evidence, makeResolutionEvidence(host, nil, nil, addresses, lookupErr, errorKind(lookupErr)))
+		result.NameResolution = buildNameResolution(lookupCtx, host, addresses, environment, p.resolver, resolution, lookupErr, result.Evidence)
 		return finish()
 	}
 	result.Evidence = append(result.Evidence, makeResolutionEvidence(host, resolution.a, resolution.aaaa, addresses, nil, ""))
@@ -295,13 +379,16 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 	})
 
 	result.Status, result.Interpretation.FailureReason = resolutionStatus(resolution)
+	result.NameResolution = buildNameResolution(lookupCtx, host, addresses, environment, p.resolver, resolution, nil, result.Evidence)
 	return finish()
 }
 
 type lookupResult struct {
-	a, aaaa  []string
-	results  []familyResult
-	failures []lookupFailure
+	a, aaaa        []string
+	selected       string
+	selectedFamily string
+	results        []familyResult
+	failures       []lookupFailure
 }
 
 type lookupFailure struct {
@@ -332,11 +419,12 @@ type DNSResolutionEvidence struct {
 // DNSConfigurationEvidence is the structured raw observation emitted for
 // resolver configuration.
 type DNSConfigurationEvidence struct {
-	Configured bool     `json:"configured"`
-	Resolvers  []string `json:"resolvers,omitempty"`
-	Source     string   `json:"source,omitempty"`
-	Error      string   `json:"error,omitempty"`
-	ErrorKind  string   `json:"error_kind,omitempty"`
+	Configured  bool                   `json:"configured"`
+	Resolvers   []string               `json:"resolvers,omitempty"`
+	Source      string                 `json:"source,omitempty"`
+	Environment *ResolutionEnvironment `json:"environment,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	ErrorKind   string                 `json:"error_kind,omitempty"`
 }
 
 type familyResult = DNSFamilyResult
@@ -368,6 +456,10 @@ func (p *Probe) lookupHost(ctx context.Context, host string) lookupResult {
 			out.a = converted
 		} else {
 			out.aaaa = converted
+		}
+		if out.selected == "" && len(converted) != 0 {
+			out.selected = converted[0]
+			out.selectedFamily = family.name
 		}
 	}
 	return out
@@ -477,6 +569,27 @@ func (p *Probe) configAddressesBounded(ctx context.Context) ([]string, error) {
 	}
 }
 
+func (p *Probe) environmentBounded(ctx context.Context) (ResolutionEnvironment, error) {
+	if p.environment == nil || (!p.environmentSet && (p.configSet || p.resolverSet)) {
+		return ResolutionEnvironment{}, nil
+	}
+	type environmentResult struct {
+		environment ResolutionEnvironment
+		err         error
+	}
+	result := make(chan environmentResult, 1)
+	go func() {
+		environment, err := p.environment.ResolutionEnvironment(ctx)
+		result <- environmentResult{environment: environment, err: err}
+	}()
+	select {
+	case value := <-result:
+		return value.environment, value.err
+	case <-ctx.Done():
+		return ResolutionEnvironment{}, ctx.Err()
+	}
+}
+
 func (p *Probe) configSource() string {
 	if source, ok := p.config.(interface{ Source() string }); ok {
 		return source.Source()
@@ -496,11 +609,14 @@ func makeResolutionEvidence(host string, a, aaaa, resolvers []string, err error,
 	if err != nil {
 		value.Results = []familyResult{{Family: "lookup", Error: err.Error(), ErrorKind: kind}}
 	}
-	return model.Evidence{ID: "dns/resolution", Kind: model.EvidenceKindDNSResolution, Source: "go-resolver", Raw: mustJSON(value)}
+	return model.Evidence{ID: "dns/resolution", Kind: model.EvidenceKindDNSResolution, Source: systemResolutionSource(), Raw: mustJSON(value)}
 }
 
-func resolverConfigEvidence(addresses []string, err error, source string) model.Evidence {
+func resolverConfigEvidence(addresses []string, err error, source string, environment ResolutionEnvironment) model.Evidence {
 	value := DNSConfigurationEvidence{Configured: len(addresses) > 0, Resolvers: append([]string(nil), addresses...), Source: source}
+	if len(environment.Interfaces) != 0 || len(environment.CandidateSuffixes) != 0 || len(environment.SearchList) != 0 || len(environment.NRPT) != 0 || len(environment.HostsFileEntries) != 0 || environment.Source != "" || environment.Error != "" || environment.ResolverError != "" || environment.PolicyError != "" || environment.HostsFileError != "" {
+		value.Environment = &environment
+	}
 	if err != nil {
 		value.Error = err.Error()
 		value.ErrorKind = "configuration_failure"
@@ -508,6 +624,295 @@ func resolverConfigEvidence(addresses []string, err error, source string) model.
 		value.ErrorKind = "no_configured_resolver"
 	}
 	return model.Evidence{ID: "dns/configuration", Kind: model.EvidenceKindDNSConfiguration, Source: source, Raw: mustJSON(value)}
+}
+
+func literalNameResolution(target model.Target, host string) *model.NameResolutionObservation {
+	observation := model.NameResolutionObservation{
+		RequestedName: host,
+		EffectivePath: &model.NameResolutionPath{
+			State:       model.NameResolutionPathEffective,
+			Mechanism:   model.NameResolutionMechanismLiteralIP,
+			Certainty:   model.NameResolutionCertaintyObserved,
+			Provenance:  "canonical target literal; DNS was skipped",
+			EvidenceIDs: []string{"dns-resolution"},
+		},
+		EvidenceIDs: []string{"dns-resolution"},
+	}
+	if address, err := netip.ParseAddr(target.LiteralIP); err == nil {
+		address = model.NormalizeAddr(address)
+		if address.Is4() {
+			observation.A = []string{address.String()}
+			observation.SelectedFamily = "A"
+		} else {
+			observation.AAAA = []string{address.String()}
+			observation.SelectedFamily = "AAAA"
+		}
+		observation.SelectedAddress = address.String()
+		observation.EffectivePath.A = append([]string(nil), observation.A...)
+		observation.EffectivePath.AAAA = append([]string(nil), observation.AAAA...)
+	}
+	normalized := model.NormalizeNameResolutionObservation(observation)
+	return &normalized
+}
+
+func buildNameResolution(ctx context.Context, host string, configured []string, environment ResolutionEnvironment, resolver Resolver, resolution lookupResult, lookupErr error, evidence []model.Evidence) *model.NameResolutionObservation {
+	observation := model.NameResolutionObservation{
+		RequestedName:     host,
+		CandidateSuffixes: append([]string(nil), environment.CandidateSuffixes...),
+		EvidenceIDs:       evidenceIDs(evidence),
+	}
+	if environment.Error != "" {
+		observation.Limitations = append(observation.Limitations, "name-resolution environment: "+environment.Error)
+	}
+	if environment.ResolverError != "" {
+		observation.Limitations = append(observation.Limitations, "configured resolver state: "+environment.ResolverError)
+	}
+	if environment.PolicyError != "" {
+		observation.Limitations = append(observation.Limitations, "NRPT policy: "+environment.PolicyError)
+	}
+	if environment.HostsFileError != "" {
+		observation.Limitations = append(observation.Limitations, "hosts file: "+environment.HostsFileError)
+	}
+	if lookupErr != nil {
+		observation.Limitations = append(observation.Limitations, "resolution attempt: "+lookupErr.Error())
+	}
+	for _, failure := range resolution.failures {
+		if failure.err != nil {
+			observation.Limitations = append(observation.Limitations, failure.family+" lookup: "+failure.err.Error())
+		}
+	}
+	for _, suffix := range environment.SearchList {
+		observation.CandidateSuffixes = appendUniqueName(observation.CandidateSuffixes, suffix)
+	}
+	for _, iface := range environment.Interfaces {
+		observation.CandidateSuffixes = appendUniqueName(observation.CandidateSuffixes, iface.DNSSuffix)
+		for _, suffix := range iface.DNSSearchList {
+			observation.CandidateSuffixes = appendUniqueName(observation.CandidateSuffixes, suffix)
+		}
+	}
+	observation.CandidateNamespaces = append([]string(nil), observation.CandidateSuffixes...)
+	observation.CandidateNames = candidateNames(host, observation.CandidateSuffixes)
+
+	configuredPathResolvers := make(map[string]struct{})
+	for _, iface := range environment.Interfaces {
+		for _, server := range iface.DNSServers {
+			server = normalizeResolverValue(server)
+			if server == "" {
+				continue
+			}
+			configuredPathResolvers[server] = struct{}{}
+			namespaces := make([]string, 0, len(iface.DNSSearchList)+1)
+			namespaces = appendUniqueName(namespaces, iface.DNSSuffix)
+			for _, suffix := range iface.DNSSearchList {
+				namespaces = appendUniqueName(namespaces, suffix)
+			}
+			path := model.NameResolutionPath{
+				State:          model.NameResolutionPathConfiguredCandidate,
+				Mechanism:      model.NameResolutionMechanismDNS,
+				Resolver:       server,
+				Interface:      iface.Name,
+				InterfaceIndex: iface.Index,
+				VirtualAdapter: iface.VirtualAdapter,
+				VPN:            iface.VPN,
+				Namespaces:     namespaces,
+				Certainty:      model.NameResolutionCertaintyConfigured,
+				Provenance:     "interface-specific DNS configuration; not proof of query selection",
+				EvidenceIDs:    []string{"dns/configuration"},
+			}
+			observation.Paths = append(observation.Paths, path)
+		}
+	}
+	for _, server := range configured {
+		server = normalizeResolverValue(server)
+		if server == "" {
+			continue
+		}
+		if _, exists := configuredPathResolvers[server]; exists {
+			continue
+		}
+		observation.Paths = append(observation.Paths, model.NameResolutionPath{
+			State:       model.NameResolutionPathConfiguredCandidate,
+			Mechanism:   model.NameResolutionMechanismDNS,
+			Resolver:    server,
+			Certainty:   model.NameResolutionCertaintyConfigured,
+			Provenance:  "configured resolver candidate; not proof of query selection",
+			EvidenceIDs: []string{"dns/configuration"},
+		})
+		configuredPathResolvers[server] = struct{}{}
+	}
+
+	matchedPolicies := model.NameResolutionPoliciesForNames(observation.CandidateNames, environment.NRPT)
+	for _, rule := range matchedPolicies {
+		for _, namespace := range rule.Namespaces {
+			observation.CandidateNamespaces = appendUniqueName(observation.CandidateNamespaces, namespace)
+		}
+		servers := rule.NameServers
+		if len(servers) == 0 {
+			servers = []string{""}
+		}
+		for _, server := range servers {
+			observation.Paths = append(observation.Paths, model.NameResolutionPath{
+				State:        model.NameResolutionPathPolicyCandidate,
+				Mechanism:    model.NameResolutionMechanismDNS,
+				Resolver:     server,
+				VPN:          rule.VPNRequired,
+				Namespace:    firstPolicyNamespace(rule),
+				Namespaces:   append([]string(nil), rule.Namespaces...),
+				PolicySource: rule.Source,
+				PolicyRule:   rule.RuleID,
+				Certainty:    model.NameResolutionCertaintyConfigured,
+				Provenance:   "matching NRPT namespace policy; not proof of query selection",
+				EvidenceIDs:  []string{"dns/configuration"},
+			})
+		}
+	}
+	for _, entry := range environment.HostsFileEntries {
+		if strings.EqualFold(strings.TrimSuffix(entry.Name, "."), strings.TrimSuffix(host, ".")) {
+			observation.HostsFileEntries = append(observation.HostsFileEntries, entry)
+			observation.Paths = append(observation.Paths, model.NameResolutionPath{
+				State:       model.NameResolutionPathConfiguredCandidate,
+				Mechanism:   model.NameResolutionMechanismHostsFile,
+				A:           hostEntryFamily(entry.Addresses, true),
+				AAAA:        hostEntryFamily(entry.Addresses, false),
+				Certainty:   model.NameResolutionCertaintyConfigured,
+				Provenance:  entry.Source + "; matching entry is a candidate, not proof of selection",
+				EvidenceIDs: []string{"dns/configuration"},
+			})
+		}
+	}
+
+	observation.A = append([]string(nil), resolution.a...)
+	observation.AAAA = append([]string(nil), resolution.aaaa...)
+	observation.SelectedAddress = resolution.selected
+	observation.SelectedFamily = resolution.selectedFamily
+	effective := effectivePath(ctx, resolver, host, resolution, lookupErr)
+	if effective != nil {
+		effective.A = append([]string(nil), observation.A...)
+		effective.AAAA = append([]string(nil), observation.AAAA...)
+		effective.EvidenceIDs = evidenceIDs(evidence)
+		if len(matchedPolicies) > 0 {
+			rule := matchedPolicies[0]
+			if effective.Namespace == "" {
+				effective.Namespace = firstPolicyNamespace(rule)
+			}
+			if effective.PolicySource == "" {
+				effective.PolicySource = rule.Source
+			}
+			if effective.PolicyRule == "" {
+				effective.PolicyRule = rule.RuleID
+			}
+			if rule.VPNRequired {
+				effective.VPN = true
+			}
+		}
+		observation.EffectivePath = effective
+		observation.Paths = append(observation.Paths, *effective)
+	}
+	normalized := model.NormalizeNameResolutionObservation(observation)
+	return &normalized
+}
+
+func effectivePath(ctx context.Context, resolver Resolver, host string, resolution lookupResult, lookupErr error) *model.NameResolutionPath {
+	// A configuration or context failure means the query was not observed by
+	// this probe. Do not let a resolver adapter manufacture an effective path
+	// for work that never reached the operating-system query API.
+	if lookupErr != nil {
+		return nil
+	}
+	if provider, ok := resolver.(EffectivePathProvider); ok {
+		if path, err := provider.EffectivePath(ctx, host); err == nil {
+			if path.State == "" {
+				path.State = model.NameResolutionPathEffective
+			}
+			if path.Mechanism == "" {
+				path.Mechanism = model.NameResolutionMechanismUnknown
+			}
+			if path.Certainty == "" {
+				path.Certainty = model.NameResolutionCertaintyObserved
+			}
+			return &path
+		}
+	}
+	if len(resolution.failures) == 0 && resolution.selected == "" && len(resolution.a) == 0 && len(resolution.aaaa) == 0 {
+		return nil
+	}
+	provenance := "resolver returned a result; server and interface provenance are unavailable"
+	if len(resolution.failures) != 0 {
+		provenance = "effective resolver attempt failed; server and interface provenance are unavailable"
+	}
+	return &model.NameResolutionPath{
+		State:       model.NameResolutionPathEffective,
+		Mechanism:   model.NameResolutionMechanismDNS,
+		Certainty:   model.NameResolutionCertaintyObserved,
+		Provenance:  provenance,
+		EvidenceIDs: []string{"dns/resolution"},
+	}
+}
+
+func evidenceIDs(evidence []model.Evidence) []string {
+	ids := make([]string, 0, len(evidence))
+	for _, item := range evidence {
+		if item.ID != "" {
+			ids = append(ids, item.ID)
+		}
+	}
+	return ids
+}
+
+func candidateNames(host string, suffixes []string) []string {
+	result := []string{host}
+	if strings.Contains(host, ".") {
+		return result
+	}
+	for _, suffix := range suffixes {
+		suffix = strings.Trim(strings.TrimSpace(suffix), ".")
+		if suffix != "" {
+			result = appendUniqueName(result, host+"."+suffix)
+		}
+	}
+	return result
+}
+
+func normalizeResolverValue(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), "[]")
+	if address, err := netip.ParseAddr(value); err == nil {
+		return model.NormalizeAddr(address).String()
+	}
+	return value
+}
+
+func appendUniqueName(values []string, value string) []string {
+	value = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(value), "."))
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if strings.EqualFold(existing, value) {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func firstPolicyNamespace(rule model.NameResolutionPolicyRule) string {
+	if len(rule.Namespaces) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimSpace(rule.Namespaces[0]), ".")
+}
+
+func hostEntryFamily(addresses []string, ipv4 bool) []string {
+	result := make([]string, 0)
+	for _, value := range addresses {
+		address, err := netip.ParseAddr(strings.Trim(value, "[]"))
+		if err != nil {
+			continue
+		}
+		if (ipv4 && address.Is4()) || (!ipv4 && address.Is6()) {
+			result = append(result, model.NormalizeAddr(address).String())
+		}
+	}
+	return result
 }
 
 func mustJSON(value any) json.RawMessage {
@@ -532,6 +937,11 @@ func contextReason(err error) model.FailureReason {
 func errorKind(err error) string {
 	if err == nil {
 		return ""
+	}
+	if classified, ok := err.(interface{ DNSKind() string }); ok {
+		if kind := classified.DNSKind(); kind != "" {
+			return kind
+		}
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
@@ -649,59 +1059,23 @@ func resolverForAddresses(addresses []string) Resolver {
 }
 
 // SystemResolverConfig reads resolver addresses from the operating system.
-// On Unix it parses resolv.conf. On Windows it queries ipconfig, which keeps
-// the lane useful on the platform targeted by Tadori without introducing a
-// public resolver fallback.
+// Platform-specific implementations use the native Windows adapter API or
+// the Unix resolver configuration file; no public resolver fallback is added.
 type SystemResolverConfig struct {
-	// Path overrides the Unix resolver configuration path. An empty path uses
-	// /etc/resolv.conf.
+	// Path overrides the resolver configuration source. On Unix it is a
+	// resolv.conf-style file; on Windows it is a fixture/test file and an empty
+	// path uses native adapter state.
 	Path string
 }
 
 // Source implements the optional source label used in evidence.
 func (s SystemResolverConfig) Source() string {
-	if runtime.GOOS == "windows" {
-		return "ipconfig"
-	}
-	if s.Path != "" {
-		return s.Path
-	}
-	return "/etc/resolv.conf"
+	return systemResolverSource(s.Path)
 }
 
 // ResolverAddresses implements ResolverConfigProvider.
 func (s SystemResolverConfig) ResolverAddresses(ctx context.Context) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if runtime.GOOS == "windows" {
-		// A non-empty path is an explicit fixture/test override. It must not be
-		// silently ignored merely because the production Windows source is
-		// ipconfig output.
-		if s.Path != "" {
-			data, err := os.ReadFile(s.Path)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					return nil, nil
-				}
-				return nil, err
-			}
-			return ParseResolverAddresses(data), nil
-		}
-		return windowsResolverAddresses(ctx)
-	}
-	path := s.Path
-	if path == "" {
-		path = "/etc/resolv.conf"
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return ParseResolverAddresses(data), nil
+	return systemResolverAddresses(ctx, s.Path)
 }
 
 // ParseResolverAddresses parses nameserver directives in resolv.conf-style
@@ -718,23 +1092,9 @@ func ParseResolverAddresses(data []byte) []string {
 	return normalizeResolverAddresses(addresses)
 }
 
-func windowsResolverAddresses(ctx context.Context) ([]string, error) {
-	command := exec.CommandContext(ctx, "ipconfig", "/all")
-	data, err := command.Output()
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, err
-	}
-	return ParseWindowsResolverAddresses(data), nil
-}
-
-// ParseWindowsResolverAddresses extracts DNS server values from the output of
-// `ipconfig /all`. The parser is intentionally independent from process
-// execution so Windows output can be tested deterministically. A delimiter is
-// identified by the IP value after it, rather than by the last colon on the
-// line: IPv6 values contain colons of their own.
+// ParseWindowsResolverAddresses remains a compatibility parser for existing
+// fixture callers. Production Windows collection uses GetAdaptersAddresses;
+// this function does not execute or depend on ipconfig.
 func ParseWindowsResolverAddresses(data []byte) []string {
 	var addresses []string
 	collect := false

@@ -153,21 +153,35 @@ func (p *DNSProbe) Run(ctx context.Context, execution probe.ExecutionContext) mo
 			status = model.ProbeStatusFailed
 		}
 		raw := struct {
-			Servers []netip.Addr `json:"servers"`
-			Source  string       `json:"source,omitempty"`
-			Error   string       `json:"error"`
-			Kind    string       `json:"error_kind,omitempty"`
-		}{Servers: snapshot.DNSServers, Source: snapshot.Source, Error: err.Error(), Kind: classifyResolverError(err)}
+			Servers          []netip.Addr                     `json:"servers"`
+			Interfaces       []InterfaceState                 `json:"interfaces,omitempty"`
+			Suffixes         []string                         `json:"suffixes,omitempty"`
+			SearchList       []string                         `json:"search_list,omitempty"`
+			NRPT             []model.NameResolutionPolicyRule `json:"nrpt,omitempty"`
+			NRPTError        string                           `json:"nrpt_error,omitempty"`
+			HostsFileEntries []model.NameResolutionHostEntry  `json:"hosts_file_entries,omitempty"`
+			HostsFileError   string                           `json:"hosts_file_error,omitempty"`
+			Source           string                           `json:"source,omitempty"`
+			Error            string                           `json:"error"`
+			Kind             string                           `json:"error_kind,omitempty"`
+		}{Servers: snapshot.DNSServers, Interfaces: snapshot.Interfaces, Suffixes: snapshot.DNSSuffixes, SearchList: snapshot.SearchList, NRPT: snapshot.NRPT, NRPTError: snapshot.NRPTError, HostsFileEntries: snapshot.HostsFileEntries, HostsFileError: snapshot.HostsFileError, Source: snapshot.Source, Error: err.Error(), Kind: classifyResolverError(err)}
 		evidence := []model.Evidence{makeEvidence("dns-configuration-1", model.EvidenceKindDNSConfiguration, "native-resolver-api", raw, completed)}
 		return result(execution.Target, p.Name(), started, completed, evidence, status, reason, model.LayerDNS, model.FaultDomainLocal)
 	}
 	if snapshot.ResolverError != "" {
 		raw := struct {
-			Servers []netip.Addr `json:"servers"`
-			Source  string       `json:"source,omitempty"`
-			Error   string       `json:"error"`
-			Kind    string       `json:"error_kind,omitempty"`
-		}{Servers: snapshot.DNSServers, Source: snapshot.Source, Error: snapshot.ResolverError, Kind: snapshot.ResolverErrorKind}
+			Servers          []netip.Addr                     `json:"servers"`
+			Interfaces       []InterfaceState                 `json:"interfaces,omitempty"`
+			Suffixes         []string                         `json:"suffixes,omitempty"`
+			SearchList       []string                         `json:"search_list,omitempty"`
+			NRPT             []model.NameResolutionPolicyRule `json:"nrpt,omitempty"`
+			NRPTError        string                           `json:"nrpt_error,omitempty"`
+			HostsFileEntries []model.NameResolutionHostEntry  `json:"hosts_file_entries,omitempty"`
+			HostsFileError   string                           `json:"hosts_file_error,omitempty"`
+			Source           string                           `json:"source,omitempty"`
+			Error            string                           `json:"error"`
+			Kind             string                           `json:"error_kind,omitempty"`
+		}{Servers: snapshot.DNSServers, Interfaces: snapshot.Interfaces, Suffixes: snapshot.DNSSuffixes, SearchList: snapshot.SearchList, NRPT: snapshot.NRPT, NRPTError: snapshot.NRPTError, HostsFileEntries: snapshot.HostsFileEntries, HostsFileError: snapshot.HostsFileError, Source: snapshot.Source, Error: snapshot.ResolverError, Kind: snapshot.ResolverErrorKind}
 		evidence := []model.Evidence{makeEvidence("dns-configuration-1", model.EvidenceKindDNSConfiguration, snapshot.Source, raw, snapshot.CapturedAt)}
 		status := model.ProbeStatusError
 		reason := model.FailureReasonDNSResolverFailure
@@ -182,9 +196,16 @@ func (p *DNSProbe) Run(ctx context.Context, execution probe.ExecutionContext) mo
 		return result(execution.Target, p.Name(), started, completed, evidence, status, reason, model.LayerDNS, model.FaultDomainLocal)
 	}
 	raw := struct {
-		Servers []netip.Addr `json:"servers"`
-		Source  string       `json:"source,omitempty"`
-	}{Servers: snapshot.DNSServers, Source: snapshot.Source}
+		Servers          []netip.Addr                     `json:"servers"`
+		Interfaces       []InterfaceState                 `json:"interfaces,omitempty"`
+		Suffixes         []string                         `json:"suffixes,omitempty"`
+		SearchList       []string                         `json:"search_list,omitempty"`
+		NRPT             []model.NameResolutionPolicyRule `json:"nrpt,omitempty"`
+		NRPTError        string                           `json:"nrpt_error,omitempty"`
+		HostsFileEntries []model.NameResolutionHostEntry  `json:"hosts_file_entries,omitempty"`
+		HostsFileError   string                           `json:"hosts_file_error,omitempty"`
+		Source           string                           `json:"source,omitempty"`
+	}{Servers: snapshot.DNSServers, Interfaces: snapshot.Interfaces, Suffixes: snapshot.DNSSuffixes, SearchList: snapshot.SearchList, NRPT: snapshot.NRPT, NRPTError: snapshot.NRPTError, HostsFileEntries: snapshot.HostsFileEntries, HostsFileError: snapshot.HostsFileError, Source: snapshot.Source}
 	evidence := []model.Evidence{makeEvidence("dns-configuration-1", model.EvidenceKindDNSConfiguration, snapshot.Source, raw, snapshot.CapturedAt)}
 	return result(execution.Target, p.Name(), started, completed, evidence, model.ProbeStatusPassed, model.FailureReasonNone, model.LayerDNS, model.FaultDomainLocal)
 }
@@ -220,12 +241,17 @@ func normalizeInterfaceStates(interfaces []InterfaceState) []InterfaceState {
 	}
 	normalized := append([]InterfaceState(nil), interfaces...)
 	for index := range normalized {
-		if normalized[index].Addresses == nil {
-			continue
+		if normalized[index].Addresses != nil {
+			normalized[index].Addresses = append([]Address(nil), normalized[index].Addresses...)
+			for addressIndex := range normalized[index].Addresses {
+				normalized[index].Addresses[addressIndex] = normalizeAddress(normalized[index].Addresses[addressIndex])
+			}
 		}
-		normalized[index].Addresses = append([]Address(nil), normalized[index].Addresses...)
-		for addressIndex := range normalized[index].Addresses {
-			normalized[index].Addresses[addressIndex] = normalizeAddress(normalized[index].Addresses[addressIndex])
+		if normalized[index].DNSServers != nil {
+			normalized[index].DNSServers = normalizeAddresses(normalized[index].DNSServers)
+		}
+		if normalized[index].DNSSearchList != nil {
+			normalized[index].DNSSearchList = append([]string(nil), normalized[index].DNSSearchList...)
 		}
 	}
 	return normalized

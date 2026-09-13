@@ -192,15 +192,16 @@ type ProbeInterpretation struct {
 // FailureReasonICMPFailure, but this field alone has no authority to set the
 // report status or create a network finding.
 type ProbeResult struct {
-	Name           string              `json:"name"`
-	Target         Target              `json:"target"`
-	SessionID      string              `json:"session_id,omitempty"`
-	ProbeID        string              `json:"probe_id,omitempty"`
-	CorrelationID  string              `json:"correlation_id,omitempty"`
-	Status         ProbeStatus         `json:"status"`
-	Timing         Timing              `json:"timing"`
-	Evidence       []Evidence          `json:"evidence,omitempty"`
-	Interpretation ProbeInterpretation `json:"interpretation"`
+	Name           string                     `json:"name"`
+	Target         Target                     `json:"target"`
+	SessionID      string                     `json:"session_id,omitempty"`
+	ProbeID        string                     `json:"probe_id,omitempty"`
+	CorrelationID  string                     `json:"correlation_id,omitempty"`
+	Status         ProbeStatus                `json:"status"`
+	Timing         Timing                     `json:"timing"`
+	Evidence       []Evidence                 `json:"evidence,omitempty"`
+	NameResolution *NameResolutionObservation `json:"name_resolution,omitempty"`
+	Interpretation ProbeInterpretation        `json:"interpretation"`
 }
 
 // DiagnosticFinding is a diagnosis engine output. It references probe and

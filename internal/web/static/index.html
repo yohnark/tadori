@@ -90,6 +90,18 @@
 
       <div class="workbench-grid">
         <div class="workbench-main">
+          <section class="panel section-panel resolution-panel">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Name resolution</p>
+                <h2>Effective resolution path</h2>
+              </div>
+            </div>
+            <p class="section-note">Configured servers and policy paths are candidates unless the host API provides stronger evidence. Empty resolver or interface values mean Windows did not expose that selection.</p>
+            <div id="name-resolution" class="resolution-content"></div>
+            <div id="name-resolution-empty" class="empty-state" hidden>No normalized name-resolution observation is available.</div>
+          </section>
+
           <section class="panel section-panel path-panel">
             <div class="section-heading">
               <div>

@@ -9,6 +9,7 @@ import (
 	stdhttp "net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -195,6 +196,34 @@ func TestProbeKeepsTransportFailureAtTCPLayer(t *testing.T) {
 	}
 }
 
+func TestProbeDialsSelectedAddressWhilePreservingRequestedHost(t *testing.T) {
+	var receivedHost string
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		receivedHost = request.Host
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := serverURL.Port()
+	target := parsedTarget(t, "http://fileserver.corp.example:"+port+"/")
+	target.SelectedEndpoint = &model.Endpoint{Address: "127.0.0.1", Port: uint16(mustPort(t, port))}
+	result := New(Config{Client: &stdhttp.Client{Transport: &stdhttp.Transport{Proxy: nil}}}).Run(context.Background(), probe.ExecutionContext{Target: target})
+	if result.Status != model.ProbeStatusPassed {
+		t.Fatalf("result = %#v, want selected endpoint request to pass", result)
+	}
+	if receivedHost != "fileserver.corp.example:"+port {
+		t.Fatalf("request Host = %q, want requested hostname and port", receivedHost)
+	}
+	metadata := decodeEvidence[responseMetadata](t, result)
+	if !strings.Contains(metadata.URL, "fileserver.corp.example") {
+		t.Fatalf("response URL = %q, want requested hostname", metadata.URL)
+	}
+}
+
 func TestProbeKeepsTLSFailureAtTLSLayer(t *testing.T) {
 	server := httptest.NewTLSServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
 		_, _ = io.WriteString(writer, "would not be reached")
@@ -241,6 +270,15 @@ func parsedTarget(t *testing.T, raw string) model.Target {
 		t.Fatalf("parse target %q: %v", raw, err)
 	}
 	return target
+}
+
+func mustPort(t *testing.T, value string) int {
+	t.Helper()
+	port, err := strconv.Atoi(value)
+	if err != nil {
+		t.Fatalf("parse port %q: %v", value, err)
+	}
+	return port
 }
 
 func (function roundTripperFunc) RoundTrip(request *stdhttp.Request) (*stdhttp.Response, error) {

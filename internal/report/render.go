@@ -86,6 +86,8 @@ func RenderHuman(report model.DiagnosticReport) string {
 		out.WriteByte('\n')
 	}
 
+	renderNameResolution(&out, report)
+
 	out.WriteString("Probes:\n")
 	if len(report.Probes) == 0 {
 		out.WriteString("  (none)\n")
@@ -185,6 +187,108 @@ func RenderHuman(report model.DiagnosticReport) string {
 	}
 
 	return out.String()
+}
+
+func renderNameResolution(out *strings.Builder, diagnosticReport model.DiagnosticReport) {
+	out.WriteString("Name Resolution:\n")
+	observation := firstNameResolution(diagnosticReport)
+	if observation == nil {
+		out.WriteString("  (none)\n")
+		return
+	}
+	fmt.Fprintf(out, "  Requested name: %s\n", valueOrUnavailable(observation.RequestedName))
+	if observation.EffectivePath == nil {
+		out.WriteString("  Resolution path: not observed\n")
+	} else {
+		fmt.Fprintf(out, "  Resolution path: %s\n", nameResolutionPathLabel(*observation.EffectivePath))
+		fmt.Fprintf(out, "  Certainty: %s\n", valueOrUnavailable(string(observation.EffectivePath.Certainty)))
+		fmt.Fprintf(out, "  Provenance: %s\n", valueOrUnavailable(observation.EffectivePath.Provenance))
+		fmt.Fprintf(out, "  Interface: %s\n", valueOrUnavailable(observation.EffectivePath.Interface))
+		fmt.Fprintf(out, "  Resolver: %s\n", valueOrUnavailable(observation.EffectivePath.Resolver))
+		fmt.Fprintf(out, "  Policy: %s\n", nameResolutionPolicyLabel(*observation.EffectivePath))
+	}
+	if len(observation.A) > 0 {
+		fmt.Fprintf(out, "  Answers A: %s\n", strings.Join(observation.A, ", "))
+	} else {
+		out.WriteString("  Answers A: (none)\n")
+	}
+	if len(observation.AAAA) > 0 {
+		fmt.Fprintf(out, "  Answers AAAA: %s\n", strings.Join(observation.AAAA, ", "))
+	} else {
+		out.WriteString("  Answers AAAA: (none)\n")
+	}
+	fmt.Fprintf(out, "  Selected endpoint: %s\n", valueOrUnavailable(observation.SelectedAddress))
+	if len(observation.CandidateNames) > 0 {
+		fmt.Fprintf(out, "  Candidate names: %s\n", strings.Join(observation.CandidateNames, ", "))
+	}
+	if len(observation.CandidateSuffixes) > 0 {
+		fmt.Fprintf(out, "  Search suffixes: %s\n", strings.Join(observation.CandidateSuffixes, ", "))
+	}
+	if len(observation.CandidateNamespaces) > 0 {
+		fmt.Fprintf(out, "  Candidate namespaces: %s\n", strings.Join(observation.CandidateNamespaces, ", "))
+	}
+	if len(observation.Limitations) > 0 {
+		fmt.Fprintf(out, "  Limitations: %s\n", strings.Join(observation.Limitations, " | "))
+	}
+	if len(observation.Paths) > 0 {
+		out.WriteString("  Candidate paths:\n")
+		for _, path := range observation.Paths {
+			if path.State == model.NameResolutionPathEffective {
+				continue
+			}
+			fmt.Fprintf(out, "    - state=%s mechanism=%s resolver=%s interface=%s namespace=%s certainty=%s\n",
+				path.State, path.Mechanism, valueOrUnavailable(path.Resolver), valueOrUnavailable(path.Interface), valueOrUnavailable(path.Namespace), valueOrUnavailable(string(path.Certainty)))
+		}
+	}
+}
+
+func firstNameResolution(diagnosticReport model.DiagnosticReport) *model.NameResolutionObservation {
+	for _, probe := range diagnosticReport.Probes {
+		if probe.NameResolution != nil {
+			return probe.NameResolution
+		}
+	}
+	return nil
+}
+
+func nameResolutionPathLabel(path model.NameResolutionPath) string {
+	if path.Mechanism == model.NameResolutionMechanismLiteralIP {
+		return "Literal IP"
+	}
+	if path.Mechanism == model.NameResolutionMechanismHostsFile {
+		return "Hosts file candidate"
+	}
+	if path.VPN {
+		return "VPN / Corporate DNS"
+	}
+	if path.Mechanism == model.NameResolutionMechanismDNS {
+		return "System DNS client"
+	}
+	return string(path.Mechanism)
+}
+
+func nameResolutionPolicyLabel(path model.NameResolutionPath) string {
+	parts := make([]string, 0, 3)
+	if path.Namespace != "" {
+		parts = append(parts, path.Namespace)
+	}
+	if path.PolicySource != "" {
+		parts = append(parts, path.PolicySource)
+	}
+	if path.PolicyRule != "" {
+		parts = append(parts, path.PolicyRule)
+	}
+	if len(parts) == 0 {
+		return "not observed"
+	}
+	return strings.Join(parts, " / ")
+}
+
+func valueOrUnavailable(value string) string {
+	if value == "" {
+		return "not observable"
+	}
+	return value
 }
 
 // RenderTerminal is the terminal-rendering name retained for callers that

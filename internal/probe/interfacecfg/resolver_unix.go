@@ -6,10 +6,45 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"os"
 	"strings"
+
+	"github.com/yohnark/tadori/internal/model"
 )
+
+func collectInterfaceStates(ctx context.Context) ([]InterfaceState, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	states := make([]InterfaceState, 0, len(interfaces))
+	for _, iface := range interfaces {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		state := InterfaceState{
+			Index:    iface.Index,
+			Name:     iface.Name,
+			Hardware: iface.HardwareAddr.String(),
+			MTU:      iface.MTU,
+			Up:       iface.Flags&net.FlagUp != 0,
+			Loopback: iface.Flags&net.FlagLoopback != 0,
+		}
+		if addresses, addressErr := iface.Addrs(); addressErr == nil {
+			for _, address := range addresses {
+				if parsed, ok := parseAddress(address); ok {
+					state.Addresses = append(state.Addresses, parsed)
+				}
+			}
+		}
+		states = append(states, state)
+	}
+	return states, nil
+}
+
+func interfaceSource() string { return "net.Interfaces" }
 
 func readConfiguredDNSServers(ctx context.Context, path string) ([]netip.Addr, string, error) {
 	if err := ctx.Err(); err != nil {
@@ -50,4 +85,12 @@ func readConfiguredDNSServers(ctx context.Context, path string) ([]netip.Addr, s
 		return nil, "resolv.conf", err
 	}
 	return servers, "resolv.conf", nil
+}
+
+func readNameResolutionPolicy(context.Context) ([]model.NameResolutionPolicyRule, error) {
+	return nil, nil
+}
+
+func readHostsFileEntries(context.Context) ([]model.NameResolutionHostEntry, error) {
+	return nil, nil
 }
