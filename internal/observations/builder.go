@@ -538,6 +538,9 @@ func buildSecurityObservation(target model.Target, endpoint model.EndpointObserv
 // available in the original raw evidence when a caller explicitly requested
 // it from the HTTP probe.
 func buildApplicationObservation(target model.Target, endpoint model.EndpointObservation, transport model.TransportObservation, probes []model.ProbeResult) model.ApplicationObservation {
+	if isDNSServiceTarget(target, probes) {
+		return buildDNSApplicationObservation(target, endpoint, probes)
+	}
 	if target.ApplicationProtocol == model.ApplicationProtocolSSH || target.ApplicationProtocol == model.ApplicationProtocolRDP || hasProtocolEvidence(probes) {
 		return buildProtocolApplicationObservation(target, endpoint, transport, probes)
 	}
@@ -720,6 +723,20 @@ func buildApplicationObservation(target model.Target, endpoint model.EndpointObs
 	return model.NormalizeApplicationObservation(observation)
 }
 
+func isDNSServiceTarget(target model.Target, probes []model.ProbeResult) bool {
+	if target.Service.ID == model.ServiceProfileDNS || target.ApplicationProtocol == model.ApplicationProtocolDNS {
+		return true
+	}
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind == model.EvidenceKindDNSService {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type sshApplicationEvidence struct {
 	TransportConnected   bool   `json:"transport_connected"`
 	BannerReceived       bool   `json:"banner_received"`
@@ -746,6 +763,195 @@ func hasProtocolEvidence(probes []model.ProbeResult) bool {
 		}
 	}
 	return false
+}
+
+// buildDNSApplicationObservation keeps DNS service response semantics inside
+// the canonical application envelope while leaving the separate dns probe's
+// target-name resolution observation untouched.
+func buildDNSApplicationObservation(target model.Target, endpoint model.EndpointObservation, probes []model.ProbeResult) model.ApplicationObservation {
+	dnsObservation := model.DNSApplicationObservation{
+		RequestedEndpoint: requestedEndpoint(target),
+		QueryName:         dns.DiagnosticQueryName,
+		QueryType:         dns.DiagnosticQueryType,
+		Result:            model.DNSApplicationResultNotAttempted,
+		UDP:               dnsApplicationTransport("udp"),
+		TCP:               dnsApplicationTransport("tcp"),
+		FailureReason:     model.FailureReasonNone,
+		FaultDomain:       model.FaultDomainDNS,
+		Certainty:         model.ObservationCertaintyUnknown,
+	}
+	application := model.ApplicationObservation{
+		Applicability:     model.ObservationApplicabilityApplicable,
+		Result:            model.HTTPResultNotAttempted,
+		RequestedResource: target.Resource,
+		FailureReason:     model.FailureReasonNone,
+		FaultDomain:       model.FaultDomainDNS,
+		Certainty:         model.ObservationCertaintyUnknown,
+		DNS:               &dnsObservation,
+	}
+	if endpoint.TestedEndpoint != nil {
+		used := cloneEndpointValue(*endpoint.TestedEndpoint)
+		application.EndpointUsed = &used
+	}
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind != model.EvidenceKindDNSService {
+				continue
+			}
+			var value dns.DNSServiceEvidence
+			if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+				dnsObservation.Limitations = appendUnique(dnsObservation.Limitations, "DNS service evidence decode: "+err.Error())
+				continue
+			}
+			lane := &dnsObservation.UDP
+			if strings.EqualFold(value.Transport, "tcp") {
+				lane = &dnsObservation.TCP
+			} else if !strings.EqualFold(value.Transport, "udp") {
+				dnsObservation.Limitations = appendUnique(dnsObservation.Limitations, "DNS service evidence has an unknown transport: "+value.Transport)
+				continue
+			}
+			lane.Attempted = value.Attempts > 0
+			lane.ResponseReceived = value.ResponseReceived
+			lane.Outcome = string(value.Outcome)
+			lane.RCode = value.RCode
+			lane.RCodeName = value.RCodeName
+			lane.TransactionID = value.TransactionID
+			lane.Truncated = value.Truncated
+			lane.QueryBytes = value.QueryBytes
+			lane.ResponseBytes = value.ResponseBytes
+			lane.QuestionCount = value.QuestionCount
+			lane.AnswerCount = value.AnswerCount
+			lane.AuthorityCount = value.AuthorityCount
+			lane.AdditionalCount = value.AdditionalCount
+			lane.Attempts = value.Attempts
+			lane.Fallback = value.Fallback
+			lane.FallbackReason = value.FallbackReason
+			lane.ErrorKind = value.ErrorKind
+			lane.FailureReason = dnsServiceFailureReason(value)
+			lane.FaultDomain = model.FaultDomainDNS
+			lane.Certainty = model.ObservationCertaintyObserved
+			lane.Timing.DurationMS = value.DurationMS
+			if endpoint := dnsServiceEndpoint(value, target.Port); endpoint != nil {
+				lane.EndpointUsed = endpoint
+				if application.EndpointUsed == nil && value.Success {
+					used := *endpoint
+					application.EndpointUsed = &used
+				}
+			}
+			lane.ProbeNames = appendUnique(lane.ProbeNames, probe.Name)
+			lane.EvidenceIDs = appendUnique(lane.EvidenceIDs, evidence.ID)
+			lane.Provenance = appendUnique(lane.Provenance, "dns-service-wire")
+			dnsObservation.RequestAttempted = dnsObservation.RequestAttempted || lane.Attempted
+			dnsObservation.ResponseReceived = dnsObservation.ResponseReceived || value.ResponseReceived
+			dnsObservation.ProbeNames = appendUnique(dnsObservation.ProbeNames, probe.Name)
+			dnsObservation.EvidenceIDs = appendUnique(dnsObservation.EvidenceIDs, evidence.ID)
+			dnsObservation.Provenance = appendUnique(dnsObservation.Provenance, "DNS service wire response")
+			addObservationProvenance(&application.Provenance, probe, evidence)
+			application.ProbeNames = appendUnique(application.ProbeNames, probe.Name)
+			application.EvidenceIDs = appendUnique(application.EvidenceIDs, evidence.ID)
+			mergeObservationTiming(&application.Timing, probe.Timing)
+			mergeObservationTiming(&dnsObservation.Timing, probe.Timing)
+		}
+	}
+
+	udpAttempted, tcpAttempted := dnsObservation.UDP.Attempted, dnsObservation.TCP.Attempted
+	udpSuccess := dnsApplicationLaneSucceeded(dnsObservation.UDP)
+	tcpSuccess := dnsApplicationLaneSucceeded(dnsObservation.TCP)
+	if udpAttempted || tcpAttempted {
+		dnsObservation.Certainty = model.ObservationCertaintyObserved
+		switch {
+		case udpSuccess && tcpSuccess:
+			dnsObservation.Result = model.DNSApplicationResultSuccess
+			application.Result = model.HTTPResultSuccess
+		case udpSuccess != tcpSuccess:
+			dnsObservation.Result = model.DNSApplicationResultPartial
+			dnsObservation.Divergence = true
+			application.Result = model.HTTPResultPartial
+		case udpAttempted || tcpAttempted:
+			dnsObservation.Result = model.DNSApplicationResultFailure
+			application.Result = model.HTTPResultRequestFailure
+		}
+	}
+	if dnsObservation.Divergence {
+		// A successful lane prevents the application envelope from claiming
+		// destination unavailability. The failing lane remains fully visible.
+		dnsObservation.FailureReason = model.FailureReasonNone
+	} else if dnsObservation.Result == model.DNSApplicationResultFailure {
+		dnsObservation.FailureReason = firstDNSServiceFailure(dnsObservation.UDP, dnsObservation.TCP)
+		application.FailureReason = dnsObservation.FailureReason
+	}
+	application.ResponseReceived = dnsObservation.ResponseReceived
+	application.RequestAttempted = dnsObservation.RequestAttempted
+	application.Applicability = model.ObservationApplicabilityApplicable
+	application.Certainty = dnsObservation.Certainty
+	return model.NormalizeApplicationObservation(application)
+}
+
+func dnsApplicationTransport(transport string) model.DNSApplicationTransportObservation {
+	return model.DNSApplicationTransportObservation{
+		Transport:     transport,
+		Outcome:       string(dns.DNSServiceOutcomeNotAttempted),
+		FailureReason: model.FailureReasonNone,
+		FaultDomain:   model.FaultDomainDNS,
+		Certainty:     model.ObservationCertaintyUnknown,
+	}
+}
+
+func dnsServiceFailureReason(value dns.DNSServiceEvidence) model.FailureReason {
+	switch value.Outcome {
+	case dns.DNSServiceOutcomeSuccess, dns.DNSServiceOutcomeNegativeResponse, dns.DNSServiceOutcomeNotAttempted:
+		return model.FailureReasonNone
+	case dns.DNSServiceOutcomeRefused:
+		return dns.FailureReasonDNSServiceRefused
+	case dns.DNSServiceOutcomeServfail:
+		return dns.FailureReasonDNSServiceServfail
+	case dns.DNSServiceOutcomeProtocolFailure:
+		return dns.FailureReasonDNSServiceProtocolFailure
+	case dns.DNSServiceOutcomeMalformedResponse:
+		return dns.FailureReasonDNSServiceMalformedResponse
+	case dns.DNSServiceOutcomeTruncatedResponse:
+		return dns.FailureReasonDNSServiceTruncatedResponse
+	case dns.DNSServiceOutcomeTimeout:
+		return dns.FailureReasonDNSServiceTimeout
+	case dns.DNSServiceOutcomeCancellation:
+		return dns.FailureReasonDNSServiceCancellation
+	case dns.DNSServiceOutcomeNoResolvedEndpoint:
+		return dns.FailureReasonDNSServiceNoEndpoint
+	case dns.DNSServiceOutcomeTransportFailure:
+		return dns.FailureReasonDNSServiceTransportFailure
+	default:
+		if value.ResponseReceived || value.Attempts > 0 {
+			return dns.FailureReasonDNSServiceProtocolFailure
+		}
+		return model.FailureReasonNone
+	}
+}
+
+func dnsServiceEndpoint(value dns.DNSServiceEvidence, port uint16) *model.Endpoint {
+	raw := value.Endpoint
+	if raw == "" && value.ResolvedAddress != "" {
+		raw = net.JoinHostPort(value.ResolvedAddress, strconv.Itoa(int(port)))
+	}
+	if endpoint, ok := concreteEndpoint(raw, port); ok {
+		endpoint.SelectionReason = model.EndpointSelectionTransport
+		endpoint.Provenance = "DNS service response endpoint"
+		endpoint.Certainty = model.ObservationCertaintyObserved
+		return &endpoint
+	}
+	return nil
+}
+
+func firstDNSServiceFailure(udp, tcp model.DNSApplicationTransportObservation) model.FailureReason {
+	for _, lane := range []model.DNSApplicationTransportObservation{udp, tcp} {
+		if lane.FailureReason != model.FailureReasonNone && lane.FailureReason != model.FailureReasonUnknown {
+			return lane.FailureReason
+		}
+	}
+	return dns.FailureReasonDNSServiceTransportFailure
+}
+
+func dnsApplicationLaneSucceeded(value model.DNSApplicationTransportObservation) bool {
+	return value.Attempted && value.ResponseReceived && (value.Outcome == string(dns.DNSServiceOutcomeSuccess) || value.Outcome == string(dns.DNSServiceOutcomeNegativeResponse))
 }
 
 // buildProtocolApplicationObservation projects SSH and RDP handshakes into
