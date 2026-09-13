@@ -1,4 +1,4 @@
-// Package report will own projections of model.DiagnosticReport, including
-// human-readable presentation and canonical JSON output in later issues.
-// Issue #2 adds no presentation policy.
+// Package report owns presentation-only projections of model.DiagnosticReport.
+// It emits the canonical JSON contract and a concise terminal view while
+// leaving probe execution and diagnosis to their respective packages.
 package report
