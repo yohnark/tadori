@@ -440,10 +440,10 @@
     container.appendChild(table);
   }
 
-  function renderOperationalObservations(observations) {
+  function renderOperationalObservations(observations, applicationView) {
     renderTransportObservation(observations && observations.transport);
     renderSecurityObservation(observations && observations.security);
-    renderApplicationObservation(observations && observations.application);
+    renderApplicationObservation(applicationView || (observations && observations.application));
   }
 
   function renderTransportObservation(observation) {
@@ -485,23 +485,166 @@
   }
 
   function renderApplicationObservation(observation) {
-    renderObservationOrEmpty(applicationObservation, observation, [
-      ["Applicability", "applicability"],
-      ["Request attempted", "request_attempted", booleanText],
-      ["Response received", "response_received", booleanText],
-      ["Result", "result"],
-      ["HTTP version", "http_version"],
-      ["Status code", "status_code"],
-      ["Status", "status"],
-      ["Requested resource", "requested_resource"],
-      ["Endpoint used", "endpoint_used", endpointText],
-      ["URL", "url"],
-      ["Redirects", "redirects", redirectText],
-      ["Failure reason", "failure_reason"],
-      ["Fault domain", "fault_domain"],
-      ["Certainty", "certainty"],
-      ["Limitations", "limitations", listText],
-      ["Evidence", "evidence_ids", referenceValue],
+    applicationObservation.replaceChildren();
+    if (!observation) {
+      applicationObservation.appendChild(element("div", "empty-state compact", "No canonical application observation is available."));
+      return;
+    }
+
+    const protocol = text(observation.protocol || "unknown").toLowerCase();
+    const commonRows = [
+      ["Applicability", observation.applicability || "unknown"],
+      ["Protocol", protocol],
+      ["Request attempted", booleanText(observation.request_attempted)],
+      ["Response received", booleanText(observation.response_received)],
+      ["Transport connected", booleanText(observation.transport_connected)],
+      ["Handshake attempted", booleanText(observation.handshake_attempted)],
+      ["Handshake complete", booleanText(observation.handshake_complete)],
+      ["Result", observation.result || "unknown"],
+      ["Protocol result", observation.protocol_result || "unknown"],
+      ["Endpoint used", endpointText(observation.endpoint_used)],
+      ["Requested resource", observation.requested_resource || "not specified"],
+      ["Failure reason", observation.failure_reason || "none"],
+      ["Fault domain", observation.fault_domain || "unknown"],
+      ["Certainty", observation.certainty || "unknown"],
+      ["Limitations", listText(observation.limitations)],
+    ];
+    appendObservationRows(applicationObservation, commonRows);
+
+    if (protocol === "http" || protocol === "https" || observation.http) {
+      renderHTTPApplication(applicationObservation, observation.http || observation);
+    } else if (protocol === "dns" || observation.dns) {
+      renderDNSApplication(applicationObservation, observation.dns);
+    } else if (protocol === "smb" || observation.smb) {
+      renderSMBApplication(applicationObservation, observation.smb);
+    } else if (protocol === "ssh" || observation.ssh) {
+      renderProtocolApplication(applicationObservation, "SSH handshake", observation.ssh || observation, false);
+    } else if (protocol === "rdp" || observation.rdp) {
+      renderProtocolApplication(applicationObservation, "RDP negotiation", observation.rdp || observation, true);
+    } else {
+      applicationObservation.appendChild(element("h3", "observation-subheading", "Service-specific application view"));
+      appendObservationRows(applicationObservation, [["State", "unsupported or not attempted"]]);
+    }
+    renderApplicationReferences(applicationObservation, observation);
+  }
+
+  function renderHTTPApplication(container, http) {
+    container.appendChild(element("h3", "observation-subheading", "HTTP / HTTPS response"));
+    appendObservationRows(container, [
+      ["HTTP version", http.http_version || "not observed"],
+      ["Status code", http.status_code || "not observed"],
+      ["Status", http.status || "not observed"],
+      ["URL", http.url || "not observed"],
+      ["Resource", http.requested_resource || "not specified"],
+    ]);
+    const redirects = http.redirects || [];
+    container.appendChild(element("h3", "observation-subheading", "Redirects"));
+    if (!redirects.length) {
+      appendObservationRows(container, [["Redirect chain", "none observed"]]);
+      return;
+    }
+    const table = element("table", "observation-grid");
+    appendTableHeader(table, ["Status", "From", "Location", "To"]);
+    const body = table.querySelector("tbody");
+    for (const redirect of redirects) {
+      const row = element("tr");
+      row.appendChild(element("td", "", redirect.status_code || "unknown"));
+      row.appendChild(element("td", "", redirect.url || "not observed"));
+      row.appendChild(element("td", "", redirect.location || "not observed"));
+      row.appendChild(element("td", "", redirect.to_url || "not observed"));
+      body.appendChild(row);
+    }
+    container.appendChild(table);
+  }
+
+  function renderDNSApplication(container, dns) {
+    container.appendChild(element("h3", "observation-subheading", "DNS service response"));
+    if (!dns) {
+      appendObservationRows(container, [["State", "not attempted"]]);
+      return;
+    }
+    appendObservationRows(container, [
+      ["Query", `${dns.query_name || "unknown"} (${dns.query_type || "unknown"})`],
+      ["Requested endpoint", dns.requested_endpoint || "not observed"],
+      ["Result", dns.result || "unknown"],
+      ["Response received", booleanText(dns.response_received)],
+      ["Divergence", booleanText(dns.divergence)],
+      ["Failure reason", dns.failure_reason || "none"],
+      ["Certainty", dns.certainty || "unknown"],
+      ["Limitations", listText(dns.limitations)],
+    ]);
+    const table = element("table", "observation-grid");
+    appendTableHeader(table, ["Lane", "Attempted", "Response", "Outcome", "RCODE", "Truncated", "Fallback", "Provenance", "Evidence"]);
+    const body = table.querySelector("tbody");
+    const lanes = [
+      dns.udp || { transport: "udp" },
+      dns.tcp || { transport: "tcp" },
+    ];
+    for (const lane of lanes) {
+      const row = element("tr");
+      const fallback = lane.fallback ? `yes${lane.fallback_reason ? ` · ${lane.fallback_reason}` : ""}` : "no";
+      row.appendChild(element("td", "", text(lane.transport || "unknown").toUpperCase()));
+      row.appendChild(element("td", "", booleanText(lane.attempted)));
+      row.appendChild(element("td", "", booleanText(lane.response_received)));
+      row.appendChild(element("td", "", lane.outcome || "not_attempted"));
+      row.appendChild(element("td", "", rcodeText(lane)));
+      row.appendChild(element("td", "", booleanText(lane.truncated)));
+      row.appendChild(element("td", "", fallback));
+      row.appendChild(element("td", "", listText(lane.provenance)));
+      row.appendChild(referenceCell(lane.evidence_ids));
+      body.appendChild(row);
+    }
+    container.appendChild(table);
+  }
+
+  function rcodeText(lane) {
+    if (lane.rcode_name) {
+      return lane.rcode === undefined || lane.rcode === null ? lane.rcode_name : `${lane.rcode_name} (${lane.rcode})`;
+    }
+    return lane.rcode === undefined || lane.rcode === null ? "not observed" : text(lane.rcode);
+  }
+
+  function renderSMBApplication(container, smb) {
+    container.appendChild(element("h3", "observation-subheading", "SMB negotiation"));
+    if (!smb) {
+      appendObservationRows(container, [["State", "not attempted"]]);
+      return;
+    }
+    appendObservationRows(container, [
+      ["Negotiation result", smb.result || "unknown"],
+      ["Negotiated", booleanText(smb.negotiated)],
+      ["Dialect", smb.dialect || "not observed"],
+      ["Dialect revision", smb.dialect_revision || "not observed"],
+      ["Capabilities", listText(smb.capabilities)],
+      ["Server GUID", smb.server_guid || "not exposed"],
+      ["Security mode", smb.security_mode || "not exposed"],
+      ["Max transact size", smb.max_transact_size || "not exposed"],
+      ["Max read size", smb.max_read_size || "not exposed"],
+      ["Max write size", smb.max_write_size || "not exposed"],
+      ["Response bytes", smb.response_bytes || "not observed"],
+    ]);
+  }
+
+  function renderProtocolApplication(container, heading, protocol, rdp) {
+    container.appendChild(element("h3", "observation-subheading", heading));
+    appendObservationRows(container, [
+      ["Handshake attempted", booleanText(protocol.handshake_attempted)],
+      ["Handshake complete", booleanText(protocol.handshake_complete)],
+      ["Response received", booleanText(protocol.response_received)],
+      ["Transport connected", booleanText(protocol.transport_connected)],
+      ["Result", protocol.result || "unknown"],
+      ["Server identification", protocol.server_identification || "not observed"],
+      ["Negotiated security", rdp ? (protocol.negotiated_security_protocol || "not negotiated") : "not applicable"],
+      ["Requested security", rdp ? listText(protocol.requested_security_protocols) : "not applicable"],
+    ]);
+  }
+
+  function renderApplicationReferences(container, observation) {
+    container.appendChild(element("h3", "observation-subheading", "Application provenance"));
+    appendObservationRows(container, [
+      ["Provenance", listText(observation.provenance)],
+      ["Probe lanes", listText(observation.probe_names)],
+      ["Evidence", referenceValue(observation.evidence_ids)],
     ]);
   }
 
@@ -1027,7 +1170,7 @@
     overallStatus.textContent = text(overall.execution_label || overall.execution_status);
     renderTargetDetails(observations.endpoint || (view.report && view.report.target));
     renderEndpointObservation(observations.endpoint);
-    renderOperationalObservations(observations);
+    renderOperationalObservations(observations, view.application);
     renderPolicyObservation(observations.enterprise_policy);
     renderNetworkContext(observations.network_context || view.network_context);
     renderDestination(overall.destination || {});
