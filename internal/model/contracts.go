@@ -1,0 +1,220 @@
+// Package model owns the versioned, JSON-serializable diagnostic contracts.
+//
+// Raw observations are carried by Evidence.Raw. Normalized interpretation is
+// carried by ProbeInterpretation and DiagnosticFinding. Keeping those values
+// in separate fields prevents a human-facing explanation from becoming the
+// source of truth for a result.
+package model
+
+import (
+	"encoding/json"
+	"time"
+)
+
+// DiagnosticSchemaVersion is the schema version emitted in a
+// DiagnosticReport. It changes only when the canonical JSON contract changes.
+const DiagnosticSchemaVersion = "1"
+
+// Target identifies the endpoint being diagnosed. URL is the original
+// endpoint when one was supplied; the remaining fields are the parsed values
+// used by individual probes. A target without a URL can still be used by
+// lower-level probes with Host and Port populated.
+type Target struct {
+	URL    string `json:"url,omitempty"`
+	Scheme string `json:"scheme,omitempty"`
+	Host   string `json:"host"`
+	Port   uint16 `json:"port"`
+	Path   string `json:"path,omitempty"`
+}
+
+// ProbeStatus describes what happened when a probe ran. Failed means that the
+// probe observed a negative result; Error means that it could not produce a
+// valid observation. The normalized reason for either case belongs in
+// ProbeInterpretation.
+type ProbeStatus string
+
+const (
+	ProbeStatusUnknown ProbeStatus = "unknown"
+	ProbeStatusPassed  ProbeStatus = "passed"
+	ProbeStatusFailed  ProbeStatus = "failed"
+	ProbeStatusSkipped ProbeStatus = "skipped"
+	ProbeStatusError   ProbeStatus = "error"
+)
+
+// ReportStatus describes execution completeness of a diagnostic report. It
+// does not encode a diagnosis; DiagnosticReport.Findings carries that
+// interpretation separately.
+type ReportStatus string
+
+const (
+	ReportStatusUnknown    ReportStatus = "unknown"
+	ReportStatusComplete   ReportStatus = "complete"
+	ReportStatusIncomplete ReportStatus = "incomplete"
+	ReportStatusError      ReportStatus = "error"
+)
+
+// FailureReason is a stable machine-readable classification. These values
+// are deliberately not presentation strings. New probe-specific reasons may
+// be added without changing the shape of a result.
+type FailureReason string
+
+const (
+	FailureReasonNone                         FailureReason = "none"
+	FailureReasonUnknown                      FailureReason = "unknown"
+	FailureReasonProbeExecution               FailureReason = "probe_execution_failure"
+	FailureReasonUnsupported                  FailureReason = "unsupported"
+	FailureReasonInterfaceDown                FailureReason = "interface_down"
+	FailureReasonNoIPAddress                  FailureReason = "no_ip_address"
+	FailureReasonNoRoute                      FailureReason = "no_route"
+	FailureReasonInvalidRoute                 FailureReason = "invalid_route"
+	FailureReasonGatewayUnreachable           FailureReason = "gateway_unreachable"
+	FailureReasonNetworkUnreachable           FailureReason = "network_unreachable"
+	FailureReasonDNSNXDomain                  FailureReason = "dns_nxdomain"
+	FailureReasonDNSNoAnswer                  FailureReason = "dns_no_answer"
+	FailureReasonDNSTimeout                   FailureReason = "dns_timeout"
+	FailureReasonDNSResolverFailure           FailureReason = "dns_resolver_failure"
+	FailureReasonFirewallBlocked              FailureReason = "firewall_blocked"
+	FailureReasonProxyConfigurationFailure    FailureReason = "proxy_configuration_failure"
+	FailureReasonProxyUnavailable             FailureReason = "proxy_unavailable"
+	FailureReasonProxyAuthenticationRequired  FailureReason = "proxy_authentication_required"
+	FailureReasonTCPTimeout                   FailureReason = "tcp_timeout"
+	FailureReasonTCPConnectionRefused         FailureReason = "tcp_connection_refused"
+	FailureReasonTCPConnectionReset           FailureReason = "tcp_connection_reset"
+	FailureReasonTLSHandshakeFailure          FailureReason = "tls_handshake_failure"
+	FailureReasonCertificateValidationFailure FailureReason = "certificate_validation_failure"
+	FailureReasonHTTPFailure                  FailureReason = "http_failure"
+	FailureReasonHTTPStatusCode               FailureReason = "http_status_code"
+	FailureReasonICMPFailure                  FailureReason = "icmp_failure"
+)
+
+// FaultDomain identifies the component or boundary most closely associated
+// with an interpretation. It is intentionally distinct from Layer: a DNS
+// probe can be at the DNS layer while a finding is owned by a local resolver,
+// network, or firewall domain.
+type FaultDomain string
+
+const (
+	FaultDomainUnknown     FaultDomain = "unknown"
+	FaultDomainLocal       FaultDomain = "local"
+	FaultDomainRouting     FaultDomain = "routing"
+	FaultDomainGateway     FaultDomain = "gateway"
+	FaultDomainDNS         FaultDomain = "dns"
+	FaultDomainNetwork     FaultDomain = "network"
+	FaultDomainFirewall    FaultDomain = "firewall"
+	FaultDomainProxy       FaultDomain = "proxy"
+	FaultDomainTransport   FaultDomain = "transport"
+	FaultDomainTLS         FaultDomain = "tls"
+	FaultDomainHTTP        FaultDomain = "http"
+	FaultDomainDestination FaultDomain = "destination"
+	FaultDomainICMP        FaultDomain = "icmp"
+)
+
+// Layer identifies the diagnostic protocol or system layer at which a probe
+// made its observation.
+type Layer string
+
+const (
+	LayerUnknown         Layer = "unknown"
+	LayerInterface       Layer = "interface"
+	LayerIPConfiguration Layer = "ip_configuration"
+	LayerRoute           Layer = "route"
+	LayerGateway         Layer = "gateway"
+	LayerDNS             Layer = "dns"
+	LayerNetwork         Layer = "network"
+	LayerProxy           Layer = "proxy"
+	LayerTCP             Layer = "tcp"
+	LayerTLS             Layer = "tls"
+	LayerHTTP            Layer = "http"
+	LayerICMP            Layer = "icmp"
+	LayerDestination     Layer = "destination"
+)
+
+// EvidenceKind names the raw observation shape. The raw payload itself is
+// intentionally not prescribed so native Windows APIs and command output can
+// be preserved without lossy conversion.
+type EvidenceKind string
+
+const (
+	EvidenceKindUnknown             EvidenceKind = "unknown"
+	EvidenceKindInterfaceState      EvidenceKind = "interface_state"
+	EvidenceKindIPConfiguration     EvidenceKind = "ip_configuration"
+	EvidenceKindRoute               EvidenceKind = "route"
+	EvidenceKindGatewayReachability EvidenceKind = "gateway_reachability"
+	EvidenceKindDNSConfiguration    EvidenceKind = "dns_configuration"
+	EvidenceKindDNSResolution       EvidenceKind = "dns_resolution"
+	EvidenceKindTCPConnection       EvidenceKind = "tcp_connection"
+	EvidenceKindTLSHandshake        EvidenceKind = "tls_handshake"
+	EvidenceKindCertificate         EvidenceKind = "certificate"
+	EvidenceKindHTTPResponse        EvidenceKind = "http_response"
+	EvidenceKindProxyConfiguration  EvidenceKind = "proxy_configuration"
+	EvidenceKindWinHTTPProxy        EvidenceKind = "winhttp_proxy"
+	EvidenceKindWinINETProxy        EvidenceKind = "wininet_proxy"
+	EvidenceKindPAC                 EvidenceKind = "pac"
+	EvidenceKindICMP                EvidenceKind = "icmp"
+)
+
+// Timing records execution timing. Timestamps are optional to support probes
+// that only have a duration, while DurationMS is always an integer number of
+// milliseconds when timing is available.
+type Timing struct {
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	DurationMS  int64      `json:"duration_ms"`
+}
+
+// Evidence is an unmodified observation captured by a probe. Raw must be a
+// valid JSON value: use a JSON string for text output and a JSON object or
+// array for structured native data. Interpretation never belongs inside Raw.
+type Evidence struct {
+	ID         string          `json:"id"`
+	Kind       EvidenceKind    `json:"kind"`
+	Source     string          `json:"source,omitempty"`
+	CapturedAt *time.Time      `json:"captured_at,omitempty"`
+	Raw        json.RawMessage `json:"raw"`
+}
+
+// ProbeInterpretation contains only normalized, machine-readable meaning
+// assigned to one probe result. It is separate from Evidence so callers can
+// re-run diagnosis against the original observation.
+type ProbeInterpretation struct {
+	FailureReason FailureReason `json:"failure_reason"`
+	Layer         Layer         `json:"layer"`
+	FaultDomain   FaultDomain   `json:"fault_domain"`
+}
+
+// ProbeResult is the canonical output of one probe invocation. A successful
+// result uses FailureReasonNone. A probe that only tests ICMP may report
+// FailureReasonICMPFailure, but this field alone has no authority to set the
+// report status or create a network finding.
+type ProbeResult struct {
+	Name           string              `json:"name"`
+	Target         Target              `json:"target"`
+	Status         ProbeStatus         `json:"status"`
+	Timing         Timing              `json:"timing"`
+	Evidence       []Evidence          `json:"evidence,omitempty"`
+	Interpretation ProbeInterpretation `json:"interpretation"`
+}
+
+// DiagnosticFinding is a diagnosis engine output. It references probe and
+// evidence identifiers rather than copying or rewriting raw observations.
+// No human-facing message is part of the canonical contract.
+type DiagnosticFinding struct {
+	FailureReason FailureReason `json:"failure_reason"`
+	Layer         Layer         `json:"layer"`
+	FaultDomain   FaultDomain   `json:"fault_domain"`
+	ProbeNames    []string      `json:"probe_names,omitempty"`
+	EvidenceIDs   []string      `json:"evidence_ids,omitempty"`
+}
+
+// DiagnosticReport is the top-level canonical JSON document. Probes contain
+// raw evidence and per-probe interpretation; Findings contains the optional
+// cross-probe interpretation supplied by the diagnosis lane.
+type DiagnosticReport struct {
+	SchemaVersion string              `json:"schema_version"`
+	Target        Target              `json:"target"`
+	Status        ReportStatus        `json:"status"`
+	StartedAt     *time.Time          `json:"started_at,omitempty"`
+	CompletedAt   *time.Time          `json:"completed_at,omitempty"`
+	Probes        []ProbeResult       `json:"probes"`
+	Findings      []DiagnosticFinding `json:"findings,omitempty"`
+}
