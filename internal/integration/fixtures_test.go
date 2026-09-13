@@ -11,6 +11,7 @@ import (
 
 	"github.com/yohnark/tadori/internal/diagnosis"
 	"github.com/yohnark/tadori/internal/model"
+	observationbuilder "github.com/yohnark/tadori/internal/observations"
 	"github.com/yohnark/tadori/internal/report"
 	"github.com/yohnark/tadori/internal/web"
 )
@@ -468,6 +469,10 @@ func fixtureWithReport(name string, target model.Target, status model.ReportStat
 		StartedAt:     started,
 		CompletedAt:   completed,
 		Probes:        probes,
+	}
+	report.Observations = observationbuilder.Build(target, probes)
+	if target.NetworkContext != nil {
+		report.Observations.NetworkContext = *target.NetworkContext
 	}
 	report.Findings = diagnosis.Diagnose(report.Probes)
 	return regressionFixture{

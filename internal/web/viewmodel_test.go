@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/yohnark/tadori/internal/model"
+	observationbuilder "github.com/yohnark/tadori/internal/observations"
 )
 
 func TestRepresentativeUIFixturesBuildDeterministicViews(t *testing.T) {
@@ -124,7 +125,7 @@ func TestViewModelPreservesPathSemantics(t *testing.T) {
 		t.Fatalf("partial/unsupported path state = %#v", partial.Paths)
 	}
 	partialEvidence := findEvidenceView(partial, "path/malformed")
-	if partialEvidence.InspectorState != "partial" || partialEvidence.Raw == nil {
+	if partialEvidence.InspectorState != "available" || partialEvidence.Raw == nil {
 		t.Fatalf("partial raw evidence was not retained: %#v", partialEvidence)
 	}
 
@@ -135,8 +136,8 @@ func TestViewModelPreservesPathSemantics(t *testing.T) {
 	if failed.Overall.DiagnosisState != "finding" {
 		t.Fatalf("failed destination diagnosis state = %q, want finding", failed.Overall.DiagnosisState)
 	}
-	if failed.Paths[0].DestinationState != "not_reached" {
-		t.Fatalf("failed path destination state = %q, want not_reached", failed.Paths[0].DestinationState)
+	if failed.Paths[0].DestinationReached || failed.Paths[0].DestinationTCPConnected {
+		t.Fatalf("failed path incorrectly confirmed destination: %#v", failed.Paths[0])
 	}
 }
 
@@ -176,27 +177,30 @@ func TestViewModelProjectsNameResolutionSeparatelyFromRawEvidence(t *testing.T) 
 			Name:   "dns",
 			Target: target,
 			Status: model.ProbeStatusPassed,
-			NameResolution: &model.NameResolutionObservation{
-				RequestedName:       "fileserver.corp.example",
-				CandidateNames:      []string{"fileserver", "fileserver.corp.example"},
-				CandidateNamespaces: []string{"corp.example"},
-				A:                   []string{"10.30.14.22"},
-				SelectedAddress:     "10.30.14.22",
-				Limitations:         []string{"resolver server was not exposed"},
-				EffectivePath: &model.NameResolutionPath{
-					State:       model.NameResolutionPathEffective,
-					Mechanism:   model.NameResolutionMechanismDNS,
-					Certainty:   model.NameResolutionCertaintyObserved,
-					Provenance:  "native API",
-					EvidenceIDs: []string{"dns/resolution"},
-				},
-				EvidenceIDs: []string{"dns/configuration", "dns/resolution"},
-			},
+			// Probe-local name resolution is intentionally not the workbench source.
+			// The canonical observation below is the only normal projection input.
+			NameResolution: &model.NameResolutionObservation{RequestedName: "stale-probe-value", SelectedAddress: "192.0.2.99"},
 			Evidence: []model.Evidence{{
 				ID:   "dns/resolution",
 				Kind: model.EvidenceKindDNSResolution,
 				Raw:  json.RawMessage(`{"a":["10.30.14.22"]}`),
 			}},
+		}},
+		Observations: model.Observations{NameResolution: model.NameResolutionObservation{
+			RequestedName:       "fileserver.corp.example",
+			CandidateNames:      []string{"fileserver", "fileserver.corp.example"},
+			CandidateNamespaces: []string{"corp.example"},
+			A:                   []string{"10.30.14.22"},
+			SelectedAddress:     "10.30.14.22",
+			Limitations:         []string{"resolver server was not exposed"},
+			EffectivePath: &model.NameResolutionPath{
+				State:       model.NameResolutionPathEffective,
+				Mechanism:   model.NameResolutionMechanismDNS,
+				Certainty:   model.NameResolutionCertaintyObserved,
+				Provenance:  "native API",
+				EvidenceIDs: []string{"dns/resolution"},
+			},
+			EvidenceIDs: []string{"dns/configuration", "dns/resolution"},
 		}},
 	}
 	view, err := BuildDiagnosticView(report)
@@ -214,9 +218,67 @@ func TestViewModelProjectsNameResolutionSeparatelyFromRawEvidence(t *testing.T) 
 	}
 }
 
+func TestViewModelUsesCanonicalOperationalAndPathObservations(t *testing.T) {
+	target := fixtureTarget(443)
+	rawPath, err := json.Marshal(fixturePathObservation("raw", model.PathProtocolTCP, "198.51.100.9", 443, true, false, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalPath := fixturePathObservation("canonical", model.PathProtocolTCP, "203.0.113.10", 443, true, true, true, fixtureHop(1, model.PathHopStateUnobservable))
+	tested := model.Endpoint{Address: "203.0.113.10", Port: 443, Family: model.EndpointFamilyIPv4, Certainty: model.ObservationCertaintyObserved, EvidenceIDs: []string{"tcp/canonical"}}
+	report := model.DiagnosticReport{
+		SchemaVersion: model.DiagnosticSchemaVersion,
+		Target:        target,
+		Status:        model.ReportStatusComplete,
+		Probes: []model.ProbeResult{{
+			Name: "stale-path", Target: target, Status: model.ProbeStatusPassed,
+			Evidence: []model.Evidence{{ID: "raw/path", Kind: model.EvidenceKindPathObservation, Raw: rawPath}},
+		}},
+		Observations: model.Observations{
+			Endpoint: model.EndpointObservation{
+				OriginalInput: target.OriginalInput, RequestedIdentity: target.RequestedIdentity,
+				Service: target.Service, ApplicationProtocol: target.ApplicationProtocol,
+				TransportProtocol: target.TransportProtocol, Port: target.Port,
+				TestedEndpoint: &tested, Certainty: model.ObservationCertaintyObserved,
+				EvidenceIDs: []string{"tcp/canonical"},
+			},
+			Transport: model.TransportObservation{
+				Applicability: model.ObservationApplicabilityApplicable, Connected: true,
+				ConnectionOutcome: model.TransportConnectionOutcomeConnected,
+				ProbeNames:        []string{"tcp/canonical"}, EvidenceIDs: []string{"tcp/canonical"},
+			},
+			Security: model.SecurityObservation{
+				Applicability: model.ObservationApplicabilityApplicable, HandshakeComplete: true,
+				ProbeNames: []string{"tls/canonical"}, EvidenceIDs: []string{"tls/canonical"},
+			},
+			Application: model.ApplicationObservation{
+				Applicability: model.ObservationApplicabilityApplicable, ResponseReceived: true,
+				Result: model.HTTPResultSuccess, ProbeNames: []string{"http/canonical"}, EvidenceIDs: []string{"http/canonical"},
+			},
+			Paths:            []model.PathObservation{canonicalPath},
+			PathProvenance:   []model.ObservationProvenance{{ProbeName: "canonical-path", Source: "normalized", EvidenceIDs: []string{"path/canonical"}}},
+			PathCorrelations: []model.PathCorrelation{{Destination: "203.0.113.10", DestinationPort: 443, Observations: []model.PathObservation{canonicalPath}, TCPDestinationReached: true, TCPDestinationConnected: true}},
+		},
+	}
+
+	view, err := BuildDiagnosticView(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Observations.Endpoint.TestedEndpoint == nil || view.Observations.Endpoint.TestedEndpoint.Address != "203.0.113.10" {
+		t.Fatalf("canonical endpoint was not exposed: %#v", view.Observations.Endpoint)
+	}
+	if !view.Observations.Transport.Connected || !view.Observations.Security.HandshakeComplete || !view.Observations.Application.ResponseReceived {
+		t.Fatalf("canonical operational observations were not retained: %#v", view.Observations)
+	}
+	if len(view.Paths) != 1 || view.Paths[0].Destination != "203.0.113.10" || !containsString(view.Paths[0].EvidenceIDs, "path/canonical") {
+		t.Fatalf("path view was rebuilt from raw evidence: %#v", view.Paths)
+	}
+}
+
 func TestViewModelProjectsNormalizedNetworkContext(t *testing.T) {
 	target := fixtureTarget(443)
-	target.NetworkContext = &model.NetworkContext{
+	context := model.NetworkContext{
 		RequestedIdentity:          target.RequestedIdentity,
 		SelectedDestinationAddress: "10.0.10.25",
 		SelectedSourceInterface:    "Ethernet",
@@ -228,7 +290,9 @@ func TestViewModelProjectsNormalizedNetworkContext(t *testing.T) {
 		NetworkScope:               model.NetworkScopeSameLink,
 		EvidenceIDs:                []string{"target-route-1", "interface-state-1"},
 	}
-	view, err := BuildDiagnosticView(representativeReport(target, model.ReportStatusComplete))
+	report := representativeReport(target, model.ReportStatusComplete)
+	report.Observations.NetworkContext = context
+	view, err := BuildDiagnosticView(report)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +436,7 @@ func fixtureTarget(port uint16) model.Target {
 }
 
 func representativeReport(target model.Target, status model.ReportStatus, probes ...model.ProbeResult) model.DiagnosticReport {
-	return model.DiagnosticReport{SchemaVersion: model.DiagnosticSchemaVersion, Target: target, Status: status, Probes: probes}
+	return model.DiagnosticReport{SchemaVersion: model.DiagnosticSchemaVersion, Target: target, Status: status, Probes: probes, Observations: observationbuilder.Build(target, probes)}
 }
 
 func representativeFailedReport(target model.Target, probes ...model.ProbeResult) model.DiagnosticReport {
