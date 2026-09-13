@@ -30,7 +30,7 @@ const DefaultOverallTimeout = session.DefaultOverallTimeout
 
 const maxDiagnoseRequestBytes = 8 << 10
 
-//go:embed static/index.html static/style.css static/app.js
+//go:embed static/index.html static/style.css static/composer.js static/app.js
 var staticFiles embed.FS
 
 // Runner is retained for compatibility with the #26 synchronous endpoint and
@@ -125,6 +125,7 @@ func NewHandler(opts HandlerOptions) *Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", h.staticIndex)
 	mux.HandleFunc("/style.css", staticHandler("style.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("/composer.js", staticHandler("composer.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/app.js", staticHandler("app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/api/diagnose", h.legacyDiagnose)
 	mux.HandleFunc("/api/diagnose/view", diagnoseViewHandler(legacyRun, opts.Progress, overallTimeout))

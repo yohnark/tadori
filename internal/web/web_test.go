@@ -46,6 +46,10 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	if strings.Contains(script, "innerHTML") {
 		t.Errorf("app.js must not render evidence with innerHTML")
 	}
+	composer := getBody(t, client, server.URL+"/composer.js")
+	if !strings.Contains(composer, "TadoriTargetComposer") || !strings.Contains(composer, "PROVENANCE") {
+		t.Errorf("composer.js does not expose the deterministic composer model")
+	}
 
 	targetURL := "https://example.com:8443/diagnose"
 	body := `{"target":"` + targetURL + `"}`
