@@ -1,3 +1,4 @@
-// Package proxy will own Windows proxy and PAC discovery probes.
-// It is a package boundary only; Issue #2 adds no probe implementation.
+// Package proxy discovers Windows WinHTTP and WinINET proxy configuration.
+// It records PAC and bypass metadata without evaluating PAC script code and
+// is reported as unsupported on non-Windows platforms.
 package proxy
