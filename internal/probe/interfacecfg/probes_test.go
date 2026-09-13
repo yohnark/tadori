@@ -126,3 +126,56 @@ func TestInterfaceProbeNormalizesExecutionError(t *testing.T) {
 		t.Fatalf("reason = %q", got.Interpretation.FailureReason)
 	}
 }
+
+func TestResolverFailureDoesNotDiscardInterfaceSnapshot(t *testing.T) {
+	snapshot := fixtureSnapshot()
+	snapshot.ResolverError = "resolver process failed"
+	snapshot.ResolverErrorKind = "resolver_failure"
+	provider := SnapshotProviderFunc(func(context.Context) (Snapshot, error) { return snapshot, nil })
+	interfaceResult := NewInterfaceProbe(provider).Run(context.Background(), probe.ExecutionContext{})
+	if interfaceResult.Status != model.ProbeStatusPassed || interfaceResult.Interpretation.FailureReason != model.FailureReasonNone {
+		t.Fatalf("interface result = %#v", interfaceResult)
+	}
+	dnsResult := NewDNSProbe(provider).Run(context.Background(), probe.ExecutionContext{})
+	if dnsResult.Status != model.ProbeStatusError || dnsResult.Interpretation.FailureReason != model.FailureReasonDNSResolverFailure {
+		t.Fatalf("DNS result = %#v", dnsResult)
+	}
+}
+
+func TestSystemProviderPropagatesResolverCancellationWithPartialSnapshot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := readConfiguredDNSServers(ctx, filepath.Join(t.TempDir(), "resolv.conf")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolver cancellation error = %v, want context.Canceled", err)
+	}
+}
+
+func TestInterfaceProbeReportsTimeoutWhenProviderPropagatesDeadline(t *testing.T) {
+	snapshot := fixtureSnapshot()
+	p := NewInterfaceProbe(SnapshotProviderFunc(func(context.Context) (Snapshot, error) {
+		return snapshot, context.DeadlineExceeded
+	}))
+	got := p.Run(context.Background(), probe.ExecutionContext{})
+	if got.Status != model.ProbeStatusFailed || got.Interpretation.FailureReason != model.FailureReason(FailureReasonProbeTimeout) {
+		t.Fatalf("deadline result = %#v", got)
+	}
+	if len(got.Evidence) < 2 {
+		t.Fatalf("partial interface evidence was discarded: %#v", got.Evidence)
+	}
+}
+
+func TestDNSProbeNormalizesTopLevelResolverErrors(t *testing.T) {
+	snapshot := fixtureSnapshot()
+	resolverFailure := NewDNSProbe(SnapshotProviderFunc(func(context.Context) (Snapshot, error) {
+		return snapshot, errors.New("resolver discovery failed")
+	})).Run(context.Background(), probe.ExecutionContext{})
+	if resolverFailure.Status != model.ProbeStatusError || resolverFailure.Interpretation.FailureReason != model.FailureReasonDNSResolverFailure {
+		t.Fatalf("resolver failure result = %#v", resolverFailure)
+	}
+	timeout := NewDNSProbe(SnapshotProviderFunc(func(context.Context) (Snapshot, error) {
+		return snapshot, context.DeadlineExceeded
+	})).Run(context.Background(), probe.ExecutionContext{})
+	if timeout.Status != model.ProbeStatusFailed || timeout.Interpretation.FailureReason != model.FailureReasonDNSTimeout {
+		t.Fatalf("resolver timeout result = %#v", timeout)
+	}
+}

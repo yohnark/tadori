@@ -155,6 +155,25 @@ func TestGatewayProbeDefaultIsHonestAboutUnsupportedICMP(t *testing.T) {
 	}
 }
 
+func TestPingArgumentsAreFixedAndAddressValidated(t *testing.T) {
+	args, err := pingArguments(netip.MustParseAddr("2001:db8::1"))
+	if err != nil {
+		t.Fatalf("valid gateway rejected: %v", err)
+	}
+	want := []string{"-n", "1", "-w", "1000", "2001:db8::1"}
+	if len(args) != len(want) {
+		t.Fatalf("ping args = %#v, want %#v", args, want)
+	}
+	for index := range want {
+		if args[index] != want[index] {
+			t.Fatalf("ping args = %#v, want %#v", args, want)
+		}
+	}
+	if _, err := pingArguments(netip.Addr{}); err == nil {
+		t.Fatal("invalid gateway accepted")
+	}
+}
+
 func TestGatewayProbeDirectRouteDoesNotInventGatewayFailure(t *testing.T) {
 	table := fixtureRouteTable{routes: []Route{{Destination: netip.MustParsePrefix("192.0.2.0/24"), Interface: "eth", InterfaceIndex: 2}}}
 	checkerCalled := false

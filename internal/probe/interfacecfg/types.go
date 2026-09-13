@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/yohnark/tadori/internal/model"
@@ -48,11 +50,12 @@ type InterfaceState struct {
 // Snapshot contains local interface and resolver configuration.  DNS servers
 // are evidence only; this package does not query or rank them.
 type Snapshot struct {
-	Interfaces    []InterfaceState `json:"interfaces"`
-	DNSServers    []netip.Addr     `json:"dns_servers,omitempty"`
-	Source        string           `json:"source,omitempty"`
-	ResolverError string           `json:"resolver_error,omitempty"`
-	CapturedAt    time.Time        `json:"captured_at"`
+	Interfaces        []InterfaceState `json:"interfaces"`
+	DNSServers        []netip.Addr     `json:"dns_servers,omitempty"`
+	Source            string           `json:"source,omitempty"`
+	ResolverError     string           `json:"resolver_error,omitempty"`
+	ResolverErrorKind string           `json:"resolver_error_kind,omitempty"`
+	CapturedAt        time.Time        `json:"captured_at"`
 }
 
 // SnapshotProvider allows tests and platform adapters to provide deterministic
@@ -115,20 +118,41 @@ func (p SystemProvider) Snapshot(ctx context.Context) (Snapshot, error) {
 	}
 
 	servers, resolverSource, resolverErr := readConfiguredDNSServers(ctx, p.ResolverConfigPath)
-	if resolverErr != nil && !errors.Is(resolverErr, ErrUnsupported) {
-		// Interface observations remain useful even if resolver configuration
-		// cannot be read.  Keep the error for the dedicated DNS config probe,
-		// but do not discard the interface snapshot here.
-		return snapshot, resolverErr
-	}
 	if resolverErr != nil {
 		snapshot.ResolverError = resolverErr.Error()
+		snapshot.ResolverErrorKind = classifyResolverError(resolverErr)
+		// Preserve normal resolver discovery failures in the snapshot so the
+		// interface lane can still report useful local state. Caller
+		// cancellation/deadline is different: propagate it so probes honor
+		// their execution context and do not report a late success.
+		if errors.Is(resolverErr, context.Canceled) || errors.Is(resolverErr, context.DeadlineExceeded) || ctx.Err() != nil {
+			return snapshot, resolverErr
+		}
 	}
 	snapshot.DNSServers = servers
 	if resolverSource != "" {
 		snapshot.Source += ";" + resolverSource
 	}
 	return snapshot, nil
+}
+
+func classifyResolverError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, ErrUnsupported) {
+		return "unsupported"
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return "unsupported"
+	}
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		return "insufficient_privilege"
+	}
+	return "resolver_failure"
 }
 
 func parseAddress(address net.Addr) (Address, bool) {

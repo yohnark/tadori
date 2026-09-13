@@ -264,20 +264,6 @@ func targetFamily(target model.Target) int {
 	return 6
 }
 
-func defaultGatewayChecker(ctx context.Context, gateway netip.Addr) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !gateway.IsValid() {
-		return errors.New("gateway address is invalid")
-	}
-	// The standard library does not expose a portable ICMP echo API. Do not
-	// substitute a UDP connect: UDP connect only performs local route setup and
-	// cannot establish gateway reachability. Platform callers can inject a
-	// native ICMP checker through GatewayProbe.Checker.
-	return ErrUnsupported
-}
-
 func selectedRouteEvidence(routeType string, selected Route, target string) map[string]any {
 	return map[string]any{
 		"route_type":      routeType,

@@ -72,7 +72,11 @@ func (p *InterfaceProbe) Run(ctx context.Context, execution probe.ExecutionConte
 	snapshot, err := provider.Snapshot(callCtx)
 	completed := time.Now().UTC()
 	if err != nil {
-		evidence := []model.Evidence{makeEvidence("interface-state-1", model.EvidenceKindInterfaceState, "native-interface-api", map[string]any{"error": err.Error()}, completed)}
+		evidence := make([]model.Evidence, 0, 2)
+		if len(snapshot.Interfaces) != 0 {
+			evidence = append(evidence, makeEvidence("interface-state-1", model.EvidenceKindInterfaceState, snapshot.Source, snapshot.Interfaces, snapshot.CapturedAt))
+		}
+		evidence = append(evidence, makeEvidence("interface-state-error-1", model.EvidenceKindInterfaceState, "native-interface-api", map[string]any{"error": err.Error()}, completed))
 		return result(execution.Target, p.Name(), started, completed, evidence, statusForError(err), reasonForError(err), model.LayerInterface, model.FaultDomainLocal)
 	}
 	raw := snapshot.Interfaces
@@ -141,17 +145,39 @@ func (p *DNSProbe) Run(ctx context.Context, execution probe.ExecutionContext) mo
 	snapshot, err := provider.Snapshot(callCtx)
 	completed := time.Now().UTC()
 	if err != nil {
-		evidence := []model.Evidence{makeEvidence("dns-configuration-1", model.EvidenceKindDNSConfiguration, "native-resolver-api", map[string]any{"error": err.Error()}, completed)}
-		return result(execution.Target, p.Name(), started, completed, evidence, statusForError(err), reasonForError(err), model.LayerIPConfiguration, model.FaultDomainLocal)
+		reason := dnsConfigReason(err)
+		status := model.ProbeStatusError
+		if reason == model.FailureReasonDNSTimeout {
+			status = model.ProbeStatusFailed
+		}
+		raw := struct {
+			Servers []netip.Addr `json:"servers"`
+			Source  string       `json:"source,omitempty"`
+			Error   string       `json:"error"`
+			Kind    string       `json:"error_kind,omitempty"`
+		}{Servers: snapshot.DNSServers, Source: snapshot.Source, Error: err.Error(), Kind: classifyResolverError(err)}
+		evidence := []model.Evidence{makeEvidence("dns-configuration-1", model.EvidenceKindDNSConfiguration, "native-resolver-api", raw, completed)}
+		return result(execution.Target, p.Name(), started, completed, evidence, status, reason, model.LayerDNS, model.FaultDomainLocal)
 	}
 	if snapshot.ResolverError != "" {
 		raw := struct {
 			Servers []netip.Addr `json:"servers"`
 			Source  string       `json:"source,omitempty"`
 			Error   string       `json:"error"`
-		}{Servers: snapshot.DNSServers, Source: snapshot.Source, Error: snapshot.ResolverError}
+			Kind    string       `json:"error_kind,omitempty"`
+		}{Servers: snapshot.DNSServers, Source: snapshot.Source, Error: snapshot.ResolverError, Kind: snapshot.ResolverErrorKind}
 		evidence := []model.Evidence{makeEvidence("dns-configuration-1", model.EvidenceKindDNSConfiguration, snapshot.Source, raw, snapshot.CapturedAt)}
-		return result(execution.Target, p.Name(), started, completed, evidence, model.ProbeStatusError, model.FailureReasonUnsupported, model.LayerDNS, model.FaultDomainLocal)
+		status := model.ProbeStatusError
+		reason := model.FailureReasonDNSResolverFailure
+		switch snapshot.ResolverErrorKind {
+		case "timeout":
+			status, reason = model.ProbeStatusFailed, model.FailureReasonDNSTimeout
+		case "unsupported":
+			reason = model.FailureReasonUnsupported
+		case "insufficient_privilege":
+			reason = model.FailureReason(FailureReasonInsufficientPrivilege)
+		}
+		return result(execution.Target, p.Name(), started, completed, evidence, status, reason, model.LayerDNS, model.FaultDomainLocal)
 	}
 	raw := struct {
 		Servers []netip.Addr `json:"servers"`
@@ -215,4 +241,21 @@ func reasonForError(err error) model.FailureReason {
 		return model.FailureReason(FailureReasonInsufficientPrivilege)
 	}
 	return model.FailureReasonProbeExecution
+}
+
+func dnsConfigReason(err error) model.FailureReason {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return model.FailureReasonDNSTimeout
+	}
+	var timeoutError net.Error
+	if errors.As(err, &timeoutError) && timeoutError.Timeout() {
+		return model.FailureReasonDNSTimeout
+	}
+	if errors.Is(err, ErrUnsupported) {
+		return model.FailureReasonUnsupported
+	}
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		return model.FailureReason(FailureReasonInsufficientPrivilege)
+	}
+	return model.FailureReasonDNSResolverFailure
 }
