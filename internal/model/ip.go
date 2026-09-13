@@ -22,7 +22,7 @@ func NormalizePrefix(prefix netip.Prefix) netip.Prefix {
 	switch {
 	case bits >= 96:
 		bits -= 96
-	case bits > 32:
+	default:
 		// There is no equivalent IPv4 prefix for this partially specified
 		// mapped IPv6 network.
 		return prefix

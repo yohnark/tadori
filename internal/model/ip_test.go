@@ -35,6 +35,8 @@ func TestNormalizePrefixPreservesEquivalentPrefixLength(t *testing.T) {
 	}{
 		{name: "mapped IPv4 network", input: "::ffff:10.0.10.10/120", want: "10.0.10.0/24"},
 		{name: "mapped IPv4 default", input: "::ffff:0.0.0.0/96", want: "0.0.0.0/0"},
+		{name: "mapped IPv6 partial /24", input: "::ffff:10.0.10.10/24", want: "::ffff:10.0.10.10/24"},
+		{name: "mapped IPv6 partial /95", input: "::ffff:10.0.10.10/95", want: "::ffff:10.0.10.10/95"},
 		{name: "genuine IPv6 network", input: "2001:db8::10/64", want: "2001:db8::10/64"},
 	}
 
