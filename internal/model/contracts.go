@@ -13,7 +13,7 @@ import (
 
 // DiagnosticSchemaVersion is the schema version emitted in a
 // DiagnosticReport. It changes only when the canonical JSON contract changes.
-const DiagnosticSchemaVersion = "2"
+const DiagnosticSchemaVersion = "3"
 
 // ProbeStatus describes what happened when a probe ran. Failed means that the
 // probe observed a negative result; Error means that it could not produce a
@@ -79,6 +79,14 @@ const (
 	FailureReasonTLSInterceptionSuspected     FailureReason = "tls_interception_suspected"
 	FailureReasonHTTPFailure                  FailureReason = "http_failure"
 	FailureReasonHTTPStatusCode               FailureReason = "http_status_code"
+	FailureReasonSSHHandshakeFailure          FailureReason = "ssh_handshake_failure"
+	FailureReasonSSHTimeout                   FailureReason = "ssh_timeout"
+	FailureReasonSSHBannerMalformed           FailureReason = "ssh_banner_malformed"
+	FailureReasonSSHNonSSHResponse            FailureReason = "ssh_non_ssh_response"
+	FailureReasonRDPNegotiationFailure        FailureReason = "rdp_negotiation_failure"
+	FailureReasonRDPTimeout                   FailureReason = "rdp_timeout"
+	FailureReasonRDPNegotiationMalformed      FailureReason = "rdp_negotiation_malformed"
+	FailureReasonRDPNegotiationRejected       FailureReason = "rdp_negotiation_rejected"
 	FailureReasonICMPFailure                  FailureReason = "icmp_failure"
 	FailureReasonPathObservation              FailureReason = "path_observation_failure"
 	FailureReasonPathCancellation             FailureReason = "path_cancellation"
@@ -102,6 +110,8 @@ const (
 	FaultDomainTransport   FaultDomain = "transport"
 	FaultDomainTLS         FaultDomain = "tls"
 	FaultDomainHTTP        FaultDomain = "http"
+	FaultDomainSSH         FaultDomain = "ssh"
+	FaultDomainRDP         FaultDomain = "rdp"
 	FaultDomainDestination FaultDomain = "destination"
 	FaultDomainICMP        FaultDomain = "icmp"
 	FaultDomainPolicy      FaultDomain = "policy"
@@ -123,6 +133,8 @@ const (
 	LayerTCP             Layer = "tcp"
 	LayerTLS             Layer = "tls"
 	LayerHTTP            Layer = "http"
+	LayerSSH             Layer = "ssh"
+	LayerRDP             Layer = "rdp"
 	LayerICMP            Layer = "icmp"
 	LayerDestination     Layer = "destination"
 )
@@ -140,10 +152,13 @@ const (
 	EvidenceKindGatewayReachability EvidenceKind = "gateway_reachability"
 	EvidenceKindDNSConfiguration    EvidenceKind = "dns_configuration"
 	EvidenceKindDNSResolution       EvidenceKind = "dns_resolution"
+	EvidenceKindDNSService          EvidenceKind = "dns_service"
 	EvidenceKindTCPConnection       EvidenceKind = "tcp_connection"
 	EvidenceKindTLSHandshake        EvidenceKind = "tls_handshake"
 	EvidenceKindCertificate         EvidenceKind = "certificate"
 	EvidenceKindHTTPResponse        EvidenceKind = "http_response"
+	EvidenceKindSSHHandshake        EvidenceKind = "ssh_handshake"
+	EvidenceKindRDPNegotiation      EvidenceKind = "rdp_negotiation"
 	EvidenceKindPathObservation     EvidenceKind = "path_observation"
 	EvidenceKindProxyConfiguration  EvidenceKind = "proxy_configuration"
 	EvidenceKindWinHTTPProxy        EvidenceKind = "winhttp_proxy"

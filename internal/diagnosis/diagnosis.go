@@ -140,6 +140,14 @@ var rules = []rule{
 	{model.FailureReasonCertificateValidationFailure},
 	{model.FailureReasonHTTPStatusCode},
 	{model.FailureReasonHTTPFailure},
+	{model.FailureReasonSSHTimeout},
+	{model.FailureReasonSSHBannerMalformed},
+	{model.FailureReasonSSHNonSSHResponse},
+	{model.FailureReasonSSHHandshakeFailure},
+	{model.FailureReasonRDPTimeout},
+	{model.FailureReasonRDPNegotiationRejected},
+	{model.FailureReasonRDPNegotiationMalformed},
+	{model.FailureReasonRDPNegotiationFailure},
 	{model.FailureReasonProbeExecution},
 }
 
@@ -568,15 +576,19 @@ func successfulLayerContradicts(reason model.FailureReason, failedLayer, success
 	}
 	switch failedLayer {
 	case model.LayerInterface, model.LayerIPConfiguration, model.LayerRoute, model.LayerGateway, model.LayerNetwork:
-		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
+		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP || successfulLayer == model.LayerSMB || successfulLayer == model.LayerSSH || successfulLayer == model.LayerRDP
 	case model.LayerDNS, model.LayerProxy:
 		return successfulLayer == failedLayer
 	case model.LayerTCP:
-		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
+		return successfulLayer == model.LayerTCP || successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP || successfulLayer == model.LayerSMB || successfulLayer == model.LayerSSH || successfulLayer == model.LayerRDP
 	case model.LayerTLS:
-		return successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP
+		return successfulLayer == model.LayerTLS || successfulLayer == model.LayerHTTP || successfulLayer == model.LayerSMB || successfulLayer == model.LayerSSH || successfulLayer == model.LayerRDP
 	case model.LayerHTTP:
 		return successfulLayer == model.LayerHTTP
+	case model.LayerSSH, model.LayerRDP:
+		return successfulLayer == failedLayer
+	case model.LayerSMB:
+		return successfulLayer == model.LayerSMB
 	default:
 		return false
 	}
@@ -673,6 +685,14 @@ func semantics(reason model.FailureReason) (model.Layer, model.FaultDomain) {
 		return model.LayerTLS, model.FaultDomainTLS
 	case model.FailureReasonHTTPStatusCode, model.FailureReasonHTTPFailure:
 		return model.LayerHTTP, model.FaultDomainHTTP
+	case model.FailureReasonSSHTimeout, model.FailureReasonSSHBannerMalformed, model.FailureReasonSSHNonSSHResponse, model.FailureReasonSSHHandshakeFailure:
+		return model.LayerSSH, model.FaultDomainSSH
+	case model.FailureReasonRDPTimeout, model.FailureReasonRDPNegotiationRejected, model.FailureReasonRDPNegotiationMalformed, model.FailureReasonRDPNegotiationFailure:
+		return model.LayerRDP, model.FaultDomainRDP
+	case model.FailureReasonSMBTimeout, model.FailureReasonSMBProtocolRejection, model.FailureReasonSMBMalformedResponse:
+		return model.LayerSMB, model.FaultDomainSMB
+	case model.FailureReasonSMBConnectionRefused:
+		return model.LayerTCP, model.FaultDomainTransport
 	case model.FailureReasonProbeExecution:
 		return model.LayerUnknown, model.FaultDomainUnknown
 	default:
@@ -699,6 +719,10 @@ func layerRank(layer model.Layer) int {
 	case model.LayerTLS:
 		return 80
 	case model.LayerHTTP:
+		return 90
+	case model.LayerSSH, model.LayerRDP:
+		return 95
+	case model.LayerSMB:
 		return 90
 	case model.LayerDestination:
 		return 100
@@ -903,7 +927,7 @@ func targetIdentity(value model.Target) string {
 
 func transportEndpointLayer(layer model.Layer) bool {
 	switch layer {
-	case model.LayerTCP, model.LayerTLS, model.LayerHTTP, model.LayerDestination:
+	case model.LayerTCP, model.LayerTLS, model.LayerHTTP, model.LayerSSH, model.LayerRDP, model.LayerDestination:
 		return true
 	default:
 		return false

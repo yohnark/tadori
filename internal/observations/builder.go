@@ -18,6 +18,7 @@ import (
 	"github.com/yohnark/tadori/internal/probe/interfacecfg"
 	proxyprobe "github.com/yohnark/tadori/internal/probe/proxy"
 	"github.com/yohnark/tadori/internal/probe/route"
+	smbprobe "github.com/yohnark/tadori/internal/probe/smb"
 	tlsprobe "github.com/yohnark/tadori/internal/probe/tls"
 )
 
@@ -537,12 +538,25 @@ func buildSecurityObservation(target model.Target, endpoint model.EndpointObserv
 // available in the original raw evidence when a caller explicitly requested
 // it from the HTTP probe.
 func buildApplicationObservation(target model.Target, endpoint model.EndpointObservation, transport model.TransportObservation, probes []model.ProbeResult) model.ApplicationObservation {
+	if isDNSServiceTarget(target, probes) {
+		return buildDNSApplicationObservation(target, endpoint, probes)
+	}
+	if target.ApplicationProtocol == model.ApplicationProtocolSSH || target.ApplicationProtocol == model.ApplicationProtocolRDP || hasProtocolEvidence(probes) {
+		return buildProtocolApplicationObservation(target, endpoint, transport, probes)
+	}
+	applicability := httpApplicability(target, probes)
+	faultDomain := model.FaultDomainHTTP
+	if target.ApplicationProtocol == model.ApplicationProtocolSMB || target.Service.ID == model.ServiceProfileSMB {
+		applicability = smbApplicability(target, probes)
+		faultDomain = model.FaultDomainSMB
+	}
 	observation := model.ApplicationObservation{
-		Applicability:     httpApplicability(target, probes),
+		Protocol:          target.ApplicationProtocol,
+		Applicability:     applicability,
 		RequestedResource: target.Resource,
 		Result:            model.HTTPResultNotAttempted,
 		FailureReason:     model.FailureReasonNone,
-		FaultDomain:       model.FaultDomainHTTP,
+		FaultDomain:       faultDomain,
 		Certainty:         model.ObservationCertaintyUnknown,
 	}
 	if transport.TestedEndpoint != nil {
@@ -554,8 +568,64 @@ func buildApplicationObservation(target model.Target, endpoint model.EndpointObs
 	}
 	var statuses, results, urls, endpoints []sourceValue
 	seenHTTP := false
+	seenSMB := false
 	for _, probe := range probes {
 		for _, evidence := range probe.Evidence {
+			if evidence.Kind == model.EvidenceKindSMBNegotiation {
+				seenSMB = true
+				observation.RequestAttempted = true
+				observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
+				observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
+				addObservationProvenance(&observation.Provenance, probe, evidence)
+				var value smbprobe.NegotiationEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "SMB negotiation evidence decode: "+err.Error())
+					continue
+				}
+				if observation.SMB == nil {
+					observation.SMB = &model.SMBApplicationObservation{Result: model.SMBResultUnknown}
+				}
+				if value.ResponseReceived {
+					observation.ResponseReceived = true
+				}
+				if value.Negotiated {
+					observation.SMB.Result = model.SMBResultNegotiated
+					observation.SMB.Negotiated = true
+					observation.SMB.Dialect = value.Dialect
+					observation.SMB.DialectRevision = value.DialectRevision
+					observation.SMB.Capabilities = append([]string(nil), value.Capabilities...)
+					observation.SMB.ServerGUID = value.ServerGUID
+					observation.SMB.SecurityMode = value.SecurityMode
+					observation.SMB.MaxTransactSize = value.MaxTransactSize
+					observation.SMB.MaxReadSize = value.MaxReadSize
+					observation.SMB.MaxWriteSize = value.MaxWriteSize
+					observation.SMB.ResponseBytes = value.ResponseBytes
+				} else {
+					switch value.FailureReason {
+					case model.FailureReasonSMBTimeout:
+						observation.SMB.Result = model.SMBResultTimeout
+					case model.FailureReasonSMBProtocolRejection:
+						observation.SMB.Result = model.SMBResultProtocolRejection
+					case model.FailureReasonSMBMalformedResponse:
+						observation.SMB.Result = model.SMBResultMalformedResponse
+					case model.FailureReasonTCPTimeout, model.FailureReasonTCPConnectionRefused, model.FailureReasonSMBConnectionRefused:
+						observation.SMB.Result = model.SMBResultTCPFailure
+					default:
+						observation.SMB.Result = model.SMBResultUnknown
+					}
+				}
+				if observation.FailureReason == model.FailureReasonNone || observation.FailureReason == model.FailureReasonUnknown {
+					observation.FailureReason = value.FailureReason
+					if observation.FailureReason == model.FailureReasonNone || observation.FailureReason == model.FailureReasonUnknown {
+						observation.FailureReason = probe.Interpretation.FailureReason
+					}
+				}
+				if probe.Interpretation.FaultDomain != "" {
+					observation.FaultDomain = probe.Interpretation.FaultDomain
+				}
+				mergeObservationTiming(&observation.Timing, probe.Timing)
+				continue
+			}
 			if evidence.Kind != model.EvidenceKindHTTPResponse && evidence.Kind != httpprobe.EvidenceKindHTTPError {
 				continue
 			}
@@ -638,7 +708,7 @@ func buildApplicationObservation(target model.Target, endpoint model.EndpointObs
 	if values := distinctSourceValues(endpoints); len(values) > 1 {
 		observation.Conflicts = append(observation.Conflicts, conflict("application.endpoint_used", values, endpoints))
 	}
-	if seenHTTP {
+	if seenHTTP || seenSMB {
 		observation.Applicability = model.ObservationApplicabilityApplicable
 		observation.Certainty = model.ObservationCertaintyObserved
 	} else if observation.Applicability == model.ObservationApplicabilityInapplicable {
@@ -651,6 +721,383 @@ func buildApplicationObservation(target model.Target, endpoint model.EndpointObs
 		observation.Applicability = model.ObservationApplicabilityNotAttempted
 	}
 	return model.NormalizeApplicationObservation(observation)
+}
+
+func isDNSServiceTarget(target model.Target, probes []model.ProbeResult) bool {
+	if target.Service.ID == model.ServiceProfileDNS || target.ApplicationProtocol == model.ApplicationProtocolDNS {
+		return true
+	}
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind == model.EvidenceKindDNSService {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type sshApplicationEvidence struct {
+	TransportConnected   bool   `json:"transport_connected"`
+	BannerReceived       bool   `json:"banner_received"`
+	BannerValid          bool   `json:"banner_valid"`
+	ServerIdentification string `json:"server_identification,omitempty"`
+	ResponseClass        string `json:"response_class"`
+}
+
+type rdpApplicationEvidence struct {
+	TransportConnected   bool     `json:"transport_connected"`
+	NegotiationAttempted bool     `json:"negotiation_attempted"`
+	NegotiationComplete  bool     `json:"negotiation_complete"`
+	RequestedProtocols   []string `json:"requested_protocols,omitempty"`
+	NegotiatedProtocol   string   `json:"negotiated_protocol,omitempty"`
+	ResponseType         string   `json:"response_type"`
+}
+
+func hasProtocolEvidence(probes []model.ProbeResult) bool {
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind == model.EvidenceKindSSHHandshake || evidence.Kind == model.EvidenceKindRDPNegotiation {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// buildDNSApplicationObservation keeps DNS service response semantics inside
+// the canonical application envelope while leaving the separate dns probe's
+// target-name resolution observation untouched.
+func buildDNSApplicationObservation(target model.Target, endpoint model.EndpointObservation, probes []model.ProbeResult) model.ApplicationObservation {
+	dnsObservation := model.DNSApplicationObservation{
+		RequestedEndpoint: requestedEndpoint(target),
+		QueryName:         dns.DiagnosticQueryName,
+		QueryType:         dns.DiagnosticQueryType,
+		Result:            model.DNSApplicationResultNotAttempted,
+		UDP:               dnsApplicationTransport("udp"),
+		TCP:               dnsApplicationTransport("tcp"),
+		FailureReason:     model.FailureReasonNone,
+		FaultDomain:       model.FaultDomainDNS,
+		Certainty:         model.ObservationCertaintyUnknown,
+	}
+	application := model.ApplicationObservation{
+		Applicability:     model.ObservationApplicabilityApplicable,
+		Result:            model.HTTPResultNotAttempted,
+		RequestedResource: target.Resource,
+		FailureReason:     model.FailureReasonNone,
+		FaultDomain:       model.FaultDomainDNS,
+		Certainty:         model.ObservationCertaintyUnknown,
+		DNS:               &dnsObservation,
+	}
+	if endpoint.TestedEndpoint != nil {
+		used := cloneEndpointValue(*endpoint.TestedEndpoint)
+		application.EndpointUsed = &used
+	}
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind != model.EvidenceKindDNSService {
+				continue
+			}
+			var value dns.DNSServiceEvidence
+			if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+				dnsObservation.Limitations = appendUnique(dnsObservation.Limitations, "DNS service evidence decode: "+err.Error())
+				continue
+			}
+			lane := &dnsObservation.UDP
+			if strings.EqualFold(value.Transport, "tcp") {
+				lane = &dnsObservation.TCP
+			} else if !strings.EqualFold(value.Transport, "udp") {
+				dnsObservation.Limitations = appendUnique(dnsObservation.Limitations, "DNS service evidence has an unknown transport: "+value.Transport)
+				continue
+			}
+			lane.Attempted = value.Attempts > 0
+			lane.ResponseReceived = value.ResponseReceived
+			lane.Outcome = string(value.Outcome)
+			lane.RCode = value.RCode
+			lane.RCodeName = value.RCodeName
+			lane.TransactionID = value.TransactionID
+			lane.Truncated = value.Truncated
+			lane.QueryBytes = value.QueryBytes
+			lane.ResponseBytes = value.ResponseBytes
+			lane.QuestionCount = value.QuestionCount
+			lane.AnswerCount = value.AnswerCount
+			lane.AuthorityCount = value.AuthorityCount
+			lane.AdditionalCount = value.AdditionalCount
+			lane.Attempts = value.Attempts
+			lane.Fallback = value.Fallback
+			lane.FallbackReason = value.FallbackReason
+			lane.ErrorKind = value.ErrorKind
+			lane.FailureReason = dnsServiceFailureReason(value)
+			lane.FaultDomain = model.FaultDomainDNS
+			lane.Certainty = model.ObservationCertaintyObserved
+			lane.Timing.DurationMS = value.DurationMS
+			if endpoint := dnsServiceEndpoint(value, target.Port); endpoint != nil {
+				lane.EndpointUsed = endpoint
+				if application.EndpointUsed == nil && value.Success {
+					used := *endpoint
+					application.EndpointUsed = &used
+				}
+			}
+			lane.ProbeNames = appendUnique(lane.ProbeNames, probe.Name)
+			lane.EvidenceIDs = appendUnique(lane.EvidenceIDs, evidence.ID)
+			lane.Provenance = appendUnique(lane.Provenance, "dns-service-wire")
+			dnsObservation.RequestAttempted = dnsObservation.RequestAttempted || lane.Attempted
+			dnsObservation.ResponseReceived = dnsObservation.ResponseReceived || value.ResponseReceived
+			dnsObservation.ProbeNames = appendUnique(dnsObservation.ProbeNames, probe.Name)
+			dnsObservation.EvidenceIDs = appendUnique(dnsObservation.EvidenceIDs, evidence.ID)
+			dnsObservation.Provenance = appendUnique(dnsObservation.Provenance, "DNS service wire response")
+			addObservationProvenance(&application.Provenance, probe, evidence)
+			application.ProbeNames = appendUnique(application.ProbeNames, probe.Name)
+			application.EvidenceIDs = appendUnique(application.EvidenceIDs, evidence.ID)
+			mergeObservationTiming(&application.Timing, probe.Timing)
+			mergeObservationTiming(&dnsObservation.Timing, probe.Timing)
+		}
+	}
+
+	udpAttempted, tcpAttempted := dnsObservation.UDP.Attempted, dnsObservation.TCP.Attempted
+	udpSuccess := dnsApplicationLaneSucceeded(dnsObservation.UDP)
+	tcpSuccess := dnsApplicationLaneSucceeded(dnsObservation.TCP)
+	if udpAttempted || tcpAttempted {
+		dnsObservation.Certainty = model.ObservationCertaintyObserved
+		switch {
+		case udpSuccess && tcpSuccess:
+			dnsObservation.Result = model.DNSApplicationResultSuccess
+			application.Result = model.HTTPResultSuccess
+		case udpSuccess != tcpSuccess:
+			dnsObservation.Result = model.DNSApplicationResultPartial
+			dnsObservation.Divergence = true
+			application.Result = model.HTTPResultPartial
+		case udpAttempted || tcpAttempted:
+			dnsObservation.Result = model.DNSApplicationResultFailure
+			application.Result = model.HTTPResultRequestFailure
+		}
+	}
+	if dnsObservation.Divergence {
+		// A successful lane prevents the application envelope from claiming
+		// destination unavailability. The failing lane remains fully visible.
+		dnsObservation.FailureReason = model.FailureReasonNone
+	} else if dnsObservation.Result == model.DNSApplicationResultFailure {
+		dnsObservation.FailureReason = firstDNSServiceFailure(dnsObservation.UDP, dnsObservation.TCP)
+		application.FailureReason = dnsObservation.FailureReason
+	}
+	application.ResponseReceived = dnsObservation.ResponseReceived
+	application.RequestAttempted = dnsObservation.RequestAttempted
+	application.Applicability = model.ObservationApplicabilityApplicable
+	application.Certainty = dnsObservation.Certainty
+	return model.NormalizeApplicationObservation(application)
+}
+
+func dnsApplicationTransport(transport string) model.DNSApplicationTransportObservation {
+	return model.DNSApplicationTransportObservation{
+		Transport:     transport,
+		Outcome:       string(dns.DNSServiceOutcomeNotAttempted),
+		FailureReason: model.FailureReasonNone,
+		FaultDomain:   model.FaultDomainDNS,
+		Certainty:     model.ObservationCertaintyUnknown,
+	}
+}
+
+func dnsServiceFailureReason(value dns.DNSServiceEvidence) model.FailureReason {
+	switch value.Outcome {
+	case dns.DNSServiceOutcomeSuccess, dns.DNSServiceOutcomeNegativeResponse, dns.DNSServiceOutcomeNotAttempted:
+		return model.FailureReasonNone
+	case dns.DNSServiceOutcomeRefused:
+		return dns.FailureReasonDNSServiceRefused
+	case dns.DNSServiceOutcomeServfail:
+		return dns.FailureReasonDNSServiceServfail
+	case dns.DNSServiceOutcomeProtocolFailure:
+		return dns.FailureReasonDNSServiceProtocolFailure
+	case dns.DNSServiceOutcomeMalformedResponse:
+		return dns.FailureReasonDNSServiceMalformedResponse
+	case dns.DNSServiceOutcomeTruncatedResponse:
+		return dns.FailureReasonDNSServiceTruncatedResponse
+	case dns.DNSServiceOutcomeTimeout:
+		return dns.FailureReasonDNSServiceTimeout
+	case dns.DNSServiceOutcomeCancellation:
+		return dns.FailureReasonDNSServiceCancellation
+	case dns.DNSServiceOutcomeNoResolvedEndpoint:
+		return dns.FailureReasonDNSServiceNoEndpoint
+	case dns.DNSServiceOutcomeTransportFailure:
+		return dns.FailureReasonDNSServiceTransportFailure
+	default:
+		if value.ResponseReceived || value.Attempts > 0 {
+			return dns.FailureReasonDNSServiceProtocolFailure
+		}
+		return model.FailureReasonNone
+	}
+}
+
+func dnsServiceEndpoint(value dns.DNSServiceEvidence, port uint16) *model.Endpoint {
+	raw := value.Endpoint
+	if raw == "" && value.ResolvedAddress != "" {
+		raw = net.JoinHostPort(value.ResolvedAddress, strconv.Itoa(int(port)))
+	}
+	if endpoint, ok := concreteEndpoint(raw, port); ok {
+		endpoint.SelectionReason = model.EndpointSelectionTransport
+		endpoint.Provenance = "DNS service response endpoint"
+		endpoint.Certainty = model.ObservationCertaintyObserved
+		return &endpoint
+	}
+	return nil
+}
+
+func firstDNSServiceFailure(udp, tcp model.DNSApplicationTransportObservation) model.FailureReason {
+	for _, lane := range []model.DNSApplicationTransportObservation{udp, tcp} {
+		if lane.FailureReason != model.FailureReasonNone && lane.FailureReason != model.FailureReasonUnknown {
+			return lane.FailureReason
+		}
+	}
+	return dns.FailureReasonDNSServiceTransportFailure
+}
+
+func dnsApplicationLaneSucceeded(value model.DNSApplicationTransportObservation) bool {
+	return value.Attempted && value.ResponseReceived && (value.Outcome == string(dns.DNSServiceOutcomeSuccess) || value.Outcome == string(dns.DNSServiceOutcomeNegativeResponse))
+}
+
+// buildProtocolApplicationObservation projects SSH and RDP handshakes into
+// the same canonical application envelope used by HTTP. TransportConnected
+// is intentionally retained separately from HandshakeComplete: a responder
+// that accepts TCP but rejects or fails the protocol is an application-layer
+// outcome, not a transport failure.
+func buildProtocolApplicationObservation(target model.Target, endpoint model.EndpointObservation, transport model.TransportObservation, probes []model.ProbeResult) model.ApplicationObservation {
+	protocol := target.ApplicationProtocol
+	if protocol == "" {
+		if target.Service.ID == model.ServiceProfileSSH {
+			protocol = model.ApplicationProtocolSSH
+		} else if target.Service.ID == model.ServiceProfileRDP {
+			protocol = model.ApplicationProtocolRDP
+		}
+	}
+	observation := model.ApplicationObservation{
+		Applicability:     model.ObservationApplicabilityApplicable,
+		Protocol:          protocol,
+		ProtocolResult:    model.ApplicationProtocolResultNotAttempted,
+		Result:            model.HTTPResultNotAttempted,
+		FailureReason:     model.FailureReasonNone,
+		FaultDomain:       protocolFaultDomain(protocol),
+		Certainty:         model.ObservationCertaintyUnknown,
+		RequestedResource: target.Resource,
+	}
+	if transport.TestedEndpoint != nil {
+		used := cloneEndpointValue(*transport.TestedEndpoint)
+		observation.EndpointUsed = &used
+	} else if endpoint.TestedEndpoint != nil {
+		used := cloneEndpointValue(*endpoint.TestedEndpoint)
+		observation.EndpointUsed = &used
+	}
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			switch evidence.Kind {
+			case model.EvidenceKindSSHHandshake:
+				var value sshApplicationEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "SSH handshake evidence decode: "+err.Error())
+					continue
+				}
+				observation.Protocol = model.ApplicationProtocolSSH
+				observation.TransportConnected = observation.TransportConnected || value.TransportConnected
+				observation.RequestAttempted = observation.RequestAttempted || value.TransportConnected
+				observation.HandshakeAttempted = observation.HandshakeAttempted || value.TransportConnected
+				observation.ResponseReceived = observation.ResponseReceived || value.BannerReceived
+				observation.HandshakeComplete = observation.HandshakeComplete || value.BannerValid
+				if observation.ServerIdentification == "" {
+					observation.ServerIdentification = value.ServerIdentification
+				}
+				observation.ProtocolResult = sshProtocolResult(value.ResponseClass, value.BannerValid)
+				observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
+				observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
+				addObservationProvenance(&observation.Provenance, probe, evidence)
+				observation.FailureReason = probe.Interpretation.FailureReason
+				if probe.Interpretation.FaultDomain != "" {
+					observation.FaultDomain = probe.Interpretation.FaultDomain
+				}
+				mergeObservationTiming(&observation.Timing, probe.Timing)
+			case model.EvidenceKindRDPNegotiation:
+				var value rdpApplicationEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "RDP negotiation evidence decode: "+err.Error())
+					continue
+				}
+				observation.Protocol = model.ApplicationProtocolRDP
+				observation.TransportConnected = observation.TransportConnected || value.TransportConnected
+				observation.RequestAttempted = observation.RequestAttempted || value.TransportConnected
+				observation.HandshakeAttempted = observation.HandshakeAttempted || value.NegotiationAttempted
+				observation.ResponseReceived = observation.ResponseReceived || (value.ResponseType != "timeout" && value.ResponseType != "transport_failure")
+				observation.HandshakeComplete = observation.HandshakeComplete || value.NegotiationComplete
+				observation.RequestedSecurityProtocols = appendUnique(observation.RequestedSecurityProtocols, value.RequestedProtocols...)
+				if observation.NegotiatedSecurityProtocol == "" {
+					observation.NegotiatedSecurityProtocol = value.NegotiatedProtocol
+				}
+				observation.ProtocolResult = rdpProtocolResult(value.ResponseType, value.NegotiationComplete)
+				observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
+				observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
+				addObservationProvenance(&observation.Provenance, probe, evidence)
+				observation.FailureReason = probe.Interpretation.FailureReason
+				if probe.Interpretation.FaultDomain != "" {
+					observation.FaultDomain = probe.Interpretation.FaultDomain
+				}
+				mergeObservationTiming(&observation.Timing, probe.Timing)
+			}
+		}
+	}
+	if observation.RequestAttempted {
+		observation.Applicability = model.ObservationApplicabilityApplicable
+		observation.Certainty = model.ObservationCertaintyObserved
+	} else if protocol != model.ApplicationProtocolSSH && protocol != model.ApplicationProtocolRDP {
+		observation.Applicability = model.ObservationApplicabilityInapplicable
+		observation.Certainty = model.ObservationCertaintyDerived
+	}
+	return model.NormalizeApplicationObservation(observation)
+}
+
+func protocolFaultDomain(protocol model.ApplicationProtocol) model.FaultDomain {
+	if protocol == model.ApplicationProtocolSSH {
+		return model.FaultDomainSSH
+	}
+	return model.FaultDomainRDP
+}
+
+func sshProtocolResult(class string, complete bool) model.ApplicationProtocolResult {
+	if complete {
+		return model.ApplicationProtocolResultSuccess
+	}
+	switch class {
+	case "timeout":
+		return model.ApplicationProtocolResultTimeout
+	case "malformed", "unsupported_version":
+		return model.ApplicationProtocolResultMalformed
+	case "non_ssh":
+		return model.ApplicationProtocolResultFailure
+	default:
+		return model.ApplicationProtocolResultFailure
+	}
+}
+
+func rdpProtocolResult(responseType string, complete bool) model.ApplicationProtocolResult {
+	if complete {
+		return model.ApplicationProtocolResultSuccess
+	}
+	switch responseType {
+	case "timeout":
+		return model.ApplicationProtocolResultTimeout
+	case "rejected":
+		return model.ApplicationProtocolResultRejected
+	case "malformed":
+		return model.ApplicationProtocolResultMalformed
+	default:
+		return model.ApplicationProtocolResultFailure
+	}
+}
+
+func smbApplicability(target model.Target, probes []model.ProbeResult) model.ObservationApplicability {
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind == model.EvidenceKindSMBNegotiation {
+				return model.ObservationApplicabilityApplicable
+			}
+		}
+	}
+	return model.ObservationApplicabilityInapplicable
 }
 
 type tcpTransportEvidence struct {
