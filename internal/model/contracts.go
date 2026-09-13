@@ -75,13 +75,19 @@ const (
 	FailureReasonDNSResolverFailure           FailureReason = "dns_resolver_failure"
 	FailureReasonFirewallBlocked              FailureReason = "firewall_blocked"
 	FailureReasonProxyConfigurationFailure    FailureReason = "proxy_configuration_failure"
+	FailureReasonProxyConfigurationDivergence FailureReason = "proxy_configuration_divergence"
 	FailureReasonProxyUnavailable             FailureReason = "proxy_unavailable"
+	FailureReasonProxyConnectDenied           FailureReason = "proxy_connect_denied"
 	FailureReasonProxyAuthenticationRequired  FailureReason = "proxy_authentication_required"
+	FailureReasonDirectEgressRestricted       FailureReason = "direct_egress_restricted"
+	FailureReasonEffectiveRouteDifference     FailureReason = "effective_route_difference"
 	FailureReasonTCPTimeout                   FailureReason = "tcp_timeout"
 	FailureReasonTCPConnectionRefused         FailureReason = "tcp_connection_refused"
 	FailureReasonTCPConnectionReset           FailureReason = "tcp_connection_reset"
 	FailureReasonTLSHandshakeFailure          FailureReason = "tls_handshake_failure"
 	FailureReasonCertificateValidationFailure FailureReason = "certificate_validation_failure"
+	FailureReasonTLSTrustStoreMismatch        FailureReason = "tls_trust_store_mismatch"
+	FailureReasonTLSInterceptionSuspected     FailureReason = "tls_interception_suspected"
 	FailureReasonHTTPFailure                  FailureReason = "http_failure"
 	FailureReasonHTTPStatusCode               FailureReason = "http_status_code"
 	FailureReasonICMPFailure                  FailureReason = "icmp_failure"
@@ -109,6 +115,7 @@ const (
 	FaultDomainHTTP        FaultDomain = "http"
 	FaultDomainDestination FaultDomain = "destination"
 	FaultDomainICMP        FaultDomain = "icmp"
+	FaultDomainPolicy      FaultDomain = "policy"
 )
 
 // Layer identifies the diagnostic protocol or system layer at which a probe
@@ -153,6 +160,11 @@ const (
 	EvidenceKindWinHTTPProxy        EvidenceKind = "winhttp_proxy"
 	EvidenceKindWinINETProxy        EvidenceKind = "wininet_proxy"
 	EvidenceKindPAC                 EvidenceKind = "pac"
+	EvidenceKindProxyConnectivity   EvidenceKind = "proxy_connectivity"
+	EvidenceKindTLSTrust            EvidenceKind = "tls_trust"
+	EvidenceKindFirewallProfile     EvidenceKind = "firewall_profile"
+	EvidenceKindAdapterRouting      EvidenceKind = "adapter_routing"
+	EvidenceKindRouteComparison     EvidenceKind = "route_comparison"
 	EvidenceKindICMP                EvidenceKind = "icmp"
 )
 

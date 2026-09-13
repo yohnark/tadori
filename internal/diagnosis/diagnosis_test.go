@@ -191,6 +191,80 @@ func TestDiagnoseProxyEvidenceDoesNotInventAProxyFault(t *testing.T) {
 	}
 }
 
+func TestDiagnoseRetainsEnterpriseCrossPathReasonsWithSupportingConfiguration(t *testing.T) {
+	proxyConfiguration := passed("proxy-config", model.LayerProxy)
+	proxyConfiguration.Evidence = []model.Evidence{{Kind: model.EvidenceKindWinINETProxy, ID: "wininet-config"}}
+	for _, test := range []struct {
+		name   string
+		reason model.FailureReason
+		layer  model.Layer
+		domain model.FaultDomain
+	}{
+		{name: "connect denied", reason: model.FailureReasonProxyConnectDenied, layer: model.LayerProxy, domain: model.FaultDomainProxy},
+		{name: "authentication", reason: model.FailureReasonProxyAuthenticationRequired, layer: model.LayerProxy, domain: model.FaultDomainProxy},
+		{name: "direct egress policy", reason: model.FailureReasonDirectEgressRestricted, layer: model.LayerNetwork, domain: model.FaultDomainPolicy},
+		{name: "TLS interception", reason: model.FailureReasonTLSInterceptionSuspected, layer: model.LayerTLS, domain: model.FaultDomainTLS},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := Diagnose([]model.ProbeResult{
+				failed("windows-enterprise", test.reason, test.layer, test.domain, "enterprise-evidence"),
+				proxyConfiguration,
+			})
+			if len(got) != 1 || got[0].FailureReason != test.reason || got[0].Layer != test.layer || got[0].FaultDomain != test.domain {
+				t.Fatalf("diagnosis = %#v", got)
+			}
+		})
+	}
+}
+
+func TestDiagnoseDoesNotHideComparativeEnterpriseFindingsBehindSinglePathSuccess(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		reason  model.FailureReason
+		layer   model.Layer
+		domain  model.FaultDomain
+		success model.Layer
+	}{
+		{name: "direct egress policy", reason: model.FailureReasonDirectEgressRestricted, layer: model.LayerNetwork, domain: model.FaultDomainPolicy, success: model.LayerHTTP},
+		{name: "route difference", reason: model.FailureReasonEffectiveRouteDifference, layer: model.LayerRoute, domain: model.FaultDomainRouting, success: model.LayerTCP},
+		{name: "TLS trust mismatch", reason: model.FailureReasonTLSTrustStoreMismatch, layer: model.LayerTLS, domain: model.FaultDomainTLS, success: model.LayerTLS},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := Diagnose([]model.ProbeResult{
+				failed("windows-enterprise", test.reason, test.layer, test.domain, "enterprise-evidence"),
+				passed("single-path-success", test.success),
+			})
+			if len(got) != 1 || got[0].FailureReason != test.reason {
+				t.Fatalf("diagnosis = %#v", got)
+			}
+		})
+	}
+}
+
+func TestDiagnosePrefersSpecificEnterpriseProxyAndPolicyFindings(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		reason model.FailureReason
+		layer  model.Layer
+		domain model.FaultDomain
+	}{
+		{name: "proxy authentication", reason: model.FailureReasonProxyAuthenticationRequired, layer: model.LayerProxy, domain: model.FaultDomainProxy},
+		{name: "connect denied", reason: model.FailureReasonProxyConnectDenied, layer: model.LayerProxy, domain: model.FaultDomainProxy},
+		{name: "direct egress policy", reason: model.FailureReasonDirectEgressRestricted, layer: model.LayerNetwork, domain: model.FaultDomainPolicy},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := Diagnose([]model.ProbeResult{
+				failed("windows-enterprise", test.reason, test.layer, test.domain, "enterprise-evidence"),
+				failed("proxy", model.FailureReasonProxyUnavailable, model.LayerProxy, model.FaultDomainProxy, "proxy-evidence"),
+				failed("tcp", model.FailureReasonNetworkUnreachable, model.LayerNetwork, model.FaultDomainNetwork, "tcp-evidence"),
+			})
+			if len(got) != 1 || got[0].FailureReason != test.reason {
+				t.Fatalf("diagnosis = %#v", got)
+			}
+		})
+	}
+}
+
 func TestDiagnoseIgnoresICMPOnlyFailure(t *testing.T) {
 	got := Diagnose([]model.ProbeResult{
 		failed("icmp", model.FailureReasonICMPFailure, model.LayerICMP, model.FaultDomainICMP, "icmp-1"),

@@ -689,6 +689,19 @@ func (s SystemResolverConfig) ResolverAddresses(ctx context.Context) ([]string, 
 		return nil, err
 	}
 	if runtime.GOOS == "windows" {
+		// A non-empty path is an explicit fixture/test override. It must not be
+		// silently ignored merely because the production Windows source is
+		// ipconfig output.
+		if s.Path != "" {
+			data, err := os.ReadFile(s.Path)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return nil, nil
+				}
+				return nil, err
+			}
+			return ParseResolverAddresses(data), nil
+		}
 		return windowsResolverAddresses(ctx)
 	}
 	path := s.Path
