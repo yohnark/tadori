@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	stdhttp "net/http"
@@ -210,8 +211,16 @@ func TestProbeDialsSelectedAddressWhilePreservingRequestedHost(t *testing.T) {
 	}
 	port := serverURL.Port()
 	target := parsedTarget(t, "http://fileserver.corp.example:"+port+"/")
-	target.SelectedEndpoint = &model.Endpoint{Address: "127.0.0.1", Port: uint16(mustPort(t, port))}
-	result := New(Config{Client: &stdhttp.Client{Transport: &stdhttp.Transport{Proxy: nil}}}).Run(context.Background(), probe.ExecutionContext{Target: target})
+	selected := &model.Endpoint{
+		Address: "127.0.0.1", Port: uint16(mustPort(t, port)),
+		SelectionReason: model.EndpointSelectionTransport,
+		Provenance:      "transport conn.RemoteAddr observation",
+	}
+	target.SelectedEndpoint = selected
+	target.TestedEndpoint = selected
+	transport := stdhttp.DefaultTransport.(*stdhttp.Transport).Clone()
+	transport.Proxy = func(*stdhttp.Request) (*url.URL, error) { return nil, nil }
+	result := New(Config{Client: &stdhttp.Client{Transport: transport}}).Run(context.Background(), probe.ExecutionContext{Target: target})
 	if result.Status != model.ProbeStatusPassed {
 		t.Fatalf("result = %#v, want selected endpoint request to pass", result)
 	}
@@ -221,6 +230,84 @@ func TestProbeDialsSelectedAddressWhilePreservingRequestedHost(t *testing.T) {
 	metadata := decodeEvidence[responseMetadata](t, result)
 	if !strings.Contains(metadata.URL, "fileserver.corp.example") {
 		t.Fatalf("response URL = %q, want requested hostname", metadata.URL)
+	}
+}
+
+func TestProbeKeepsSelectedEnterpriseProxyPathUnchanged(t *testing.T) {
+	var proxyRequests int
+	var directRequests int
+
+	destination := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		directRequests++
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	defer destination.Close()
+	proxy := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		proxyRequests++
+		if request.URL.Host == "" {
+			t.Errorf("proxy request URL = %q, want absolute target URL", request.URL)
+		}
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	defer proxy.Close()
+
+	destinationURL, err := url.Parse(destination.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := parsedTarget(t, "http://service.corp.example:"+destinationURL.Port()+"/")
+	target.SelectedEndpoint = &model.Endpoint{Address: "127.0.0.1", Port: uint16(mustPort(t, destinationURL.Port()))}
+	transport := stdhttp.DefaultTransport.(*stdhttp.Transport).Clone()
+	transport.Proxy = func(*stdhttp.Request) (*url.URL, error) { return proxyURL, nil }
+
+	result := New(Config{Client: &stdhttp.Client{Transport: transport}}).Run(context.Background(), probe.ExecutionContext{Target: target})
+	if result.Status != model.ProbeStatusPassed {
+		t.Fatalf("result = %#v, want proxy response to pass", result)
+	}
+	if proxyRequests != 1 || directRequests != 0 {
+		t.Fatalf("proxy/direct requests = %d/%d, want 1/0", proxyRequests, directRequests)
+	}
+}
+
+func TestSelectedEndpointTransportCorrelatesIPv6CustomPortWithTransportSelection(t *testing.T) {
+	target := parsedTarget(t, "http://service.example.test:8443/")
+	target.SelectedEndpoint = &model.Endpoint{
+		Address: "2001:db8::20", Port: 8443,
+		SelectionReason: model.EndpointSelectionTransport,
+		Provenance:      "transport conn.RemoteAddr observation",
+	}
+	var dialedAddress string
+	transport := &stdhttp.Transport{
+		Proxy: func(*stdhttp.Request) (*url.URL, error) { return nil, nil },
+		DialContext: func(_ context.Context, _, address string) (net.Conn, error) {
+			dialedAddress = address
+			return nil, errors.New("test dial stop")
+		},
+	}
+	requestURL, err := target.HTTPURL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := stdhttp.NewRequest(stdhttp.MethodGet, requestURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = transportForSelectedEndpoint(transport, target).RoundTrip(request)
+	if dialedAddress != "[2001:db8::20]:8443" {
+		t.Fatalf("dialed address = %q, want selected IPv6 endpoint and custom port", dialedAddress)
+	}
+}
+
+func TestTransportForSelectedEndpointLeavesCustomTransportUnchanged(t *testing.T) {
+	custom := &customRoundTripper{}
+	target := parsedTarget(t, "http://service.example.test/")
+	target.SelectedEndpoint = &model.Endpoint{Address: "192.0.2.20", Port: target.Port}
+	if got := transportForSelectedEndpoint(custom, target); got != custom {
+		t.Fatalf("transport = %T, want unchanged custom transport", got)
 	}
 }
 
@@ -263,6 +350,8 @@ func TestProbeImplementsSharedProbeContract(t *testing.T) {
 
 type roundTripperFunc func(*stdhttp.Request) (*stdhttp.Response, error)
 
+type customRoundTripper struct{}
+
 func parsedTarget(t *testing.T, raw string) model.Target {
 	t.Helper()
 	target, err := model.ParseTarget(model.TargetIntent{Input: raw})
@@ -283,6 +372,10 @@ func mustPort(t *testing.T, value string) int {
 
 func (function roundTripperFunc) RoundTrip(request *stdhttp.Request) (*stdhttp.Response, error) {
 	return function(request)
+}
+
+func (*customRoundTripper) RoundTrip(*stdhttp.Request) (*stdhttp.Response, error) {
+	return nil, errors.New("custom transport")
 }
 
 func decodeEvidence[T any](t *testing.T, result model.ProbeResult) T {
