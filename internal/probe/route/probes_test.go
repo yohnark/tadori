@@ -53,7 +53,9 @@ func TestParseWindowsRouteOutputIsStructuredAndOffline(t *testing.T) {
 	ipv4 := `IPv4 Route Table
 Network Destination        Netmask          Gateway       Interface  Metric
           0.0.0.0          0.0.0.0      192.0.2.1      192.0.2.10     25
-        192.0.2.0    255.255.255.0         On-link      192.0.2.10    281`
+	        192.0.2.0    255.255.255.0         On-link      192.0.2.10    281
+Persistent Routes:
+          0.0.0.0          0.0.0.0      192.0.2.1             1`
 	routes := parseWindowsRouteOutput(ipv4, 4)
 	if len(routes) != 2 || routes[0].Destination.String() != "0.0.0.0/0" || routes[0].Metric != 25 {
 		t.Fatalf("IPv4 parsed routes = %#v", routes)

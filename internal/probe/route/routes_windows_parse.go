@@ -29,7 +29,11 @@ func parseWindowsRouteOutput(output string, family int) []Route {
 }
 
 func parseWindowsIPv4Row(fields []string) (Route, bool) {
-	if len(fields) < 4 {
+	// Active rows have Network Destination, Netmask, Gateway, Interface,
+	// and Metric. Persistent rows omit the active interface column; rejecting
+	// those rows prevents an incomplete duplicate from influencing route
+	// selection with an accidental zero metric.
+	if len(fields) != 5 {
 		return Route{}, false
 	}
 	destination, err := netip.ParseAddr(fields[0])
@@ -44,15 +48,19 @@ func parseWindowsIPv4Row(fields []string) (Route, bool) {
 	if !ok {
 		return Route{}, false
 	}
-	metric := 0
-	if len(fields) > 4 {
-		metric, _ = strconv.Atoi(fields[4])
+	interfaceAddress, err := netip.ParseAddr(fields[3])
+	if err != nil || !interfaceAddress.Is4() {
+		return Route{}, false
+	}
+	metric, err := strconv.Atoi(fields[4])
+	if err != nil || metric < 0 {
+		return Route{}, false
 	}
 	var gateway netip.Addr
 	if parsed, parseErr := netip.ParseAddr(fields[2]); parseErr == nil && parsed.Is4() {
 		gateway = parsed
 	}
-	return Route{Destination: netip.PrefixFrom(destination, prefix).Masked(), Gateway: gateway, Interface: fields[3], Metric: metric}, true
+	return Route{Destination: netip.PrefixFrom(destination, prefix).Masked(), Gateway: gateway, Interface: interfaceAddress.String(), Metric: metric}, true
 }
 
 func parseWindowsIPv6Row(fields []string) (Route, bool) {
