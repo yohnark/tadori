@@ -127,6 +127,101 @@ func TestRunPreservesPartialResultsOnUnreachableTarget(t *testing.T) {
 	}
 }
 
+func TestReportStatusAggregatesCanonicalProbeOutcomes(t *testing.T) {
+	unsupportedGateway := model.ProbeResult{
+		Name:   "gateway_reachability",
+		Status: model.ProbeStatusError,
+		Interpretation: model.ProbeInterpretation{
+			FailureReason: model.FailureReasonUnsupported,
+			Layer:         model.LayerGateway,
+			FaultDomain:   model.FaultDomainGateway,
+		},
+	}
+	unsupportedProxy := model.ProbeResult{
+		Name:   "proxy_discovery",
+		Status: model.ProbeStatusSkipped,
+		Interpretation: model.ProbeInterpretation{
+			FailureReason: model.FailureReasonUnsupported,
+			Layer:         model.LayerProxy,
+			FaultDomain:   model.FaultDomainProxy,
+		},
+	}
+
+	t.Run("HTTP success ignores unsupported gateway and proxy support", func(t *testing.T) {
+		got := reportStatus([]model.ProbeResult{
+			unsupportedGateway,
+			unsupportedProxy,
+			{
+				Name:   "http",
+				Status: model.ProbeStatusPassed,
+				Interpretation: model.ProbeInterpretation{
+					FailureReason: model.FailureReasonNone,
+					Layer:         model.LayerHTTP,
+					FaultDomain:   model.FaultDomainHTTP,
+				},
+			},
+		})
+		if got != model.ReportStatusComplete {
+			t.Fatalf("report status = %s, want complete", got)
+		}
+	})
+
+	t.Run("missing HTTP observation remains incomplete", func(t *testing.T) {
+		got := reportStatus([]model.ProbeResult{
+			unsupportedGateway,
+			unsupportedProxy,
+			{
+				Name:   "http",
+				Status: model.ProbeStatusError,
+				Interpretation: model.ProbeInterpretation{
+					FailureReason: model.FailureReasonHTTPFailure,
+					Layer:         model.LayerHTTP,
+					FaultDomain:   model.FaultDomainHTTP,
+				},
+			},
+		})
+		if got != model.ReportStatusIncomplete {
+			t.Fatalf("report status = %s, want incomplete", got)
+		}
+	})
+
+	t.Run("received HTTP failure is complete evidence", func(t *testing.T) {
+		got := reportStatus([]model.ProbeResult{
+			unsupportedGateway,
+			unsupportedProxy,
+			{
+				Name:   "http",
+				Status: model.ProbeStatusFailed,
+				Interpretation: model.ProbeInterpretation{
+					FailureReason: model.FailureReasonHTTPStatusCode,
+					Layer:         model.LayerHTTP,
+					FaultDomain:   model.FaultDomainHTTP,
+				},
+			},
+		})
+		if got != model.ReportStatusComplete {
+			t.Fatalf("report status = %s, want complete", got)
+		}
+	})
+
+	t.Run("unsupported required evidence is still incomplete", func(t *testing.T) {
+		got := reportStatus([]model.ProbeResult{
+			{
+				Name:   "dns",
+				Status: model.ProbeStatusError,
+				Interpretation: model.ProbeInterpretation{
+					FailureReason: model.FailureReasonUnsupported,
+					Layer:         model.LayerDNS,
+					FaultDomain:   model.FaultDomainDNS,
+				},
+			},
+		})
+		if got != model.ReportStatusIncomplete {
+			t.Fatalf("report status = %s, want incomplete", got)
+		}
+	})
+}
+
 func findProbe(t *testing.T, probes []model.ProbeResult, name string) model.ProbeResult {
 	t.Helper()
 	for _, probeResult := range probes {
