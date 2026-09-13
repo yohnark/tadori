@@ -51,11 +51,14 @@ var ErrUnsupported = errors.New("native path observation is unsupported")
 // Request describes one bounded observation at one TTL. Attempt is zero
 // based and exists to let native and fixture observers correlate probes.
 type Request struct {
-	Target   model.Target
-	Protocol model.PathProtocol
-	TTL      uint8
-	Attempt  int
-	Timeout  time.Duration
+	Target        model.Target
+	Protocol      model.PathProtocol
+	TTL           uint8
+	Attempt       int
+	Timeout       time.Duration
+	SessionID     string
+	ProbeID       string
+	CorrelationID string
 }
 
 // Observation is the result of one TTL attempt. An empty observation is a
@@ -162,10 +165,13 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 
 	started := p.clockNow().UTC()
 	result := model.ProbeResult{
-		Name:   PathProbeName,
-		Target: model.NormalizeTarget(execution.Target),
-		Status: model.ProbeStatusError,
-		Timing: model.Timing{StartedAt: &started},
+		Name:          PathProbeName,
+		Target:        model.NormalizeTarget(execution.Target),
+		SessionID:     execution.SessionID,
+		ProbeID:       execution.ProbeID,
+		CorrelationID: execution.CorrelationID,
+		Status:        model.ProbeStatusError,
+		Timing:        model.Timing{StartedAt: &started},
 		Interpretation: model.ProbeInterpretation{
 			FailureReason: FailureReasonPathObservation,
 			Layer:         model.LayerNetwork,
@@ -195,7 +201,7 @@ func (p *Probe) Run(ctx context.Context, execution probe.ExecutionContext) model
 		index, protocol := index, protocol
 		go func() {
 			defer wg.Done()
-			observation, err := p.observeProtocol(runCtx, observer, result.Target, protocol)
+			observation, err := p.observeProtocol(runCtx, observer, execution, result.Target, protocol)
 			protocolResults <- protocolResult{index: index, observation: observation, err: err}
 		}()
 	}
@@ -293,7 +299,7 @@ func failedPathInterpretation(observations []model.PathObservation) model.ProbeI
 	}
 }
 
-func (p *Probe) observeProtocol(ctx context.Context, observer Observer, target model.Target, protocol model.PathProtocol) (model.PathObservation, error) {
+func (p *Probe) observeProtocol(ctx context.Context, observer Observer, execution probe.ExecutionContext, target model.Target, protocol model.PathProtocol) (model.PathObservation, error) {
 	destination, _, _ := normalizeDestinationAddress(target.Host)
 	observation := model.PathObservation{
 		Status:          model.PathObservationStatusObserved,
@@ -327,6 +333,7 @@ func (p *Probe) observeProtocol(ctx context.Context, observer Observer, target m
 			attemptCtx, cancel := attemptContext(ctx, p.remainingAttempts(ttl, attempt))
 			response, err := observeAttemptBounded(attemptCtx, observer, Request{
 				Target: target, Protocol: protocol, TTL: ttl, Attempt: attempt, Timeout: contextTimeout(attemptCtx),
+				SessionID: execution.SessionID, ProbeID: execution.ProbeID, CorrelationID: execution.CorrelationID,
 			})
 			cancel()
 			if err != nil {

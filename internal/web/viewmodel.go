@@ -309,6 +309,16 @@ func destinationView(diagnosticReport model.DiagnosticReport) DestinationView {
 			}
 		}
 		for _, evidence := range probe.Evidence {
+			if evidence.Kind == model.EvidenceKindPacketFlow {
+				if flow, ok := packetFlowForTarget(evidence, diagnosticReport.Target); ok {
+					switch flow.Outcome {
+					case model.PacketFlowOutcomeTCPHandshakeConfirmed, model.PacketFlowOutcomeTCPSYNACK:
+						confirmed = append(confirmed, probe.Name)
+					case model.PacketFlowOutcomeTCPRST:
+						reachedButNotConnected = append(reachedButNotConnected, probe.Name)
+					}
+				}
+			}
 			if evidence.Kind != model.EvidenceKindPathObservation {
 				continue
 			}
@@ -377,6 +387,11 @@ func destinationEvidenceIDs(diagnosticReport model.DiagnosticReport, state strin
 		}
 		if (state == "confirmed" || state == "failed") && probeMatchesTarget(probe, diagnosticReport.Target) {
 			for _, evidence := range probe.Evidence {
+				if state == "confirmed" {
+					if flow, ok := packetFlowForTarget(evidence, diagnosticReport.Target); ok && (flow.Outcome == model.PacketFlowOutcomeTCPHandshakeConfirmed || flow.Outcome == model.PacketFlowOutcomeTCPSYNACK) {
+						ids = append(ids, evidence.ID)
+					}
+				}
 				if evidence.Kind != model.EvidenceKindPathObservation {
 					continue
 				}
@@ -394,6 +409,9 @@ func destinationEvidenceIDs(diagnosticReport model.DiagnosticReport, state strin
 		}
 		if state == "reached_not_connected" && probeMatchesTarget(probe, diagnosticReport.Target) {
 			for _, evidence := range probe.Evidence {
+				if flow, ok := packetFlowForTarget(evidence, diagnosticReport.Target); ok && flow.Outcome == model.PacketFlowOutcomeTCPRST {
+					ids = append(ids, evidence.ID)
+				}
 				if evidence.Kind != model.EvidenceKindPathObservation {
 					continue
 				}
@@ -404,6 +422,26 @@ func destinationEvidenceIDs(diagnosticReport model.DiagnosticReport, state strin
 		}
 	}
 	return uniqueStrings(ids)
+}
+
+func packetFlowForTarget(evidence model.Evidence, target model.Target) (model.PacketFlowEvidence, bool) {
+	if evidence.Kind != model.EvidenceKindPacketFlow {
+		return model.PacketFlowEvidence{}, false
+	}
+	flow, err := model.DecodePacketFlowEvidence(evidence)
+	if err != nil || flow.CaptureStatus != model.PacketCaptureStatusAvailable {
+		return model.PacketFlowEvidence{}, false
+	}
+	if (flow.Outcome == model.PacketFlowOutcomeTCPHandshakeConfirmed || flow.Outcome == model.PacketFlowOutcomeTCPSYNACK || flow.Outcome == model.PacketFlowOutcomeTCPRST) && flow.Certainty != model.EvidenceCertaintyConfirmedEndpointResponse {
+		return model.PacketFlowEvidence{}, false
+	}
+	if target.Port != 0 && flow.Target.Port != 0 && target.Port != flow.Target.Port {
+		return model.PacketFlowEvidence{}, false
+	}
+	if target.Host != "" && flow.Target.Host != "" && !strings.EqualFold(strings.Trim(target.Host, "[]"), strings.Trim(flow.Target.Host, "[]")) {
+		return model.PacketFlowEvidence{}, false
+	}
+	return flow, true
 }
 
 func pathObservationForTarget(observation model.PathObservation, target model.Target) bool {

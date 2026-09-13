@@ -60,6 +60,7 @@ func (report DiagnosticReport) MarshalJSON() ([]byte, error) {
 	type canonicalReport struct {
 		SchemaVersion string              `json:"schema_version"`
 		Target        Target              `json:"target"`
+		SessionID     string              `json:"session_id,omitempty"`
 		Status        ReportStatus        `json:"status"`
 		StartedAt     *time.Time          `json:"started_at,omitempty"`
 		CompletedAt   *time.Time          `json:"completed_at,omitempty"`
@@ -70,6 +71,7 @@ func (report DiagnosticReport) MarshalJSON() ([]byte, error) {
 	return json.Marshal(canonicalReport{
 		SchemaVersion: report.SchemaVersion,
 		Target:        report.Target,
+		SessionID:     report.SessionID,
 		Status:        report.Status,
 		StartedAt:     canonicalTime(report.StartedAt),
 		CompletedAt:   canonicalTime(report.CompletedAt),

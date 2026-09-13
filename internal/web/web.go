@@ -90,6 +90,7 @@ func NewHandler(opts HandlerOptions) *Handler {
 		} else {
 			sessionRun = func(ctx context.Context, target model.Target, progress session.Progress) model.DiagnosticReport {
 				return orchestrate.Run(ctx, target, orchestrate.Options{
+					SessionID:        progress.SessionID,
 					OnProbeStarted:   progress.ProbeStarted,
 					OnProbeCompleted: progress.ProbeCompleted,
 				})

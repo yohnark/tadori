@@ -3,13 +3,18 @@ package orchestrate
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/netip"
+	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yohnark/tadori/internal/diagnosis"
 	"github.com/yohnark/tadori/internal/model"
+	"github.com/yohnark/tadori/internal/packet"
 	"github.com/yohnark/tadori/internal/probe"
 	"github.com/yohnark/tadori/internal/probe/dns"
 	"github.com/yohnark/tadori/internal/probe/enterprise"
@@ -54,7 +59,16 @@ type Options struct {
 	// OnProbeCompleted is called after a probe returns a result (including an
 	// execution error or timeout result).
 	OnProbeCompleted ProbeCompletedFunc
+	// SessionID scopes packet observations to one diagnostic session. When
+	// empty, Run creates an ephemeral process-local run identity.
+	SessionID string
+	// PacketBackend supplies the bounded packet acquisition adapter. Nil uses
+	// the platform default; an unavailable default is reported as evidence and
+	// does not fail TCP/path or unrelated probes.
+	PacketBackend packet.Backend
 }
+
+var runSequence atomic.Uint64
 
 // Run resolves target, invokes every wired probe concurrently under bounded
 // per-probe timeouts, and returns a diagnosed report. A probe that fails or
@@ -78,8 +92,16 @@ func Run(ctx context.Context, target model.Target, opts Options) model.Diagnosti
 	}
 
 	started := now().UTC()
+	sessionID := opts.SessionID
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("run-%d-%d", started.UnixNano(), runSequence.Add(1))
+	}
+	backend := opts.PacketBackend
+	if backend == nil {
+		backend = packet.DefaultBackend()
+	}
 
-	results := runProbes(ctx, target, timeout, probeConcurrency, opts.OnProbeStarted, opts.OnProbeCompleted)
+	results := runProbes(ctx, target, timeout, probeConcurrency, sessionID, backend, opts.OnProbeStarted, opts.OnProbeCompleted)
 
 	sort.Slice(results, func(i, j int) bool { return results[i].Name < results[j].Name })
 
@@ -87,6 +109,7 @@ func Run(ctx context.Context, target model.Target, opts Options) model.Diagnosti
 	report := model.DiagnosticReport{
 		SchemaVersion: model.DiagnosticSchemaVersion,
 		Target:        target,
+		SessionID:     sessionID,
 		Status:        reportStatus(results),
 		StartedAt:     &started,
 		CompletedAt:   &completed,
@@ -102,60 +125,59 @@ func Run(ctx context.Context, target model.Target, opts Options) model.Diagnosti
 // deadline still enforced) rather than the batch waiting on DNS in serial.
 // A probe that panics, errors, or times out still yields a result for its
 // slot, so a single failing probe cannot drop the others.
-func runProbes(ctx context.Context, target model.Target, timeout time.Duration, concurrency int, onStarted ProbeStartedFunc, onCompleted ProbeCompletedFunc) []model.ProbeResult {
+func runProbes(ctx context.Context, target model.Target, timeout time.Duration, concurrency int, sessionID string, backend packet.Backend, onStarted ProbeStartedFunc, onCompleted ProbeCompletedFunc) []model.ProbeResult {
 	if concurrency <= 0 {
 		concurrency = DefaultProbeConcurrency
 	}
-	execution := probe.ExecutionContext{Target: target}
-
 	var resolvedAddr netip.Addr
 	resolvedReady := make(chan struct{})
 
 	type job struct {
-		name string
-		run  func(runCtx context.Context) model.ProbeResult
+		name       string
+		packetType packet.ProbeType
+		run        func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult
 	}
 
 	jobs := []job{
-		{name: "dns", run: func(runCtx context.Context) model.ProbeResult {
+		{name: "dns", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			defer close(resolvedReady)
 			result := dns.New().Run(runCtx, execution)
 			resolvedAddr = resolvedAddress(result)
 			return result
 		}},
-		{name: "interface_state", run: func(runCtx context.Context) model.ProbeResult {
+		{name: "interface_state", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			return interfacecfg.NewInterfaceProbe().Run(runCtx, execution)
 		}},
-		{name: "dns_configuration", run: func(runCtx context.Context) model.ProbeResult {
+		{name: "dns_configuration", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			return interfacecfg.NewDNSProbe().Run(runCtx, execution)
 		}},
-		{name: route.DefaultRouteProbeName, run: func(runCtx context.Context) model.ProbeResult {
+		{name: route.DefaultRouteProbeName, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			return route.NewDefaultRouteProbe().Run(runCtx, execution)
 		}},
-		{name: route.TargetRouteProbeName, run: func(runCtx context.Context) model.ProbeResult {
+		{name: route.TargetRouteProbeName, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			p := route.NewTargetRouteProbe()
 			if targetIP := waitForAddress(runCtx, resolvedReady, &resolvedAddr); targetIP.IsValid() {
 				return p.RunForAddress(runCtx, execution, targetIP)
 			}
 			return p.Run(runCtx, execution)
 		}},
-		{name: route.GatewayProbeName, run: func(runCtx context.Context) model.ProbeResult {
+		{name: route.GatewayProbeName, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			p := route.NewGatewayProbe()
 			if targetIP := waitForAddress(runCtx, resolvedReady, &resolvedAddr); targetIP.IsValid() {
 				return p.RunForAddress(runCtx, execution, targetIP)
 			}
 			return p.Run(runCtx, execution)
 		}},
-		{name: proxy.Name, run: func(runCtx context.Context) model.ProbeResult {
+		{name: proxy.Name, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			return proxy.NewProbe().Run(runCtx, execution)
 		}},
-		{name: enterprise.Name, run: func(runCtx context.Context) model.ProbeResult {
+		{name: enterprise.Name, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			return enterprise.New().Run(runCtx, execution)
 		}},
-		{name: "tcp", run: func(runCtx context.Context) model.ProbeResult {
+		{name: "tcp", packetType: packet.ProbeTypeTCP, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			return tcp.New(timeout).Run(runCtx, execution)
 		}},
-		{name: pathprobe.PathProbeName, run: func(runCtx context.Context) model.ProbeResult {
+		{name: pathprobe.PathProbeName, packetType: packet.ProbeTypePath, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			return pathprobe.New(pathprobe.Config{Timeout: timeout}).Run(runCtx, execution)
 		}},
 	}
@@ -164,19 +186,19 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 		// lanes in the report so consumers can distinguish them from an
 		// attempted TLS/HTTP failure.
 		jobs = append(jobs,
-			job{name: "tls", run: func(runCtx context.Context) model.ProbeResult {
+			job{name: "tls", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 				return skippedURLProbe(runCtx, target, "tls", model.LayerTLS, model.FaultDomainTLS)
 			}},
-			job{name: "http", run: func(runCtx context.Context) model.ProbeResult {
+			job{name: "http", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 				return skippedURLProbe(runCtx, target, "http", model.LayerHTTP, model.FaultDomainHTTP)
 			}},
 		)
 	} else {
 		jobs = append(jobs,
-			job{name: "tls", run: func(runCtx context.Context) model.ProbeResult {
+			job{name: "tls", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 				return tls.New(tls.Config{}).Run(runCtx, execution)
 			}},
-			job{name: "http", run: func(runCtx context.Context) model.ProbeResult {
+			job{name: "http", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 				return http.New().Run(runCtx, execution)
 			}},
 		)
@@ -210,13 +232,27 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 			defer wg.Done()
 			for item := range jobsCh {
 				notifyProbeStarted(onStarted, item.job.name)
-				result := runBounded(ctx, timeout, item.job.name, item.job.run)
+				identity := model.ProbeIdentity{
+					SessionID:     sessionID,
+					ProbeID:       item.job.name,
+					CorrelationID: sessionID + "/" + item.job.name,
+				}
+				execution := probe.ExecutionContext{Target: target, SessionID: identity.SessionID, ProbeID: identity.ProbeID, CorrelationID: identity.CorrelationID}
+				result := runBounded(ctx, timeout, item.job.name, func(runCtx context.Context) model.ProbeResult {
+					if item.job.packetType == "" {
+						return item.job.run(runCtx, execution)
+					}
+					return runWithPacketEvidence(runCtx, item.job.run, execution, item.job.packetType, backend)
+				})
 				if result.Name == "" {
 					result.Name = item.job.name
 				}
 				if result.Target == (model.Target{}) {
 					result.Target = target
 				}
+				result.SessionID = identity.SessionID
+				result.ProbeID = identity.ProbeID
+				result.CorrelationID = identity.CorrelationID
 				results[item.index] = result
 				notifyProbeCompleted(onCompleted, result)
 			}
@@ -225,6 +261,51 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 	wg.Wait()
 
 	return results
+}
+
+func runWithPacketEvidence(ctx context.Context, run func(context.Context, probe.ExecutionContext) model.ProbeResult, execution probe.ExecutionContext, probeType packet.ProbeType, backend packet.Backend) model.ProbeResult {
+	windowStarted := time.Now().UTC()
+	scope := packet.Scope{
+		Identity:      model.ProbeIdentity{SessionID: execution.SessionID, ProbeID: execution.ProbeID, CorrelationID: execution.CorrelationID},
+		Target:        execution.Target,
+		ProbeType:     probeType,
+		ProcessID:     uint32(os.Getpid()),
+		WindowStarted: windowStarted,
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		scope.Deadline = deadline.UTC()
+	}
+
+	var capture packet.Capture
+	var startErr error
+	if backend == nil {
+		startErr = packet.ErrUnsupported
+	} else {
+		capture, startErr = backend.Start(ctx, scope)
+		if startErr == nil && capture == nil {
+			startErr = fmt.Errorf("%w: backend returned a nil capture", packet.ErrUnsupported)
+		}
+	}
+
+	result := run(ctx, execution)
+	var captureResult packet.CaptureResult
+	var stopErr error
+	if capture != nil {
+		captureResult, stopErr = capture.Stop()
+	}
+	flow := packet.Correlate(packet.CorrelationInput{
+		Scope:        scope,
+		Result:       result,
+		ProbeStarted: true,
+		Capture:      captureResult,
+		StartError:   startErr,
+		StopError:    stopErr,
+		Cancelled:    errors.Is(ctx.Err(), context.Canceled),
+	})
+	if evidence, err := model.PacketFlowEvidenceFor(flow); err == nil {
+		result.Evidence = append(result.Evidence, evidence)
+	}
+	return result
 }
 
 func notifyProbeStarted(callback ProbeStartedFunc, name string) {

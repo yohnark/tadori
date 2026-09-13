@@ -143,6 +143,7 @@ var rules = []rule{
 	{reason: model.FailureReasonTCPTimeout},
 	{reason: model.FailureReasonTCPConnectionRefused},
 	{reason: model.FailureReasonTCPConnectionReset},
+	{reason: model.FailureReasonTCPSYNNotObserved},
 	{reason: model.FailureReasonTLSInterceptionSuspected},
 	{reason: model.FailureReasonTLSTrustStoreMismatch},
 	{reason: model.FailureReasonTLSHandshakeFailure},
@@ -171,10 +172,78 @@ func normalize(probes []model.ProbeResult) []observation {
 				reason = model.FailureReasonUnknown
 			}
 		}
+		result, reason = applyPacketFlowEvidence(result, reason)
 		observations = append(observations, observation{result: result, reason: reason})
 		observations = append(observations, pathDestinationSuccesses(result)...)
 	}
 	return observations
+}
+
+// applyPacketFlowEvidence supplements, but does not replace, a probe's
+// interpretation. Only a complete, identity-compatible flow can strengthen
+// a TCP result. A missing response remains a bounded observation and is not
+// converted into a network-drop claim.
+func applyPacketFlowEvidence(result model.ProbeResult, reason model.FailureReason) (model.ProbeResult, model.FailureReason) {
+	for _, evidence := range result.Evidence {
+		flow, err := model.DecodePacketFlowEvidence(evidence)
+		if err != nil || !packetFlowBelongsToResult(flow, result) || flow.CaptureStatus != model.PacketCaptureStatusAvailable {
+			continue
+		}
+		switch flow.Outcome {
+		case model.PacketFlowOutcomeTCPHandshakeConfirmed, model.PacketFlowOutcomeTCPSYNACK:
+			if flow.Certainty == model.EvidenceCertaintyConfirmedEndpointResponse && (result.Status == model.ProbeStatusFailed || result.Status == model.ProbeStatusError) {
+				return packetFlowSuccessResult(result, evidence), model.FailureReasonNone
+			}
+		case model.PacketFlowOutcomeTCPRST:
+			if flow.Certainty == model.EvidenceCertaintyConfirmedEndpointResponse && (result.Status == model.ProbeStatusFailed || result.Status == model.ProbeStatusError) {
+				switch reason {
+				case model.FailureReasonTCPTimeout, model.FailureReasonProbeExecution, model.FailureReasonUnknown, model.FailureReasonNone:
+					result.Interpretation.FailureReason = model.FailureReasonTCPConnectionReset
+					return result, model.FailureReasonTCPConnectionReset
+				}
+			}
+		case model.PacketFlowOutcomeProbeNotEmitted:
+			if result.Status == model.ProbeStatusFailed || result.Status == model.ProbeStatusError {
+				switch reason {
+				case model.FailureReasonTCPTimeout, model.FailureReasonProbeExecution, model.FailureReasonUnknown, model.FailureReasonNone:
+					result.Interpretation.FailureReason = model.FailureReasonTCPSYNNotObserved
+					result.Interpretation.Layer = model.LayerTCP
+					result.Interpretation.FaultDomain = model.FaultDomainLocal
+					return result, model.FailureReasonTCPSYNNotObserved
+				}
+			}
+		}
+	}
+	return result, reason
+}
+
+func packetFlowBelongsToResult(flow model.PacketFlowEvidence, result model.ProbeResult) bool {
+	if flow.ProbeID != "" && result.ProbeID != "" && flow.ProbeID != result.ProbeID {
+		return false
+	}
+	if flow.SessionID != "" && result.SessionID != "" && flow.SessionID != result.SessionID {
+		return false
+	}
+	if flow.CorrelationID != "" && result.CorrelationID != "" && flow.CorrelationID != result.CorrelationID {
+		return false
+	}
+	if result.Target.Host != "" && flow.Target.Host != "" && !targetsCorrelate(result.Target, flow.Target, model.LayerTCP) {
+		return false
+	}
+	return true
+}
+
+func packetFlowSuccessResult(result model.ProbeResult, evidence model.Evidence) model.ProbeResult {
+	synthetic := result
+	synthetic.Name = result.Name + "/packet-flow"
+	synthetic.Status = model.ProbeStatusPassed
+	synthetic.Evidence = []model.Evidence{evidence}
+	synthetic.Interpretation = model.ProbeInterpretation{
+		FailureReason: model.FailureReasonNone,
+		Layer:         model.LayerTCP,
+		FaultDomain:   model.FaultDomainTransport,
+	}
+	return synthetic
 }
 
 func pathDestinationSuccesses(result model.ProbeResult) []observation {
@@ -434,6 +503,8 @@ func semantics(reason model.FailureReason) (model.Layer, model.FaultDomain) {
 		return model.LayerNetwork, model.FaultDomainNetwork
 	case model.FailureReasonFirewallBlocked:
 		return model.LayerNetwork, model.FaultDomainFirewall
+	case model.FailureReasonTCPSYNNotObserved:
+		return model.LayerTCP, model.FaultDomainLocal
 	case model.FailureReasonTCPTimeout,
 		model.FailureReasonTCPConnectionRefused,
 		model.FailureReasonTCPConnectionReset:
@@ -489,7 +560,7 @@ func contradicted(candidate observation, observations []observation) bool {
 				return true
 			}
 		case model.FailureReasonTCPTimeout, model.FailureReasonTCPConnectionRefused,
-			model.FailureReasonTCPConnectionReset:
+			model.FailureReasonTCPConnectionReset, model.FailureReasonTCPSYNNotObserved:
 			if layer == model.LayerTCP || layer == model.LayerTLS || layer == model.LayerHTTP {
 				return true
 			}

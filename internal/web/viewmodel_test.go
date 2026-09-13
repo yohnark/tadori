@@ -166,6 +166,35 @@ func TestViewModelDoesNotInterpretUnknownEvidenceAsPath(t *testing.T) {
 	}
 }
 
+func TestViewModelUsesPacketEndpointConfirmationWithoutAddingPacketUI(t *testing.T) {
+	target := fixtureTarget(443)
+	flow := model.PacketFlowEvidence{
+		SessionID: "session-1", ProbeID: "tcp", CorrelationID: "session-1/tcp", Target: target,
+		CaptureStatus: model.PacketCaptureStatusAvailable, Outcome: model.PacketFlowOutcomeTCPSYNACK,
+		Certainty: model.EvidenceCertaintyConfirmedEndpointResponse,
+	}
+	packetEvidence, err := model.PacketFlowEvidenceFor(flow)
+	if err != nil {
+		t.Fatalf("packet flow evidence: %v", err)
+	}
+	probe := fixtureProbeWithEvidence("tcp", target, model.ProbeStatusFailed, model.LayerTCP, model.FaultDomainTransport,
+		model.Evidence{ID: "tcp-connection", Kind: model.EvidenceKindTCPConnection, Raw: json.RawMessage(`{"error":"timeout"}`)}, packetEvidence)
+	report := representativeReport(target, model.ReportStatusComplete, probe)
+	view, err := BuildDiagnosticView(report)
+	if err != nil {
+		t.Fatalf("BuildDiagnosticView: %v", err)
+	}
+	if view.Overall.Destination.State != "confirmed" {
+		t.Fatalf("destination state = %q, want confirmed", view.Overall.Destination.State)
+	}
+	if findEvidenceView(view, packetEvidence.ID).Kind != model.EvidenceKindPacketFlow {
+		t.Fatalf("packet flow was not retained in the evidence inspector: %#v", view.Evidence)
+	}
+	if len(view.Paths) != 0 {
+		t.Fatalf("packet evidence created a packet/path UI: %#v", view.Paths)
+	}
+}
+
 func findEvidenceView(view DiagnosticViewModel, id string) EvidenceView {
 	for _, evidence := range view.Evidence {
 		if evidence.ID == id {
