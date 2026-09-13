@@ -1,0 +1,50 @@
+package orchestrate
+
+import "testing"
+
+func TestParseTarget(t *testing.T) {
+	cases := []struct {
+		name       string
+		input      string
+		wantHost   string
+		wantPort   uint16
+		wantScheme string
+		wantErr    bool
+	}{
+		{name: "https default port", input: "https://example.com", wantHost: "example.com", wantPort: 443, wantScheme: "https"},
+		{name: "http default port", input: "http://example.com", wantHost: "example.com", wantPort: 80, wantScheme: "http"},
+		{name: "explicit port", input: "https://example.com:8443/path", wantHost: "example.com", wantPort: 8443, wantScheme: "https"},
+		{name: "empty", input: "", wantErr: true},
+		{name: "whitespace", input: " https://example.com", wantErr: true},
+		{name: "unsupported scheme", input: "ftp://example.com", wantErr: true},
+		{name: "missing host", input: "https:///path", wantErr: true},
+		{name: "invalid port", input: "https://example.com:notaport", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			target, err := ParseTarget(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ParseTarget(%q) = %+v, want error", tc.input, target)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseTarget(%q) unexpected error: %v", tc.input, err)
+			}
+			if target.Host != tc.wantHost {
+				t.Errorf("Host = %q, want %q", target.Host, tc.wantHost)
+			}
+			if target.Port != tc.wantPort {
+				t.Errorf("Port = %d, want %d", target.Port, tc.wantPort)
+			}
+			if target.Scheme != tc.wantScheme {
+				t.Errorf("Scheme = %q, want %q", target.Scheme, tc.wantScheme)
+			}
+			if target.URL != tc.input {
+				t.Errorf("URL = %q, want %q", target.URL, tc.input)
+			}
+		})
+	}
+}
