@@ -28,6 +28,7 @@ import (
 	"github.com/yohnark/tadori/internal/probe/proxy"
 	"github.com/yohnark/tadori/internal/probe/rdp"
 	"github.com/yohnark/tadori/internal/probe/route"
+	"github.com/yohnark/tadori/internal/probe/smb"
 	"github.com/yohnark/tadori/internal/probe/ssh"
 	"github.com/yohnark/tadori/internal/probe/tcp"
 	"github.com/yohnark/tadori/internal/probe/tls"
@@ -259,6 +260,11 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 			}},
 		)
 	} else {
+		if target.ApplicationProtocol == model.ApplicationProtocolSMB {
+			jobs = append(jobs, job{name: smb.Name, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
+				return smb.New(smb.Config{Timeout: timeout}).Run(runCtx, execution)
+			}})
+		}
 		// Non-HTTP profiles retain lower-layer diagnostics and expose explicit
 		// skipped URL lanes rather than guessing an application probe.
 		jobs = append(jobs,
@@ -523,7 +529,7 @@ func applyCandidates(target *model.Target, candidates []model.EndpointCandidate)
 
 func waitsForTransportEndpoint(name string) bool {
 	switch name {
-	case "path", "tls", "http", "ssh", "rdp", route.DefaultRouteProbeName, route.TargetRouteProbeName, route.GatewayProbeName:
+	case "path", "tls", "http", "ssh", "rdp", smb.Name, route.DefaultRouteProbeName, route.TargetRouteProbeName, route.GatewayProbeName:
 		return true
 	default:
 		return false
@@ -745,14 +751,14 @@ func reportStatus(results []model.ProbeResult) model.ReportStatus {
 		return model.ReportStatusUnknown
 	}
 
-	// A successful HTTP or TCP observation establishes the requested endpoint
+	// A successful HTTP, SMB, or TCP observation establishes the requested endpoint
 	// boundary. TCP is included because host:port targets intentionally have no
 	// HTTP semantics, and a destination TCP success proves reachability even
 	// when path hops are unobservable. Only a canonical successful
 	// interpretation has this early-dominance rule; an actual failure still
 	// participates in the incomplete-evidence check below.
 	for _, result := range results {
-		if (result.Interpretation.Layer == model.LayerHTTP || result.Interpretation.Layer == model.LayerTCP || result.Interpretation.Layer == model.LayerSSH || result.Interpretation.Layer == model.LayerRDP) &&
+		if (result.Interpretation.Layer == model.LayerHTTP || result.Interpretation.Layer == model.LayerSMB || result.Interpretation.Layer == model.LayerTCP || result.Interpretation.Layer == model.LayerSSH || result.Interpretation.Layer == model.LayerRDP) &&
 			result.Status == model.ProbeStatusPassed &&
 			result.Interpretation.FailureReason == model.FailureReasonNone {
 			return model.ReportStatusComplete

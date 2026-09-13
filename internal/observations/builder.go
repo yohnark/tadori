@@ -18,6 +18,7 @@ import (
 	"github.com/yohnark/tadori/internal/probe/interfacecfg"
 	proxyprobe "github.com/yohnark/tadori/internal/probe/proxy"
 	"github.com/yohnark/tadori/internal/probe/route"
+	smbprobe "github.com/yohnark/tadori/internal/probe/smb"
 	tlsprobe "github.com/yohnark/tadori/internal/probe/tls"
 )
 
@@ -540,12 +541,19 @@ func buildApplicationObservation(target model.Target, endpoint model.EndpointObs
 	if target.ApplicationProtocol == model.ApplicationProtocolSSH || target.ApplicationProtocol == model.ApplicationProtocolRDP || hasProtocolEvidence(probes) {
 		return buildProtocolApplicationObservation(target, endpoint, transport, probes)
 	}
+	applicability := httpApplicability(target, probes)
+	faultDomain := model.FaultDomainHTTP
+	if target.ApplicationProtocol == model.ApplicationProtocolSMB || target.Service.ID == model.ServiceProfileSMB {
+		applicability = smbApplicability(target, probes)
+		faultDomain = model.FaultDomainSMB
+	}
 	observation := model.ApplicationObservation{
-		Applicability:     httpApplicability(target, probes),
+		Protocol:          target.ApplicationProtocol,
+		Applicability:     applicability,
 		RequestedResource: target.Resource,
 		Result:            model.HTTPResultNotAttempted,
 		FailureReason:     model.FailureReasonNone,
-		FaultDomain:       model.FaultDomainHTTP,
+		FaultDomain:       faultDomain,
 		Certainty:         model.ObservationCertaintyUnknown,
 	}
 	if transport.TestedEndpoint != nil {
@@ -557,8 +565,64 @@ func buildApplicationObservation(target model.Target, endpoint model.EndpointObs
 	}
 	var statuses, results, urls, endpoints []sourceValue
 	seenHTTP := false
+	seenSMB := false
 	for _, probe := range probes {
 		for _, evidence := range probe.Evidence {
+			if evidence.Kind == model.EvidenceKindSMBNegotiation {
+				seenSMB = true
+				observation.RequestAttempted = true
+				observation.ProbeNames = appendUnique(observation.ProbeNames, probe.Name)
+				observation.EvidenceIDs = appendUnique(observation.EvidenceIDs, evidence.ID)
+				addObservationProvenance(&observation.Provenance, probe, evidence)
+				var value smbprobe.NegotiationEvidence
+				if err := json.Unmarshal(evidence.Raw, &value); err != nil {
+					observation.Limitations = appendUnique(observation.Limitations, "SMB negotiation evidence decode: "+err.Error())
+					continue
+				}
+				if observation.SMB == nil {
+					observation.SMB = &model.SMBApplicationObservation{Result: model.SMBResultUnknown}
+				}
+				if value.ResponseReceived {
+					observation.ResponseReceived = true
+				}
+				if value.Negotiated {
+					observation.SMB.Result = model.SMBResultNegotiated
+					observation.SMB.Negotiated = true
+					observation.SMB.Dialect = value.Dialect
+					observation.SMB.DialectRevision = value.DialectRevision
+					observation.SMB.Capabilities = append([]string(nil), value.Capabilities...)
+					observation.SMB.ServerGUID = value.ServerGUID
+					observation.SMB.SecurityMode = value.SecurityMode
+					observation.SMB.MaxTransactSize = value.MaxTransactSize
+					observation.SMB.MaxReadSize = value.MaxReadSize
+					observation.SMB.MaxWriteSize = value.MaxWriteSize
+					observation.SMB.ResponseBytes = value.ResponseBytes
+				} else {
+					switch value.FailureReason {
+					case model.FailureReasonSMBTimeout:
+						observation.SMB.Result = model.SMBResultTimeout
+					case model.FailureReasonSMBProtocolRejection:
+						observation.SMB.Result = model.SMBResultProtocolRejection
+					case model.FailureReasonSMBMalformedResponse:
+						observation.SMB.Result = model.SMBResultMalformedResponse
+					case model.FailureReasonTCPTimeout, model.FailureReasonTCPConnectionRefused, model.FailureReasonSMBConnectionRefused:
+						observation.SMB.Result = model.SMBResultTCPFailure
+					default:
+						observation.SMB.Result = model.SMBResultUnknown
+					}
+				}
+				if observation.FailureReason == model.FailureReasonNone || observation.FailureReason == model.FailureReasonUnknown {
+					observation.FailureReason = value.FailureReason
+					if observation.FailureReason == model.FailureReasonNone || observation.FailureReason == model.FailureReasonUnknown {
+						observation.FailureReason = probe.Interpretation.FailureReason
+					}
+				}
+				if probe.Interpretation.FaultDomain != "" {
+					observation.FaultDomain = probe.Interpretation.FaultDomain
+				}
+				mergeObservationTiming(&observation.Timing, probe.Timing)
+				continue
+			}
 			if evidence.Kind != model.EvidenceKindHTTPResponse && evidence.Kind != httpprobe.EvidenceKindHTTPError {
 				continue
 			}
@@ -641,7 +705,7 @@ func buildApplicationObservation(target model.Target, endpoint model.EndpointObs
 	if values := distinctSourceValues(endpoints); len(values) > 1 {
 		observation.Conflicts = append(observation.Conflicts, conflict("application.endpoint_used", values, endpoints))
 	}
-	if seenHTTP {
+	if seenHTTP || seenSMB {
 		observation.Applicability = model.ObservationApplicabilityApplicable
 		observation.Certainty = model.ObservationCertaintyObserved
 	} else if observation.Applicability == model.ObservationApplicabilityInapplicable {
@@ -817,6 +881,17 @@ func rdpProtocolResult(responseType string, complete bool) model.ApplicationProt
 	default:
 		return model.ApplicationProtocolResultFailure
 	}
+}
+
+func smbApplicability(target model.Target, probes []model.ProbeResult) model.ObservationApplicability {
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			if evidence.Kind == model.EvidenceKindSMBNegotiation {
+				return model.ObservationApplicabilityApplicable
+			}
+		}
+	}
+	return model.ObservationApplicabilityInapplicable
 }
 
 type tcpTransportEvidence struct {
