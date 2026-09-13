@@ -27,6 +27,9 @@ func TestRenderHTMLUsesCanonicalObservationsAndFindings(t *testing.T) {
 	document := string(first)
 	for _, want := range []string{
 		"Target and service",
+		"Destination Status",
+		"REACHABLE",
+		"HTTP returned 200.",
 		"canonical.example",
 		"HTTPS",
 		"Conclusion and diagnostic boundary",
@@ -55,6 +58,9 @@ func TestRenderHTMLUsesCanonicalObservationsAndFindings(t *testing.T) {
 	if strings.Contains(semanticDocument, "legacy.example") {
 		t.Fatal("HTML derived target meaning from the compatibility Target field")
 	}
+	if statusAt, targetAt := strings.Index(document, "Destination Status"), strings.Index(document, "Target and service"); statusAt < 0 || targetAt < 0 || statusAt >= targetAt {
+		t.Fatalf("destination status was not rendered near the top of the report: status=%d target=%d", statusAt, targetAt)
+	}
 	if !strings.Contains(document, `\u003craw-semantic-value\u003e`) {
 		t.Fatal("canonical JSON evidence was not safely embedded as text")
 	}
@@ -63,6 +69,11 @@ func TestRenderHTMLUsesCanonicalObservationsAndFindings(t *testing.T) {
 	}
 	if !strings.Contains(document, "not a physical topology claim") {
 		t.Fatal("path boundary missing")
+	}
+	for _, forbidden := range []string{"<script", "<link", "<img", "src=\"http"} {
+		if strings.Contains(document, forbidden) {
+			t.Fatalf("self-contained HTML contains external or executable resource %q", forbidden)
+		}
 	}
 }
 

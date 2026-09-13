@@ -15,10 +15,13 @@
   const diagnosisCard = document.querySelector("#diagnosis-card");
   const diagnosisLabel = document.querySelector("#diagnosis-label");
   const diagnosisDetail = document.querySelector("#diagnosis-detail");
-  const destinationCard = document.querySelector("#destination-card");
-  const destinationLabel = document.querySelector("#destination-label");
-  const destinationDetail = document.querySelector("#destination-detail");
-  const destinationReferences = document.querySelector("#destination-references");
+  const destinationStatusStrip = document.querySelector("#destination-status-strip");
+  const destinationStatusLabel = document.querySelector("#destination-status-label");
+  const destinationStatusDetail = document.querySelector("#destination-status-detail");
+  const destinationStatusService = document.querySelector("#destination-status-service");
+  const destinationStatusIdentity = document.querySelector("#destination-status-identity");
+  const destinationStatusEndpoint = document.querySelector("#destination-status-endpoint");
+  const destinationStatusReason = document.querySelector("#destination-status-reason");
   const overallStatus = document.querySelector("#overall-status");
   const reportTarget = document.querySelector("#report-target");
   const endpointObservation = document.querySelector("#endpoint-observation");
@@ -437,16 +440,20 @@
     findings.appendChild(card);
   }
 
-  function renderDestination(destination) {
-    destinationLabel.textContent = text(destination.label);
-    destinationDetail.textContent = text(destination.detail);
-    destinationCard.className = toneClass("overview-card panel", destinationTone(destination.state));
-    destinationReferences.replaceChildren();
-    if (destination.probe_names && destination.probe_names.length) {
-      destinationReferences.appendChild(element("span", "reference-label", `From ${destination.probe_names.join(", ")}`));
-    }
-    if (destination.evidence_ids && destination.evidence_ids.length) {
-      destinationReferences.appendChild(referenceGroup(destination.evidence_ids));
+  function renderDestinationStatus(status) {
+    const destination = status || {};
+    destinationStatusStrip.className = toneClass("destination-status-strip", destinationTone(destination.status));
+    destinationStatusLabel.textContent = text(destination.label || destination.status).toUpperCase();
+    destinationStatusDetail.textContent = text(destination.detail);
+    destinationStatusService.textContent = text(destination.requested_service || "Service not observed");
+    destinationStatusIdentity.textContent = text(destination.requested_identity || "Identity not observed");
+    destinationStatusEndpoint.textContent = endpointText(destination.effective_endpoint);
+    if (destination.failure_reason && destination.failure_reason !== "none") {
+      destinationStatusReason.hidden = false;
+      destinationStatusReason.textContent = `Reason: ${text(destination.failure_reason)}`;
+    } else {
+      destinationStatusReason.hidden = true;
+      destinationStatusReason.textContent = "";
     }
   }
 
@@ -990,11 +997,11 @@
 
   function destinationTone(state) {
     switch (state) {
-      case "confirmed":
+      case "reachable":
         return "positive";
-      case "failed":
+      case "unreachable":
         return "negative";
-      case "reached_not_connected":
+      case "degraded":
         return "warning";
       default:
         return "neutral";
@@ -1246,7 +1253,7 @@
     renderOperationalObservations(observations, view.application);
     renderPolicyObservation(observations.enterprise_policy);
     renderNetworkContext(observations.network_context || view.network_context);
-    renderDestination(overall.destination || {});
+    renderDestinationStatus(overall.destination || {});
     renderNameResolution(observations.name_resolution || view.name_resolution);
 
     probes.replaceChildren();

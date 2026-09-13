@@ -77,7 +77,7 @@ type NetworkContextView struct {
 
 // OverallView keeps report execution status separate from diagnosis and from
 // destination reachability. In particular, a complete report can still have
-// a failed destination or a destination confirmed while intermediate hops
+// an unreachable destination or a reachable destination while intermediate hops
 // are unobservable.
 type OverallView struct {
 	ExecutionStatus model.ReportStatus `json:"execution_status"`
@@ -88,16 +88,9 @@ type OverallView struct {
 	Destination     DestinationView    `json:"destination"`
 }
 
-// DestinationView describes only endpoint evidence. It intentionally does
-// not use the observability of intermediate path hops as a proxy for endpoint
-// reachability.
-type DestinationView struct {
-	State       string   `json:"state"`
-	Label       string   `json:"label"`
-	Detail      string   `json:"detail"`
-	ProbeNames  []string `json:"probe_names,omitempty"`
-	EvidenceIDs []string `json:"evidence_ids,omitempty"`
-}
+// DestinationView is retained as a source-compatible name for the shared
+// backend-owned report projection.
+type DestinationView = report.DestinationStatus
 
 type ProbeView struct {
 	Name          string              `json:"name"`
@@ -341,7 +334,7 @@ func BuildDiagnosticView(diagnosticReport model.DiagnosticReport) (DiagnosticVie
 		view.NetworkContext = buildNetworkContextView(observations.NetworkContext)
 	}
 
-	view.Overall = buildOverallView(diagnosticReport, observations)
+	view.Overall = buildOverallView(diagnosticReport)
 	view.NameResolution = buildNameResolutionView(observations.NameResolution)
 	for _, probe := range diagnosticReport.Probes {
 		probeEvidenceIDs := evidenceIDs(probe.Evidence)
@@ -616,7 +609,7 @@ type pathInput struct {
 	provenance  model.ObservationProvenance
 }
 
-func buildOverallView(diagnosticReport model.DiagnosticReport, observations model.Observations) OverallView {
+func buildOverallView(diagnosticReport model.DiagnosticReport) OverallView {
 	diagnosisState := "clear"
 	diagnosisLabel := "No canonical findings"
 	tone := "positive"
@@ -640,142 +633,8 @@ func buildOverallView(diagnosticReport model.DiagnosticReport, observations mode
 		DiagnosisState:  diagnosisState,
 		DiagnosisLabel:  diagnosisLabel,
 		Tone:            tone,
-		Destination:     destinationView(observations),
+		Destination:     report.DestinationStatusForReport(diagnosticReport),
 	}
-}
-
-func destinationView(observations model.Observations) DestinationView {
-	confirmed := make([]string, 0)
-	reachedButNotConnected := make([]string, 0)
-	failed := make([]string, 0)
-	confirmedObserved := false
-	reachedObserved := false
-	failedObserved := false
-	if observations.Transport.Connected {
-		confirmedObserved = true
-		confirmed = append(confirmed, observations.Transport.ProbeNames...)
-	}
-	if observations.Security.HandshakeComplete {
-		confirmedObserved = true
-		confirmed = append(confirmed, observations.Security.ProbeNames...)
-	}
-	if observations.Application.ResponseReceived {
-		confirmedObserved = true
-		confirmed = append(confirmed, observations.Application.ProbeNames...)
-	}
-	if observations.Transport.Applicability == model.ObservationApplicabilityApplicable && !observations.Transport.Connected && observations.Transport.FailureReason != model.FailureReasonNone {
-		failedObserved = true
-		failed = append(failed, observations.Transport.ProbeNames...)
-	}
-	for index, flow := range observations.PacketFlows {
-		if flow.CaptureStatus != model.PacketCaptureStatusAvailable || (flow.Outcome == model.PacketFlowOutcomeTCPHandshakeConfirmed || flow.Outcome == model.PacketFlowOutcomeTCPSYNACK || flow.Outcome == model.PacketFlowOutcomeTCPRST) && flow.Certainty != model.EvidenceCertaintyConfirmedEndpointResponse {
-			continue
-		}
-		switch flow.Outcome {
-		case model.PacketFlowOutcomeTCPHandshakeConfirmed, model.PacketFlowOutcomeTCPSYNACK:
-			confirmedObserved = true
-			confirmed = append(confirmed, observationProbeNamesAt(observations.PacketFlowProvenance, index)...)
-		case model.PacketFlowOutcomeTCPRST:
-			reachedObserved = true
-			reachedButNotConnected = append(reachedButNotConnected, observationProbeNamesAt(observations.PacketFlowProvenance, index)...)
-		}
-	}
-	for index, path := range observations.Paths {
-		if path.Protocol != model.PathProtocolTCP || !path.PortAware {
-			continue
-		}
-		if path.DestinationTCPConnected {
-			confirmedObserved = true
-			confirmed = append(confirmed, observationProbeNamesAt(observations.PathProvenance, index)...)
-		} else if path.DestinationReached {
-			reachedObserved = true
-			reachedButNotConnected = append(reachedButNotConnected, observationProbeNamesAt(observations.PathProvenance, index)...)
-		} else if path.Status == model.PathObservationStatusObserved {
-			failedObserved = true
-			failed = append(failed, observationProbeNamesAt(observations.PathProvenance, index)...)
-		}
-	}
-	for _, correlation := range observations.PathCorrelations {
-		if correlation.TCPDestinationConnected {
-			confirmedObserved = true
-			confirmed = append(confirmed, pathProbeNames(observations, correlation)...)
-		} else if correlation.TCPDestinationReached {
-			reachedObserved = true
-			reachedButNotConnected = append(reachedButNotConnected, pathProbeNames(observations, correlation)...)
-		}
-	}
-	if confirmedObserved {
-		return DestinationView{
-			State: "confirmed", Label: "Destination confirmed",
-			Detail:     "A canonical transport, security, application, or path observation reached the requested endpoint.",
-			ProbeNames: uniqueStrings(confirmed), EvidenceIDs: destinationEvidenceIDs(observations, "confirmed"),
-		}
-	}
-	if reachedObserved {
-		return DestinationView{
-			State: "reached_not_connected", Label: "Destination reached; port not connected",
-			Detail:     "A canonical observation reached the destination, but the requested port did not establish a connection.",
-			ProbeNames: uniqueStrings(reachedButNotConnected), EvidenceIDs: destinationEvidenceIDs(observations, "reached_not_connected"),
-		}
-	}
-	if failedObserved {
-		return DestinationView{
-			State: "failed", Label: "Destination connectivity failed",
-			Detail:     "The canonical transport observation reported a failure for the requested endpoint.",
-			ProbeNames: uniqueStrings(failed), EvidenceIDs: destinationEvidenceIDs(observations, "failed"),
-		}
-	}
-	if len(observations.Paths) == 0 && len(observations.PacketFlows) == 0 && len(observations.Endpoint.ProbeNames) == 0 && len(observations.Transport.ProbeNames) == 0 && len(observations.Security.ProbeNames) == 0 && len(observations.Application.ProbeNames) == 0 {
-		return DestinationView{State: "unknown", Label: "Destination state unknown", Detail: "No usable endpoint observation is available."}
-	}
-	return DestinationView{State: "unconfirmed", Label: "Destination not confirmed", Detail: "Canonical observations do not establish requested endpoint connectivity."}
-}
-
-func destinationEvidenceIDs(observations model.Observations, state string) []string {
-	ids := make([]string, 0)
-	if state == "confirmed" {
-		ids = append(ids, observations.Endpoint.EvidenceIDs...)
-		if observations.Transport.Connected {
-			ids = append(ids, observations.Transport.EvidenceIDs...)
-		}
-		if observations.Security.HandshakeComplete {
-			ids = append(ids, observations.Security.EvidenceIDs...)
-		}
-		if observations.Application.ResponseReceived {
-			ids = append(ids, observations.Application.EvidenceIDs...)
-		}
-	}
-	if state == "failed" {
-		ids = append(ids, observations.Transport.EvidenceIDs...)
-	}
-	for index, flow := range observations.PacketFlows {
-		if flow.CaptureStatus != model.PacketCaptureStatusAvailable || (flow.Outcome == model.PacketFlowOutcomeTCPHandshakeConfirmed || flow.Outcome == model.PacketFlowOutcomeTCPSYNACK || flow.Outcome == model.PacketFlowOutcomeTCPRST) && flow.Certainty != model.EvidenceCertaintyConfirmedEndpointResponse {
-			continue
-		}
-		if (state == "confirmed" && (flow.Outcome == model.PacketFlowOutcomeTCPHandshakeConfirmed || flow.Outcome == model.PacketFlowOutcomeTCPSYNACK)) || (state == "reached_not_connected" && flow.Outcome == model.PacketFlowOutcomeTCPRST) {
-			ids = append(ids, observationEvidenceIDsAt(observations.PacketFlowProvenance, index)...)
-		}
-	}
-	for index, path := range observations.Paths {
-		match := state == "confirmed" && path.Protocol == model.PathProtocolTCP && path.PortAware && path.DestinationTCPConnected
-		match = match || state == "reached_not_connected" && path.Protocol == model.PathProtocolTCP && path.PortAware && path.DestinationReached && !path.DestinationTCPConnected
-		match = match || state == "failed" && path.Protocol == model.PathProtocolTCP && path.PortAware && path.Status == model.PathObservationStatusObserved && !path.DestinationReached
-		if match {
-			ids = append(ids, observationEvidenceIDsAt(observations.PathProvenance, index)...)
-		}
-	}
-	return uniqueStrings(ids)
-}
-
-func pathProbeNames(observations model.Observations, correlation model.PathCorrelation) []string {
-	result := make([]string, 0)
-	for index, path := range observations.Paths {
-		if path.Destination != correlation.Destination || path.DestinationPort != correlation.DestinationPort {
-			continue
-		}
-		result = append(result, observationProbeNamesAt(observations.PathProvenance, index)...)
-	}
-	return result
 }
 
 func observationProvenanceAt(values []model.ObservationProvenance, index int) model.ObservationProvenance {
@@ -783,10 +642,6 @@ func observationProvenanceAt(values []model.ObservationProvenance, index int) mo
 		return model.ObservationProvenance{}
 	}
 	return values[index]
-}
-
-func observationEvidenceIDsAt(values []model.ObservationProvenance, index int) []string {
-	return append([]string(nil), observationProvenanceAt(values, index).EvidenceIDs...)
 }
 
 func observationProbeNamesAt(values []model.ObservationProvenance, index int) []string {

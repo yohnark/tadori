@@ -2,6 +2,8 @@ package report
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,7 @@ func RenderHTML(report model.DiagnosticReport) ([]byte, error) {
 	out.WriteString("<title>Tadori diagnostic report</title>")
 	out.WriteString("<style>")
 	out.WriteString(reportCSS)
+	out.WriteString(reportDestinationStatusCSS)
 	out.WriteString("</style></head><body><main class=\"report\">")
 	out.WriteString("<header class=\"report-header\"><p class=\"eyebrow\">Tadori diagnostic report</p>")
 	out.WriteString("<h1>")
@@ -41,6 +44,7 @@ func RenderHTML(report model.DiagnosticReport) ([]byte, error) {
 	}
 	out.WriteString("</div></header>")
 
+	renderDestinationStatus(&out, report)
 	renderConclusion(&out, report)
 	renderTarget(&out, report)
 	renderObservationSections(&out, report)
@@ -55,6 +59,27 @@ func RenderHTML(report model.DiagnosticReport) ([]byte, error) {
 	out.WriteString("</code></pre></details></section>")
 	out.WriteString("</main></body></html>")
 	return out.Bytes(), nil
+}
+
+func renderDestinationStatus(out *bytes.Buffer, diagnosticReport model.DiagnosticReport) {
+	status := DestinationStatusForReport(diagnosticReport)
+	tone := destinationStatusTone(status.Status)
+	out.WriteString("<section class=\"destination-status ")
+	writeText(out, tone)
+	out.WriteString("\" aria-labelledby=\"destination-status-title\"><p class=\"eyebrow\">Destination Status</p><h2 id=\"destination-status-title\"><span aria-hidden=\"true\">●</span> ")
+	writeText(out, strings.ToUpper(status.Label))
+	out.WriteString("</h2><p class=\"destination-status-detail\">")
+	writeText(out, status.Detail)
+	out.WriteString("</p><dl class=\"destination-status-facts\">")
+	fact(out, "Requested service", status.RequestedService)
+	fact(out, "Requested identity", status.RequestedIdentity)
+	fact(out, "Effective endpoint", endpointLabel(status.EffectiveEndpoint))
+	if status.FailureReason != model.FailureReasonNone && status.FailureReason != "" {
+		fact(out, "Failure reason", string(status.FailureReason))
+	}
+	out.WriteString("</dl>")
+	renderProvenanceRefs(out, status.Provenance, status.EvidenceIDs, status.ProbeNames)
+	out.WriteString("</section>")
 }
 
 // MarshalHTML is the marshal-shaped alias for RenderHTML.
@@ -78,6 +103,15 @@ func WriteHTML(w io.Writer, report model.DiagnosticReport) error {
 // HTML is a short alias for RenderHTML for format selection at call sites.
 func HTML(report model.DiagnosticReport) ([]byte, error) {
 	return RenderHTML(report)
+}
+
+// HTMLInlineStyleCSPSource returns the CSP hash source for the complete
+// inline style element emitted by RenderHTML. The value is deterministic and
+// lets the HTTP adapter permit this style block without permitting arbitrary
+// inline styles.
+func HTMLInlineStyleCSPSource() string {
+	hash := sha256.Sum256([]byte(reportCSS + reportDestinationStatusCSS))
+	return "'sha256-" + base64.StdEncoding.EncodeToString(hash[:]) + "'"
 }
 
 func renderConclusion(out *bytes.Buffer, diagnosticReport model.DiagnosticReport) {
@@ -677,6 +711,19 @@ func statusTone(status string) string {
 	}
 }
 
+func destinationStatusTone(status DestinationStatusState) string {
+	switch status {
+	case DestinationStatusReachable:
+		return "positive"
+	case DestinationStatusUnreachable:
+		return "negative"
+	case DestinationStatusDegraded:
+		return "warning"
+	default:
+		return "neutral"
+	}
+}
+
 func displayValue(value string) string {
 	if value == "" {
 		return "unknown / not observed"
@@ -782,3 +829,5 @@ func pathDestination(host string, port uint16) string {
 
 // reportCSS is inline so an exported report remains a portable single file.
 const reportCSS = `:root{color-scheme:light dark;--bg:#f5f7fb;--surface:#fff;--text:#172033;--muted:#617089;--line:#dce2ec;--accent:#2859c5;--positive:#147a4b;--warning:#9a5a00;--unknown:#6e4c9e}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.report{max-width:1120px;margin:0 auto;padding:32px 20px 64px}.report-header{border-bottom:2px solid var(--accent);padding-bottom:20px}.eyebrow{color:var(--accent);font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}.report h1{font-size:32px;line-height:1.15;margin:8px 0 18px;overflow-wrap:anywhere}.header-meta,.conclusion-grid{display:flex;flex-wrap:wrap;gap:10px}.field{background:var(--surface);border:1px solid var(--line);border-radius:8px;display:flex;flex-direction:column;gap:2px;min-width:150px;padding:9px 12px}.field-label{color:var(--muted);font-size:11px;font-weight:700;text-transform:uppercase}.value{overflow-wrap:anywhere}.positive{color:var(--positive)}.warning{color:var(--warning)}.unknown{color:var(--unknown)}.section{background:var(--surface);border:1px solid var(--line);border-radius:10px;margin-top:18px;padding:20px}.section h2{font-size:21px;margin:0 0 14px}.section h3{font-size:16px;margin:16px 0 8px}.section h4{font-size:13px;margin:14px 0 6px}.section-note,.boundary,.muted{color:var(--muted)}.boundary{border-left:3px solid var(--accent);margin:16px 0 0;padding-left:12px}.facts{display:grid;grid-template-columns:minmax(170px,.36fr) minmax(0,1fr);margin:0}.facts dt,.facts dd{border-bottom:1px solid var(--line);margin:0;padding:8px 0;overflow-wrap:anywhere}.facts dt{color:var(--muted);font-weight:650;padding-right:14px}.facts dd{min-width:0}.subsection,.observation-card,.finding,.provenance{border-top:1px solid var(--line);margin-top:18px;padding-top:6px}.observation-card,.finding{border:1px solid var(--line);border-radius:8px;margin-top:12px;padding:12px}.list ul,.conflicts ul{margin:6px 0 0;padding-left:22px}.conflicts{border-left:3px solid var(--warning);margin-top:16px;padding-left:12px}.state{border:1px solid var(--line);border-radius:7px;padding:10px 12px}.structured summary,details summary{cursor:pointer;color:var(--accent);font-weight:650}pre{background:#111827;border-radius:7px;color:#e5e7eb;max-height:480px;overflow:auto;padding:14px;white-space:pre-wrap;word-break:break-word}code{font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}table{border-collapse:collapse;display:block;overflow-x:auto;width:100%}caption{text-align:left;color:var(--muted);font-size:13px;padding:8px 0;text-align:left}th,td{border-bottom:1px solid var(--line);padding:8px;text-align:left;vertical-align:top;white-space:nowrap}th{color:var(--muted);font-size:12px;text-transform:uppercase}@media(max-width:640px){.report{padding:20px 12px 40px}.report h1{font-size:25px}.section{padding:14px}.facts{display:block}.facts dt{border-bottom:0;padding-top:10px}.facts dd{padding-top:0}.field{min-width:130px}}@media(prefers-color-scheme:dark){:root{--bg:#111827;--surface:#1f2937;--text:#eef2ff;--muted:#aab4c6;--line:#374151;--accent:#91aaf7;--positive:#71d3a0;--warning:#ffbe70;--unknown:#c8a8ee}pre{background:#0b1020}}`
+
+const reportDestinationStatusCSS = `.destination-status{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--muted);border-radius:8px;margin-top:18px;padding:16px 18px}.destination-status.positive{border-left-color:var(--positive)}.destination-status.warning{border-left-color:var(--warning)}.destination-status.negative{border-left-color:#b42318}.destination-status h2{font-size:24px;letter-spacing:.04em;margin:2px 0 4px}.destination-status h2 span{font-size:16px}.destination-status-detail{margin:0 0 12px;color:var(--muted)}.destination-status-facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:0 18px;margin:0}.destination-status-facts dt,.destination-status-facts dd{margin:0;padding:3px 0;overflow-wrap:anywhere}.destination-status-facts dt{color:var(--muted);font-size:12px;font-weight:650}.destination-status-facts dd{min-width:0}@media(max-width:640px){.destination-status-facts{display:block}.destination-status-facts dt{padding-top:6px}.destination-status-facts dd{padding-top:0}}`

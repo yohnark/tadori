@@ -3,12 +3,14 @@ package web
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/yohnark/tadori/internal/model"
 	observationbuilder "github.com/yohnark/tadori/internal/observations"
+	reportpkg "github.com/yohnark/tadori/internal/report"
 )
 
 func TestRepresentativeUIFixturesBuildDeterministicViews(t *testing.T) {
@@ -61,16 +63,16 @@ func TestViewModelPreservesPathSemantics(t *testing.T) {
 	fixtures := representativeUIFixtures()
 
 	complete, _ := BuildDiagnosticView(fixtures["complete-observable-path"])
-	if complete.Overall.Destination.State != "confirmed" {
-		t.Fatalf("complete destination state = %q, want confirmed", complete.Overall.Destination.State)
+	if complete.Overall.Destination.Status != "indeterminate" {
+		t.Fatalf("complete destination status = %q, want indeterminate", complete.Overall.Destination.Status)
 	}
 	if len(complete.Paths) != 2 || len(complete.Comparisons) != 1 {
 		t.Fatalf("complete paths/comparisons = %d/%d, want 2/1", len(complete.Paths), len(complete.Comparisons))
 	}
 
 	longGap, _ := BuildDiagnosticView(fixtures["destination-reached-unobservable-intermediate"])
-	if longGap.Overall.Destination.State != "confirmed" {
-		t.Fatalf("destination with unobservable hops = %q, want confirmed", longGap.Overall.Destination.State)
+	if longGap.Overall.Destination.Status != "indeterminate" {
+		t.Fatalf("destination with unobservable hops = %q, want indeterminate", longGap.Overall.Destination.Status)
 	}
 	for _, hop := range longGap.Paths[0].Hops {
 		if hop.State == model.PathHopStateUnobservable && (hop.Tone == "negative" || hop.Detail == "") {
@@ -100,8 +102,8 @@ func TestViewModelPreservesPathSemantics(t *testing.T) {
 	if !comparison.TCPDestinationConnected || comparison.ICMPDestinationReached {
 		t.Fatalf("protocol comparison promoted the wrong signal: %#v", comparison)
 	}
-	if protocols.Overall.Destination.State != "confirmed" {
-		t.Fatalf("TCP destination with ICMP gap = %q, want confirmed", protocols.Overall.Destination.State)
+	if protocols.Overall.Destination.Status != "indeterminate" {
+		t.Fatalf("TCP destination with ICMP gap = %q, want indeterminate", protocols.Overall.Destination.Status)
 	}
 	if !containsString(protocols.Overall.Destination.EvidenceIDs, "path/tcp") {
 		t.Fatalf("confirmed destination lost TCP path evidence reference: %#v", protocols.Overall.Destination)
@@ -130,8 +132,8 @@ func TestViewModelPreservesPathSemantics(t *testing.T) {
 	}
 
 	failed, _ := BuildDiagnosticView(fixtures["failed-destination"])
-	if failed.Overall.Destination.State != "failed" {
-		t.Fatalf("failed destination state = %q, want failed", failed.Overall.Destination.State)
+	if failed.Overall.Destination.Status != "unreachable" {
+		t.Fatalf("failed destination status = %q, want unreachable", failed.Overall.Destination.Status)
 	}
 	if failed.Overall.DiagnosisState != "finding" {
 		t.Fatalf("failed destination diagnosis state = %q, want finding", failed.Overall.DiagnosisState)
@@ -461,14 +463,46 @@ func TestViewModelUsesPacketEndpointConfirmationWithoutAddingPacketUI(t *testing
 	if err != nil {
 		t.Fatalf("BuildDiagnosticView: %v", err)
 	}
-	if view.Overall.Destination.State != "confirmed" {
-		t.Fatalf("destination state = %q, want confirmed", view.Overall.Destination.State)
+	if view.Overall.Destination.Status != "indeterminate" {
+		t.Fatalf("destination status = %q, want indeterminate", view.Overall.Destination.Status)
 	}
 	if findEvidenceView(view, packetEvidence.ID).Kind != model.EvidenceKindPacketFlow {
 		t.Fatalf("packet flow was not retained in the evidence inspector: %#v", view.Evidence)
 	}
 	if len(view.Paths) != 0 {
 		t.Fatalf("packet evidence created a packet/path UI: %#v", view.Paths)
+	}
+}
+
+func TestViewModelUsesSharedDestinationStatusProjection(t *testing.T) {
+	target, err := model.ParseTarget(model.TargetIntent{Input: "https://service.example/health"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnosticReport := model.DiagnosticReport{
+		Target: target,
+		Observations: model.Observations{
+			Endpoint: model.EndpointObservation{
+				RequestedIdentity: target.RequestedIdentity, Service: target.Service,
+				ApplicationProtocol: target.ApplicationProtocol, TransportProtocol: target.TransportProtocol, Port: target.Port,
+			},
+			Application: model.ApplicationObservation{
+				Protocol: target.ApplicationProtocol, RequestAttempted: true, ResponseReceived: true,
+				Result: model.HTTPResultStatusFailure, StatusCode: 503, FailureReason: model.FailureReasonHTTPStatusCode,
+				ProbeNames: []string{"http"}, EvidenceIDs: []string{"http-503"},
+			},
+		},
+	}
+	want := reportpkg.DestinationStatusForReport(diagnosticReport)
+	view, err := BuildDiagnosticView(diagnosticReport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(view.Overall.Destination, want) {
+		t.Fatalf("workbench destination projection = %#v, want %#v", view.Overall.Destination, want)
+	}
+	if view.Overall.Destination.Status != reportpkg.DestinationStatusDegraded {
+		t.Fatalf("destination status = %q, want degraded", view.Overall.Destination.Status)
 	}
 }
 

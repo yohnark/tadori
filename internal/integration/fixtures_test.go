@@ -96,8 +96,8 @@ func TestRegressionFixturesAreCompleteDeterministicReports(t *testing.T) {
 			if view.Report.Status != fixture.wantStatus || len(view.Probes) != len(fixture.report.Probes) {
 				t.Fatalf("view lost report contract: status=%q probes=%d", view.Report.Status, len(view.Probes))
 			}
-			if fixture.wantDestination != "" && view.Overall.Destination.State != fixture.wantDestination {
-				t.Fatalf("destination state = %q, want %q", view.Overall.Destination.State, fixture.wantDestination)
+			if fixture.wantDestination != "" && string(view.Overall.Destination.Status) != fixture.wantDestination {
+				t.Fatalf("destination status = %q, want %q", view.Overall.Destination.Status, fixture.wantDestination)
 			}
 			if fixture.wantNetworkScope != "" {
 				if view.NetworkContext == nil || view.NetworkContext.NetworkScope != fixture.wantNetworkScope {
@@ -167,7 +167,7 @@ func TestHTTPSuccessFixtureKeepsServiceAndEndpointEvidenceSeparate(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Overall.Destination.State != "confirmed" || view.Overall.DiagnosisState != "clear" {
+	if view.Overall.Destination.Status != "reachable" || view.Overall.DiagnosisState != "clear" {
 		t.Fatalf("HTTPS view = %#v", view.Overall)
 	}
 	if !strings.Contains(report.RenderHuman(fixture.report), "Service: HTTPS") {
@@ -189,7 +189,7 @@ func TestLocalPrivateOnLinkFixtureDoesNotInventGatewayFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.NetworkContext.EffectiveRouteLabel != "On-link" || view.Overall.Destination.State != "confirmed" {
+	if view.NetworkContext.EffectiveRouteLabel != "On-link" || view.Overall.Destination.Status != "indeterminate" {
 		t.Fatalf("on-link view = %#v / %#v", view.NetworkContext, view.Overall.Destination)
 	}
 }
@@ -227,8 +227,8 @@ func TestUnobservablePathFixtureConfirmsDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Overall.Destination.State != "confirmed" {
-		t.Fatalf("destination = %#v, want confirmed", view.Overall.Destination)
+	if view.Overall.Destination.Status != "indeterminate" {
+		t.Fatalf("destination = %#v, want indeterminate", view.Overall.Destination)
 	}
 	if len(view.Paths) != 1 || view.Paths[0].Hops[1].State != model.PathHopStateUnobservable {
 		t.Fatalf("path view did not preserve the unobservable segment: %#v", view.Paths)
@@ -301,9 +301,9 @@ func httpsSuccessFixture() regressionFixture {
 		passProbe("dns", target, model.LayerDNS, model.FaultDomainDNS, resolutionEvidence("https/dns-resolution", resolution), resolution),
 		passProbe("tcp", target, model.LayerTCP, model.FaultDomainTransport, fixtureEvidence("https/tcp", model.EvidenceKindTCPConnection, map[string]any{"address": "198.51.100.44", "port": 443, "connected": true})),
 		passProbe("tls", target, model.LayerTLS, model.FaultDomainTLS, fixtureEvidence("https/tls", model.EvidenceKindTLSHandshake, map[string]any{"version": "TLS1.3", "verified": true})),
-		passProbe("http", target, model.LayerHTTP, model.FaultDomainHTTP, fixtureEvidence("https/http", model.EvidenceKindHTTPResponse, map[string]any{"status": 200, "resource": "/health"})),
+		passProbe("http", target, model.LayerHTTP, model.FaultDomainHTTP, fixtureEvidence("https/http", model.EvidenceKindHTTPResponse, map[string]any{"response_received": true, "status_code": 200, "resource": "/health"})),
 	}
-	return fixtureWithReport("https-success", target, model.ReportStatusComplete, probes, model.FailureReasonNone, model.ServiceProfileHTTPS, "confirmed", "", true, 0, false,
+	return fixtureWithReport("https-success", target, model.ReportStatusComplete, probes, model.FailureReasonNone, model.ServiceProfileHTTPS, "reachable", "", true, 0, false,
 		[]string{`"id":"https"`, `"kind":"http_response"`})
 }
 
@@ -336,7 +336,7 @@ func localPrivateOnLinkFixture() regressionFixture {
 		skippedProbe("gateway_reachability", target, model.LayerGateway, model.FaultDomainGateway),
 		passProbe("tcp", target, model.LayerTCP, model.FaultDomainTransport, fixtureEvidence("local/tcp", model.EvidenceKindTCPConnection, map[string]any{"address": "10.20.30.40", "port": 443, "connected": true})),
 	}
-	return fixtureWithReport("local-private-on-link", target, model.ReportStatusComplete, probes, model.FailureReasonNone, model.ServiceProfileHTTPS, "confirmed", model.NetworkScopeSameLink, false, 0, true,
+	return fixtureWithReport("local-private-on-link", target, model.ReportStatusComplete, probes, model.FailureReasonNone, model.ServiceProfileHTTPS, "indeterminate", model.NetworkScopeSameLink, false, 0, true,
 		[]string{`"effective_route":"on_link"`, `"network_scope":"same_link"`})
 }
 
@@ -381,7 +381,7 @@ func splitDNSNRPTFixture() regressionFixture {
 		dnsProbe,
 		passProbe("tcp", target, model.LayerTCP, model.FaultDomainTransport, fixtureEvidence("split-dns/tcp", model.EvidenceKindTCPConnection, map[string]any{"address": "10.44.5.18", "port": 443, "connected": true})),
 	}
-	return fixtureWithReport("split-dns-nrpt", target, model.ReportStatusComplete, probes, model.FailureReasonNone, model.ServiceProfileHTTPS, "confirmed", "", true, 0, false,
+	return fixtureWithReport("split-dns-nrpt", target, model.ReportStatusComplete, probes, model.FailureReasonNone, model.ServiceProfileHTTPS, "indeterminate", "", true, 0, false,
 		[]string{`"state":"policy_candidate"`, `"policy_source":"NRPT"`, `"selected_address":"10.44.5.18"`})
 }
 
@@ -422,7 +422,7 @@ func unobservablePathFixture() regressionFixture {
 		failedProbe("tcp", target, model.LayerTCP, model.FaultDomainTransport, model.FailureReasonTCPTimeout, fixtureEvidence("path/tcp-timeout", model.EvidenceKindTCPConnection, map[string]any{"error": "bounded direct probe timeout"})),
 		passProbe("path", target, model.LayerNetwork, model.FaultDomainNetwork, pathEvidence),
 	}
-	return fixtureWithReport("path-unobservable-destination-confirmed", target, model.ReportStatusComplete, probes, model.FailureReasonNone, model.ServiceProfileHTTPS, "confirmed", "", false, 1, false,
+	return fixtureWithReport("path-unobservable-destination-confirmed", target, model.ReportStatusComplete, probes, model.FailureReasonNone, model.ServiceProfileHTTPS, "indeterminate", "", false, 1, false,
 		[]string{`"kind":"path_observation"`, `"destination_tcp_connected":true`})
 }
 
@@ -441,7 +441,7 @@ func proxyPolicyPartialFixture() regressionFixture {
 		skippedProbe("windows_enterprise", target, model.LayerNetwork, model.FaultDomainPolicy),
 		failedProbe("http", target, model.LayerHTTP, model.FaultDomainHTTP, model.FailureReasonHTTPFailure, fixtureEvidence("proxy/http", model.EvidenceKindHTTPResponse, map[string]any{"attempted": false, "reason": "policy path unavailable"})),
 	}
-	return fixtureWithReport("proxy-policy-partial", target, model.ReportStatusIncomplete, probes, model.FailureReasonProxyConfigurationDivergence, model.ServiceProfileHTTPS, "unconfirmed", "", true, 0, true,
+	return fixtureWithReport("proxy-policy-partial", target, model.ReportStatusIncomplete, probes, model.FailureReasonProxyConfigurationDivergence, model.ServiceProfileHTTPS, "indeterminate", "", true, 0, true,
 		[]string{`"failure_reason":"proxy_configuration_divergence"`, `"status":"skipped"`, `"kind":"proxy_configuration"`})
 }
 
@@ -455,7 +455,7 @@ func serviceAwareSerializationFixture() regressionFixture {
 		passProbe("tcp", target, model.LayerTCP, model.FaultDomainTransport, fixtureEvidence("service/tcp", model.EvidenceKindTCPConnection, map[string]any{"address": "10.60.1.25", "port": 1445, "connected": true})),
 		passProbe("service", target, model.LayerDestination, model.FaultDomainDestination, fixtureEvidence("service/intent", model.EvidenceKindUnknown, map[string]any{"service": "smb", "port": 1445, "intent": "smb_session"})),
 	}
-	return fixtureWithReport("service-aware-target", target, model.ReportStatusComplete, probes, model.FailureReasonNone, model.ServiceProfileSMB, "confirmed", "", false, 0, false,
+	return fixtureWithReport("service-aware-target", target, model.ReportStatusComplete, probes, model.FailureReasonNone, model.ServiceProfileSMB, "indeterminate", "", false, 0, false,
 		[]string{`"id":"smb"`, `"port":1445`, `"application_protocol":"smb"`})
 }
 

@@ -154,6 +154,24 @@ func TestSessionAPIStreamsProgressAndReturnsCanonicalReport(t *testing.T) {
 			if response.Header.Get("Content-Type") != exported.contentType {
 				t.Fatalf("content type = %q, want %q", response.Header.Get("Content-Type"), exported.contentType)
 			}
+			if response.Header.Get("X-Content-Type-Options") != "nosniff" || response.Header.Get("Referrer-Policy") != "no-referrer" || response.Header.Get("Cache-Control") != "no-store" {
+				t.Fatalf("security/cache headers = nosniff=%q referrer=%q cache=%q", response.Header.Get("X-Content-Type-Options"), response.Header.Get("Referrer-Policy"), response.Header.Get("Cache-Control"))
+			}
+			if exported.name == "HTML" {
+				contentSecurityPolicy := response.Header.Get("Content-Security-Policy")
+				if contentSecurityPolicy != exportContentSecurityPolicy() {
+					t.Fatalf("HTML export CSP = %q, want %q", contentSecurityPolicy, exportContentSecurityPolicy())
+				}
+				document := string(body)
+				styleStart := strings.Index(document, "<style>")
+				styleEnd := strings.Index(document, "</style>")
+				if styleStart < 0 || styleEnd <= styleStart+len("<style>") {
+					t.Fatal("HTML export has no inline report style block")
+				}
+				if !strings.Contains(contentSecurityPolicy, "style-src "+reportpkg.HTMLInlineStyleCSPSource()+";") {
+					t.Fatalf("HTML export CSP does not permit its exact inline style block: CSP=%q", contentSecurityPolicy)
+				}
+			}
 			if string(body) != string(exported.want) {
 				t.Fatalf("export is not deterministic canonical projection")
 			}
