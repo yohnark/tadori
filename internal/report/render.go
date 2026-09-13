@@ -32,6 +32,12 @@ func RenderJSON(report model.DiagnosticReport) ([]byte, error) {
 	return MarshalJSON(report)
 }
 
+// JSON is a short alias for RenderJSON for callers that select the output
+// format at the call site.
+func JSON(report model.DiagnosticReport) ([]byte, error) {
+	return RenderJSON(report)
+}
+
 // WriteJSON writes the canonical JSON representation to w without appending a
 // newline.  The absence of a newline keeps the returned document identical to
 // MarshalJSON and leaves stream framing to the caller.
@@ -130,6 +136,11 @@ func RenderHuman(report model.DiagnosticReport) string {
 // RenderTerminal is the terminal-rendering name retained for callers that
 // distinguish terminal output from other human-readable projections.
 func RenderTerminal(report model.DiagnosticReport) string {
+	return RenderHuman(report)
+}
+
+// Human is a short alias for RenderHuman.
+func Human(report model.DiagnosticReport) string {
 	return RenderHuman(report)
 }
 
