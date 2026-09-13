@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/netip"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/yohnark/tadori/internal/model"
 	"github.com/yohnark/tadori/internal/probe/dns"
@@ -389,4 +391,139 @@ func TestNormalizeObservationsDetachesNestedProvenance(t *testing.T) {
 	if observations.Endpoint.ResolvedCandidates[0].EvidenceIDs[0] != "e1" || observations.Endpoint.CandidateAttempts[0].Candidate.EvidenceIDs[0] != "e2" || observations.Endpoint.Conflicts[0].EvidenceIDs[0] != "e3" {
 		t.Fatalf("nested observation slices share input state = %#v", observations)
 	}
+}
+
+func TestBuildPathAndPacketFlowObservationsRetainVisibilityAndDivergence(t *testing.T) {
+	target := mustTarget(t, "203.0.113.45:443")
+	path := model.PathObservation{
+		Status:                  model.PathObservationStatusObserved,
+		Protocol:                model.PathProtocolTCP,
+		Destination:             "203.0.113.45",
+		DestinationPort:         443,
+		PortAware:               true,
+		MaxTTL:                  5,
+		AttemptsPerTTL:          2,
+		DestinationReached:      true,
+		DestinationTCPConnected: true,
+		Hops: []model.PathHop{
+			{TTL: 1, State: model.PathHopStateObserved, Attempts: 2, Responders: []model.PathResponder{{Address: "192.0.2.1"}, {Address: "192.0.2.2"}}},
+			{TTL: 2, State: model.PathHopStateUnobservable, Attempts: 2},
+			{TTL: 3, State: model.PathHopStateUnobservable, Attempts: 2},
+			{TTL: 5, State: model.PathHopStateObserved, Attempts: 2, Responders: []model.PathResponder{{Address: "203.0.113.45", DestinationReached: true}}},
+		},
+		Segments: []model.PathSegment{
+			{Kind: model.PathSegmentObservedResponder, FromTTL: 1, ToTTL: 1, Responders: []model.PathResponder{{Address: "192.0.2.1"}, {Address: "192.0.2.2"}}},
+			{Kind: model.PathSegmentUnobservable, FromTTL: 2, ToTTL: 3},
+			{Kind: model.PathSegmentObservedResponder, FromTTL: 5, ToTTL: 5, Responders: []model.PathResponder{{Address: "203.0.113.45", DestinationReached: true}}},
+		},
+	}
+	conflictingPath := path
+	conflictingPath.DestinationReached = false
+	conflictingPath.DestinationTCPConnected = false
+	conflictingPath.Hops = append([]model.PathHop(nil), path.Hops...)
+	conflictingPath.Hops[3].Responders = []model.PathResponder{{Address: "203.0.113.45"}}
+	flow := model.PacketFlowEvidence{
+		SessionID:         "session-1",
+		ProbeID:           "tcp-1",
+		CorrelationID:     "session-1/tcp-1",
+		Target:            target,
+		CaptureStatus:     model.PacketCaptureStatusAvailable,
+		WindowCompletedAt: timeForTest(2),
+		ProbeEmission:     model.PacketEmissionObserved,
+		Outcome:           model.PacketFlowOutcomeNoMatchingResponse,
+		Certainty:         model.EvidenceCertaintyUnobservableSegment,
+		Observations: []model.PacketObservation{{
+			ID: "syn", SessionID: "session-1", ProbeID: "tcp-1", CorrelationID: "session-1/tcp-1",
+			Kind: model.PacketObservationOutboundTCPSYN, Protocol: model.PacketProtocolTCP, Direction: model.PacketDirectionOutbound,
+			SourceAddress: "192.0.2.10", SourcePort: 50000, DestinationAddress: "203.0.113.45", DestinationPort: 443,
+		}},
+	}
+	pathRaw := mustRaw(t, path)
+	conflictingPathRaw := mustRaw(t, conflictingPath)
+	flowRaw := mustRaw(t, flow)
+	first := model.ProbeResult{Name: "path-b", ProbeID: "path-2", Evidence: []model.Evidence{{ID: "path-b", Kind: model.EvidenceKindPathObservation, Source: "path:second", Raw: conflictingPathRaw}}}
+	second := model.ProbeResult{Name: "path-a", ProbeID: "path-1", Evidence: []model.Evidence{{ID: "path-a", Kind: model.EvidenceKindPathObservation, Source: "path:first", Raw: pathRaw}}}
+	third := model.ProbeResult{Name: "tcp", ProbeID: "tcp-1", Evidence: []model.Evidence{{ID: "flow-1", Kind: model.EvidenceKindPacketFlow, Source: "capture:fixture", Raw: flowRaw}}}
+
+	left := Build(target, []model.ProbeResult{first, third, second})
+	right := Build(target, []model.ProbeResult{second, first, third})
+	if !reflect.DeepEqual(left, right) {
+		t.Fatalf("path/flow projection depends on input order\nleft=%#v\nright=%#v", left, right)
+	}
+	if !bytes.Equal(first.Evidence[0].Raw, conflictingPathRaw) || !bytes.Equal(second.Evidence[0].Raw, pathRaw) || !bytes.Equal(third.Evidence[0].Raw, flowRaw) {
+		t.Fatal("path or packet-flow raw evidence was mutated")
+	}
+	if len(left.Paths) != 2 || len(left.PacketFlows) != 1 || len(left.PathCorrelations) != 1 {
+		t.Fatalf("path/flow collections = paths:%d flows:%d correlations:%d", len(left.Paths), len(left.PacketFlows), len(left.PathCorrelations))
+	}
+	var confirmedPath model.PathObservation
+	for _, observation := range left.Paths {
+		if observation.DestinationReached {
+			confirmedPath = observation
+			break
+		}
+	}
+	if len(confirmedPath.Hops) == 0 || len(confirmedPath.Hops[0].Responders) != 2 || confirmedPath.Hops[1].State != model.PathHopStateUnobservable {
+		t.Fatalf("visibility or multiple responders were collapsed: %#v", left.Paths)
+	}
+	if !confirmedPath.DestinationReached || !confirmedPath.DestinationTCPConnected {
+		t.Fatalf("destination confirmation was lost behind unobservable TTLs: %#v", confirmedPath)
+	}
+	if len(left.PathProvenance) != 2 || left.PathProvenance[0].EvidenceIDs[0] != "path-a" || left.PacketFlowProvenance[0].EvidenceIDs[0] != "flow-1" {
+		t.Fatalf("aligned provenance = paths:%#v flows:%#v", left.PathProvenance, left.PacketFlowProvenance)
+	}
+	if !hasObservationConflictField(left.Conflicts, "destination_reached") || !hasObservationDivergence(left.Divergences, "destination_confirmation") {
+		t.Fatalf("conflict/divergence semantics missing: conflicts=%#v divergences=%#v", left.Conflicts, left.Divergences)
+	}
+	if !contains(left.Conflicts[0].EvidenceIDs, "path-a") || !contains(left.Conflicts[0].EvidenceIDs, "path-b") {
+		t.Fatalf("conflict provenance lost: %#v", left.Conflicts)
+	}
+}
+
+func TestBuildPacketFlowConflictRetainsBothOutcomesDeterministically(t *testing.T) {
+	target := mustTarget(t, "198.51.100.8:443")
+	base := model.PacketFlowEvidence{
+		SessionID: "session-2", ProbeID: "tcp", CorrelationID: "session-2/tcp", Target: target,
+		CaptureStatus: model.PacketCaptureStatusAvailable, ProbeEmission: model.PacketEmissionObserved,
+		Observations: []model.PacketObservation{{Kind: model.PacketObservationOutboundTCPSYN, Protocol: model.PacketProtocolTCP, Direction: model.PacketDirectionOutbound, DestinationAddress: "198.51.100.8", DestinationPort: 443}},
+	}
+	accepted := base
+	accepted.Outcome = model.PacketFlowOutcomeTCPSYNACK
+	accepted.Observations = append(append([]model.PacketObservation(nil), base.Observations...), model.PacketObservation{Kind: model.PacketObservationInboundTCPSYNACK, Protocol: model.PacketProtocolTCP, Direction: model.PacketDirectionInbound, SourceAddress: "198.51.100.8", SourcePort: 443})
+	noResponse := base
+	noResponse.Outcome = model.PacketFlowOutcomeNoMatchingResponse
+	first := model.ProbeResult{Name: "tcp-second", Evidence: []model.Evidence{{ID: "flow-b", Kind: model.EvidenceKindPacketFlow, Source: "capture:b", Raw: mustRaw(t, noResponse)}}}
+	second := model.ProbeResult{Name: "tcp-first", Evidence: []model.Evidence{{ID: "flow-a", Kind: model.EvidenceKindPacketFlow, Source: "capture:a", Raw: mustRaw(t, accepted)}}}
+	got := Build(target, []model.ProbeResult{first, second})
+	if len(got.PacketFlows) != 2 || len(got.PacketFlowProvenance) != 2 {
+		t.Fatalf("packet flow records = %#v / %#v", got.PacketFlows, got.PacketFlowProvenance)
+	}
+	if got.PacketFlows[0].Outcome != model.PacketFlowOutcomeNoMatchingResponse || got.PacketFlows[1].Outcome != model.PacketFlowOutcomeTCPSYNACK {
+		t.Fatalf("packet flow ordering = %#v", got.PacketFlows)
+	}
+	if !hasObservationConflictField(got.Conflicts, "outcome") || !contains(got.Conflicts[0].EvidenceIDs, "flow-a") || !contains(got.Conflicts[0].EvidenceIDs, "flow-b") {
+		t.Fatalf("packet-flow conflict provenance = %#v", got.Conflicts)
+	}
+}
+
+func hasObservationConflictField(values []model.ObservationConflict, suffix string) bool {
+	for _, value := range values {
+		if strings.HasSuffix(value.Field, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasObservationDivergence(values []model.ObservationDivergence, prefix string) bool {
+	for _, value := range values {
+		if strings.HasPrefix(value.Field, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func timeForTest(second int) time.Time {
+	return time.Date(2026, 1, 1, 0, 0, second, 0, time.UTC)
 }

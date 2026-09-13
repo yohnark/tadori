@@ -32,6 +32,7 @@ func Build(target model.Target, probes []model.ProbeResult) model.Observations {
 	transport := buildTransportObservation(target, endpoint, ordered)
 	security := buildSecurityObservation(target, endpoint, transport, ordered)
 	application := buildApplicationObservation(target, endpoint, transport, ordered)
+	paths, packetFlows, pathProvenance, packetFlowProvenance, pathCorrelations, observationConflicts, observationDivergences := buildPathFlowObservations(ordered)
 
 	// Route probes are intentionally given the execution view of the target:
 	// this preserves #52's tested-endpoint hand-off while the report's Target
@@ -40,12 +41,19 @@ func Build(target model.Target, probes []model.ProbeResult) model.Observations {
 	networkContext := buildNetworkObservation(runtimeTarget, ordered)
 
 	return model.NormalizeObservations(model.Observations{
-		Endpoint:       endpoint,
-		NameResolution: nameResolution,
-		NetworkContext: networkContext,
-		Transport:      transport,
-		Security:       security,
-		Application:    application,
+		Endpoint:             endpoint,
+		NameResolution:       nameResolution,
+		NetworkContext:       networkContext,
+		Transport:            transport,
+		Security:             security,
+		Application:          application,
+		Paths:                paths,
+		PacketFlows:          packetFlows,
+		PathProvenance:       pathProvenance,
+		PacketFlowProvenance: packetFlowProvenance,
+		PathCorrelations:     pathCorrelations,
+		Conflicts:            observationConflicts,
+		Divergences:          observationDivergences,
 	})
 }
 
@@ -875,6 +883,351 @@ type sourceValue struct {
 	value      string
 	probe      string
 	evidenceID string
+}
+
+type pathObservationRecord struct {
+	value      model.PathObservation
+	provenance model.ObservationProvenance
+	evidenceID string
+	probeName  string
+}
+
+type packetFlowRecord struct {
+	value      model.PacketFlowEvidence
+	provenance model.ObservationProvenance
+	evidenceID string
+	probeName  string
+}
+
+// buildPathFlowObservations projects the two bounded observation lanes into
+// the report envelope.  The records are sorted before their parallel
+// provenance slices are emitted, so the result cannot depend on probe or
+// evidence arrival order.
+func buildPathFlowObservations(probes []model.ProbeResult) (
+	[]model.PathObservation,
+	[]model.PacketFlowEvidence,
+	[]model.ObservationProvenance,
+	[]model.ObservationProvenance,
+	[]model.PathCorrelation,
+	[]model.ObservationConflict,
+	[]model.ObservationDivergence,
+) {
+	paths := make([]pathObservationRecord, 0)
+	flows := make([]packetFlowRecord, 0)
+	for _, probe := range probes {
+		for _, evidence := range probe.Evidence {
+			source := evidence.Source
+			if source == "" {
+				source = probe.Name
+			}
+			provenance := model.ObservationProvenance{
+				ProbeName:   probe.Name,
+				ProbeID:     probe.ProbeID,
+				Source:      source,
+				EvidenceIDs: []string{evidence.ID},
+			}
+			switch evidence.Kind {
+			case model.EvidenceKindPathObservation:
+				observation, err := model.DecodePathObservation(evidence)
+				if err != nil {
+					continue
+				}
+				observation = normalizePathObservation(observation)
+				paths = append(paths, pathObservationRecord{value: observation, provenance: provenance, evidenceID: evidence.ID, probeName: probe.Name})
+			case model.EvidenceKindPacketFlow:
+				flow, err := model.DecodePacketFlowEvidence(evidence)
+				if err != nil {
+					continue
+				}
+				flows = append(flows, packetFlowRecord{value: flow, provenance: provenance, evidenceID: evidence.ID, probeName: probe.Name})
+			}
+		}
+	}
+
+	sort.SliceStable(paths, func(i, j int) bool {
+		left, right := paths[i], paths[j]
+		leftKey, rightKey := pathObservationSortKey(left.value), pathObservationSortKey(right.value)
+		if leftKey != rightKey {
+			return leftKey < rightKey
+		}
+		return observationSourceKey(left.provenance, left.evidenceID) < observationSourceKey(right.provenance, right.evidenceID)
+	})
+	sort.SliceStable(flows, func(i, j int) bool {
+		left, right := flows[i], flows[j]
+		leftKey, rightKey := packetFlowSortKey(left.value), packetFlowSortKey(right.value)
+		if leftKey != rightKey {
+			return leftKey < rightKey
+		}
+		return observationSourceKey(left.provenance, left.evidenceID) < observationSourceKey(right.provenance, right.evidenceID)
+	})
+
+	pathValues := make([]model.PathObservation, 0, len(paths))
+	pathProvenance := make([]model.ObservationProvenance, 0, len(paths))
+	for _, record := range paths {
+		pathValues = append(pathValues, record.value)
+		pathProvenance = append(pathProvenance, record.provenance)
+	}
+	flowValues := make([]model.PacketFlowEvidence, 0, len(flows))
+	flowProvenance := make([]model.ObservationProvenance, 0, len(flows))
+	for _, record := range flows {
+		flowValues = append(flowValues, record.value)
+		flowProvenance = append(flowProvenance, record.provenance)
+	}
+
+	pathCorrelations := model.CorrelatePathObservations(pathValues...)
+	conflicts := pathFlowConflicts(paths, flows)
+	divergences := pathFlowDivergences(paths, flows)
+	return pathValues, flowValues, pathProvenance, flowProvenance, pathCorrelations, conflicts, divergences
+}
+
+func normalizePathObservation(observation model.PathObservation) model.PathObservation {
+	observation.Destination = normalizeAddress(observation.Destination)
+	for hopIndex := range observation.Hops {
+		for responderIndex := range observation.Hops[hopIndex].Responders {
+			observation.Hops[hopIndex].Responders[responderIndex] = model.NormalizePathResponder(observation.Hops[hopIndex].Responders[responderIndex])
+		}
+	}
+	for segmentIndex := range observation.Segments {
+		for responderIndex := range observation.Segments[segmentIndex].Responders {
+			observation.Segments[segmentIndex].Responders[responderIndex] = model.NormalizePathResponder(observation.Segments[segmentIndex].Responders[responderIndex])
+		}
+	}
+	return observation
+}
+
+func pathObservationSortKey(observation model.PathObservation) string {
+	raw, _ := json.Marshal(observation)
+	return strings.Join([]string{normalizeAddress(observation.Destination), strconv.Itoa(int(observation.DestinationPort)), string(observation.Protocol), string(observation.Status), string(raw)}, "|")
+}
+
+func packetFlowSortKey(flow model.PacketFlowEvidence) string {
+	destination := flow.Target.RequestedIdentity
+	if flow.Target.SelectedEndpoint != nil {
+		destination = flow.Target.SelectedEndpoint.Address
+	} else if flow.Target.LiteralIP != "" {
+		destination = flow.Target.LiteralIP
+	}
+	raw, _ := json.Marshal(flow)
+	return strings.Join([]string{normalizeAddress(destination), strconv.Itoa(int(flow.Target.Port)), flow.CorrelationID, string(flow.CaptureStatus), string(flow.Outcome), string(raw)}, "|")
+}
+
+func observationSourceKey(provenance model.ObservationProvenance, evidenceID string) string {
+	return strings.Join([]string{provenance.ProbeName, provenance.ProbeID, provenance.Source, evidenceID}, "|")
+}
+
+func pathFlowConflicts(paths []pathObservationRecord, flows []packetFlowRecord) []model.ObservationConflict {
+	conflicts := make([]model.ObservationConflict, 0)
+	pathGroups := make(map[string][]pathObservationRecord)
+	for _, record := range paths {
+		key := pathObservationKey(record.value)
+		pathGroups[key] = append(pathGroups[key], record)
+	}
+	for _, key := range sortedKeys(pathGroups) {
+		group := pathGroups[key]
+		conflicts = appendPathFieldConflicts(conflicts, key, group, "status", func(value model.PathObservation) string { return string(value.Status) })
+		conflicts = appendPathFieldConflicts(conflicts, key, group, "destination_reached", func(value model.PathObservation) string { return boolString(value.DestinationReached) })
+		conflicts = appendPathFieldConflicts(conflicts, key, group, "destination_tcp_connected", func(value model.PathObservation) string { return boolString(value.DestinationTCPConnected) })
+	}
+
+	flowGroups := make(map[string][]packetFlowRecord)
+	for _, record := range flows {
+		key := packetFlowKey(record.value)
+		flowGroups[key] = append(flowGroups[key], record)
+	}
+	for _, key := range sortedKeys(flowGroups) {
+		group := flowGroups[key]
+		conflicts = appendFlowFieldConflicts(conflicts, key, group, "outcome", func(value model.PacketFlowEvidence) string { return string(value.Outcome) })
+		conflicts = appendFlowFieldConflicts(conflicts, key, group, "capture_status", func(value model.PacketFlowEvidence) string { return string(value.CaptureStatus) })
+		conflicts = appendFlowFieldConflicts(conflicts, key, group, "probe_emission", func(value model.PacketFlowEvidence) string { return string(value.ProbeEmission) })
+	}
+	return conflicts
+}
+
+func appendPathFieldConflicts(destination []model.ObservationConflict, key string, group []pathObservationRecord, field string, value func(model.PathObservation) string) []model.ObservationConflict {
+	values := make([]string, 0, len(group))
+	provenance := make([]string, 0, len(group))
+	evidenceIDs := make([]string, 0, len(group))
+	for _, record := range group {
+		values = appendUnique(values, value(record.value))
+		provenance = appendUnique(provenance, observationProbeProvenance(record.provenance))
+		evidenceIDs = appendUnique(evidenceIDs, record.evidenceID)
+	}
+	if len(values) < 2 {
+		return destination
+	}
+	return append(destination, model.ObservationConflict{Field: "path[" + key + "]." + field, Values: values, Provenance: provenance, EvidenceIDs: evidenceIDs})
+}
+
+func appendFlowFieldConflicts(destination []model.ObservationConflict, key string, group []packetFlowRecord, field string, value func(model.PacketFlowEvidence) string) []model.ObservationConflict {
+	values := make([]string, 0, len(group))
+	provenance := make([]string, 0, len(group))
+	evidenceIDs := make([]string, 0, len(group))
+	for _, record := range group {
+		values = appendUnique(values, value(record.value))
+		provenance = appendUnique(provenance, observationProbeProvenance(record.provenance))
+		evidenceIDs = appendUnique(evidenceIDs, record.evidenceID)
+	}
+	if len(values) < 2 {
+		return destination
+	}
+	return append(destination, model.ObservationConflict{Field: "packet_flow[" + key + "]." + field, Values: values, Provenance: provenance, EvidenceIDs: evidenceIDs})
+}
+
+func pathFlowDivergences(paths []pathObservationRecord, flows []packetFlowRecord) []model.ObservationDivergence {
+	type divergenceGroup struct {
+		pathValues            []string
+		packetFlowValues      []string
+		pathProvenance        []string
+		packetFlowProvenance  []string
+		pathEvidenceIDs       []string
+		packetFlowEvidenceIDs []string
+	}
+	groups := make(map[string]*divergenceGroup)
+	for _, path := range paths {
+		pathValue, pathExplicit := pathConfirmation(path.value)
+		if !pathExplicit {
+			continue
+		}
+		for _, flow := range flows {
+			if !pathFlowKeysMatch(path.value, flow.value) {
+				continue
+			}
+			flowValue, flowExplicit := packetFlowConfirmation(flow.value, path.value.Protocol)
+			if !flowExplicit || pathValue == flowValue {
+				continue
+			}
+			key := pathObservationKey(path.value)
+			group := groups[key]
+			if group == nil {
+				group = &divergenceGroup{}
+				groups[key] = group
+			}
+			group.pathValues = appendUnique(group.pathValues, pathValue)
+			group.packetFlowValues = appendUnique(group.packetFlowValues, flowValue)
+			group.pathProvenance = appendUnique(group.pathProvenance, observationProbeProvenance(path.provenance))
+			group.packetFlowProvenance = appendUnique(group.packetFlowProvenance, observationProbeProvenance(flow.provenance))
+			group.pathEvidenceIDs = appendUnique(group.pathEvidenceIDs, path.evidenceID)
+			group.packetFlowEvidenceIDs = appendUnique(group.packetFlowEvidenceIDs, flow.evidenceID)
+		}
+	}
+
+	result := make([]model.ObservationDivergence, 0, len(groups))
+	for _, key := range sortedKeys(groups) {
+		group := groups[key]
+		result = append(result, model.ObservationDivergence{
+			Field:                 "destination_confirmation[" + key + "]",
+			PathValues:            group.pathValues,
+			PacketFlowValues:      group.packetFlowValues,
+			PathProvenance:        group.pathProvenance,
+			PacketFlowProvenance:  group.packetFlowProvenance,
+			PathEvidenceIDs:       group.pathEvidenceIDs,
+			PacketFlowEvidenceIDs: group.packetFlowEvidenceIDs,
+		})
+	}
+	return result
+}
+
+func pathObservationKey(observation model.PathObservation) string {
+	return strings.Join([]string{normalizeAddress(observation.Destination), strconv.Itoa(int(observation.DestinationPort)), string(observation.Protocol)}, ":")
+}
+
+func packetFlowKey(flow model.PacketFlowEvidence) string {
+	destination := flow.Target.RequestedIdentity
+	if flow.Target.SelectedEndpoint != nil {
+		destination = flow.Target.SelectedEndpoint.Address
+	} else if flow.Target.LiteralIP != "" {
+		destination = flow.Target.LiteralIP
+	}
+	return strings.Join([]string{normalizeAddress(destination), strconv.Itoa(int(flow.Target.Port)), string(flowProtocol(flow))}, ":")
+}
+
+func pathFlowKeysMatch(path model.PathObservation, flow model.PacketFlowEvidence) bool {
+	if path.DestinationPort != flow.Target.Port || path.Protocol != flowProtocol(flow) {
+		return false
+	}
+	if normalizeAddress(path.Destination) == normalizeAddress(flow.Target.LiteralIP) || normalizeAddress(path.Destination) == normalizeAddress(flow.Target.RequestedIdentity) {
+		return true
+	}
+	return flow.Target.MatchesAddress(path.Destination)
+}
+
+func flowProtocol(flow model.PacketFlowEvidence) model.PathProtocol {
+	var protocol model.PathProtocol
+	for _, observation := range flow.Observations {
+		var candidate model.PathProtocol
+		switch observation.Protocol {
+		case model.PacketProtocolTCP:
+			candidate = model.PathProtocolTCP
+		case model.PacketProtocolICMP:
+			candidate = model.PathProtocolICMP
+		}
+		if candidate == "" {
+			continue
+		}
+		if protocol == "" {
+			protocol = candidate
+		} else if protocol != candidate {
+			return ""
+		}
+	}
+	if protocol != "" {
+		return protocol
+	}
+	switch flow.Outcome {
+	case model.PacketFlowOutcomeTCPHandshakeConfirmed, model.PacketFlowOutcomeTCPSYNACK, model.PacketFlowOutcomeTCPRST:
+		return model.PathProtocolTCP
+	case model.PacketFlowOutcomeICMPEchoReply, model.PacketFlowOutcomeICMPTimeExceeded, model.PacketFlowOutcomeICMPUnreachable:
+		return model.PathProtocolICMP
+	default:
+		return ""
+	}
+}
+
+func pathConfirmation(observation model.PathObservation) (string, bool) {
+	if observation.Status != model.PathObservationStatusObserved {
+		return "", false
+	}
+	if observation.DestinationReached || observation.DestinationTCPConnected {
+		return "confirmed", true
+	}
+	return "not_confirmed", true
+}
+
+func packetFlowConfirmation(flow model.PacketFlowEvidence, protocol model.PathProtocol) (string, bool) {
+	if flowProtocol(flow) != protocol || flow.CaptureStatus != model.PacketCaptureStatusAvailable {
+		return "", false
+	}
+	switch flow.Outcome {
+	case model.PacketFlowOutcomeTCPHandshakeConfirmed, model.PacketFlowOutcomeTCPSYNACK, model.PacketFlowOutcomeTCPRST, model.PacketFlowOutcomeICMPEchoReply:
+		return "confirmed", true
+	case model.PacketFlowOutcomeICMPTimeExceeded, model.PacketFlowOutcomeICMPUnreachable, model.PacketFlowOutcomeNoMatchingResponse:
+		return "not_confirmed", true
+	default:
+		return "", false
+	}
+}
+
+func observationProbeProvenance(provenance model.ObservationProvenance) string {
+	if provenance.ProbeName != "" {
+		return "probe:" + provenance.ProbeName
+	}
+	return "source:" + provenance.Source
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func sortedKeys[T any](values map[string]T) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func detectSourceConflicts(observation *model.EndpointObservation, selected, tested []sourceValue) {
