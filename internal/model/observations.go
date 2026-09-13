@@ -83,6 +83,9 @@ type Observations struct {
 	Endpoint             EndpointObservation       `json:"endpoint"`
 	NameResolution       NameResolutionObservation `json:"name_resolution"`
 	NetworkContext       NetworkContext            `json:"network_context"`
+	Transport            TransportObservation      `json:"transport"`
+	Security             SecurityObservation       `json:"security"`
+	Application          ApplicationObservation    `json:"application"`
 	Paths                []PathObservation         `json:"paths,omitempty"`
 	PacketFlows          []PacketFlowEvidence      `json:"packet_flows,omitempty"`
 	PathProvenance       []ObservationProvenance   `json:"path_provenance,omitempty"`
@@ -131,6 +134,9 @@ func NormalizeObservations(observations Observations) Observations {
 		Endpoint:             endpoint,
 		NameResolution:       name,
 		NetworkContext:       network,
+		Transport:            NormalizeTransportObservation(observations.Transport),
+		Security:             NormalizeSecurityObservation(observations.Security),
+		Application:          NormalizeApplicationObservation(observations.Application),
 		Paths:                paths,
 		PacketFlows:          packetFlows,
 		PathProvenance:       pathProvenance,
