@@ -36,6 +36,18 @@
   const findings = document.querySelector("#findings");
   const paths = document.querySelector("#paths");
   const pathEmpty = document.querySelector("#path-empty");
+  const pathGraphView = document.querySelector("#path-graph-view");
+  const pathTableView = document.querySelector("#path-table-view");
+  const pathGraphViewport = document.querySelector("#path-graph-viewport");
+  const pathGraphLoading = document.querySelector("#path-graph-loading");
+  const pathGraphEmpty = document.querySelector("#path-graph-empty");
+  const pathGraphUnsupported = document.querySelector("#path-graph-unsupported");
+  const pathGraphReserved = document.querySelector("#path-graph-reserved");
+  const pathGraphDescription = document.querySelector("#path-graph-description");
+  const pathGraphCount = document.querySelector("#path-graph-count");
+  const pathViewStatus = document.querySelector("#path-view-status");
+  const pathViewTabs = document.querySelectorAll(".path-view-tab");
+  const pathViewControls = document.querySelectorAll("[data-path-view]");
   const comparisons = document.querySelector("#comparisons");
   const evidence = document.querySelector("#evidence");
   const evidenceHeading = document.querySelector("#evidence-heading");
@@ -45,6 +57,7 @@
   let currentView = null;
   let activeSessionID = "";
   let eventSource = null;
+  let activePathView = "graph";
   const progressItems = new Map();
   let composerState = composer.createState({ service: serviceInput.value });
 
@@ -67,7 +80,14 @@
   targetInput.addEventListener("input", () => {
     transitionComposer({ type: composer.EVENT.TARGET_CHANGED, value: targetInput.value });
   });
+
+  for (const control of pathViewControls) {
+    control.addEventListener("click", () => selectPathView(control.dataset.pathView));
+  }
   renderComposerState();
+  setPathGraphState("loading");
+  const narrowScreen = typeof globalThis.matchMedia === "function" && globalThis.matchMedia("(max-width: 720px)").matches;
+  selectPathView(narrowScreen ? "table" : "graph");
 
   function text(value) {
     return value === undefined || value === null ? "" : String(value);
@@ -95,6 +115,57 @@
   function toneClass(base, tone) {
     const allowed = ["positive", "negative", "warning", "neutral"];
     return `${base} ${allowed.includes(tone) ? tone : "neutral"}`;
+  }
+
+  function selectPathView(viewName) {
+    const selectedView = viewName === "table" ? "table" : "graph";
+    activePathView = selectedView;
+    for (const tab of pathViewTabs) {
+      const selected = tab.dataset.pathView === selectedView;
+      tab.classList.toggle("is-active", selected);
+      tab.setAttribute("aria-selected", selected ? "true" : "false");
+      tab.tabIndex = selected ? 0 : -1;
+    }
+    pathGraphView.hidden = selectedView !== "graph";
+    pathTableView.hidden = selectedView !== "table";
+    pathViewStatus.textContent = selectedView === "graph" ? "Graph layout shell" : "Canonical table";
+  }
+
+  function setPathGraphState(state) {
+    const states = [pathGraphLoading, pathGraphEmpty, pathGraphUnsupported];
+    for (const stateElement of states) {
+      stateElement.hidden = stateElement.id !== `path-graph-${state}`;
+    }
+    pathGraphReserved.hidden = state !== "reserved";
+    pathGraphViewport.dataset.state = state;
+  }
+
+  function renderPathGraph(view) {
+    if (!view) {
+      pathGraphCount.textContent = "Awaiting report";
+      pathGraphDescription.textContent = "A horizontal layout is reserved for canonical path data.";
+      setPathGraphState("loading");
+      return;
+    }
+
+    const pathViews = Array.isArray(view.paths) ? view.paths : [];
+    const pathCount = pathViews.length;
+    pathGraphCount.textContent = `${pathCount} observed path${pathCount === 1 ? "" : "s"}`;
+    if (!pathCount) {
+      pathGraphDescription.textContent = "No responder/path visibility was retained for this report.";
+      setPathGraphState("empty");
+      return;
+    }
+
+    const onlyUnsupported = pathViews.every((path) => path && path.observation_status === "unsupported");
+    if (onlyUnsupported) {
+      pathGraphDescription.textContent = "The report retained the supported Table projection for this path lane.";
+      setPathGraphState("unsupported");
+      return;
+    }
+
+    pathGraphDescription.textContent = "Canonical graph data will populate ordered responders and unobservable ranges here.";
+    setPathGraphState("reserved");
   }
 
   function badge(label, tone) {
@@ -1052,6 +1123,7 @@
       findings.appendChild(element("div", "empty-state", "No canonical findings. This does not mean every protocol is observable."));
     }
 
+    renderPathGraph(view);
     paths.replaceChildren();
     const pathViews = view.paths || [];
     pathEmpty.hidden = pathViews.length !== 0;
@@ -1182,6 +1254,9 @@
     closeEvents();
     activeSessionID = "";
     reportSection.hidden = true;
+    pathGraphCount.textContent = "Awaiting report";
+    pathGraphDescription.textContent = "A horizontal layout is reserved for canonical path data.";
+    setPathGraphState("loading");
     button.disabled = true;
     button.textContent = "Starting…";
     cancelButton.hidden = true;

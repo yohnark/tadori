@@ -34,6 +34,21 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	if !strings.Contains(page, "Raw evidence") || !strings.Contains(page, "Canonical JSON") {
 		t.Errorf("UI page is missing required report sections")
 	}
+	for _, fragment := range []string{
+		`id="observed-path-panel"`,
+		`id="path-graph-tab"`,
+		`id="path-table-tab"`,
+		`id="path-graph-viewport"`,
+		`id="path-graph-empty"`,
+		`id="path-graph-loading"`,
+		`id="path-graph-unsupported"`,
+		`Node selection → Evidence inspector`,
+		`not physical topology`,
+	} {
+		if !strings.Contains(page, fragment) {
+			t.Errorf("UI page is missing Observed Path workbench fragment %q", fragment)
+		}
+	}
 
 	style := getBody(t, client, server.URL+"/style.css")
 	if !strings.Contains(style, ".target-row") {
@@ -45,6 +60,11 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	}
 	if strings.Contains(script, "innerHTML") {
 		t.Errorf("app.js must not render evidence with innerHTML")
+	}
+	for _, fragment := range []string{"selectPathView", "renderPathGraph", "setPathGraphState", "data-path-view"} {
+		if !strings.Contains(script, fragment) {
+			t.Errorf("app.js is missing Observed Path projection behavior %q", fragment)
+		}
 	}
 	composer := getBody(t, client, server.URL+"/composer.js")
 	if !strings.Contains(composer, "TadoriTargetComposer") || !strings.Contains(composer, "PROVENANCE") {
