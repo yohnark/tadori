@@ -65,13 +65,17 @@ jobs:
           ./internal/web
 
   frontend-syntax:
-    name: Frontend / app.js syntax
+    name: Frontend / JavaScript validation
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
       - name: Validate frontend JavaScript syntax
-        run: node --check internal/web/static/app.js
+        run: |
+          node --check internal/web/static/app.js
+          node --check internal/web/static/composer.js
+      - name: Run deterministic target composer tests
+        run: node --test internal/web/static/composer.test.js
 
   windows-test:
     name: Windows / Go tests
