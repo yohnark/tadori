@@ -217,19 +217,76 @@ func (intent *TargetIntent) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// EndpointFamily identifies the address family represented by an endpoint
+// candidate. The DNS wire names are used deliberately because they are also
+// the names emitted by the DNS evidence contract.
+type EndpointFamily string
+
+const (
+	EndpointFamilyIPv4 EndpointFamily = "A"
+	EndpointFamilyIPv6 EndpointFamily = "AAAA"
+)
+
+// EndpointSelectionReason explains how Tadori arrived at an endpoint. None
+// of these values claims that the operating system or an application made the
+// same choice; the diagnostic runner owns only its own probe selection.
+type EndpointSelectionReason string
+
+const (
+	EndpointSelectionLiteral         EndpointSelectionReason = "literal_ip"
+	EndpointSelectionDeterministic   EndpointSelectionReason = "deterministic_order"
+	EndpointSelectionBoundedFallback EndpointSelectionReason = "bounded_fallback"
+	EndpointSelectionTransport       EndpointSelectionReason = "transport_observed"
+)
+
+// MaxEndpointCandidates is the upper bound used by the diagnostic transport
+// lane when comparing DNS answers. The complete answer set remains available
+// in ResolvedCandidates; this limit applies only to active probe attempts.
+const MaxEndpointCandidates = 4
+
+// EndpointCandidate is one address returned by name resolution. Order is the
+// stable position in the combined A-then-AAAA answer set and is not an OS
+// connection-order claim.
+type EndpointCandidate struct {
+	Address string         `json:"address"`
+	Family  EndpointFamily `json:"family"`
+	Order   int            `json:"order"`
+}
+
+// EndpointAttempt records one bounded transport attempt. It is comparative
+// evidence: a failed candidate does not establish that every candidate for
+// the requested identity failed.
+type EndpointAttempt struct {
+	Candidate         EndpointCandidate `json:"candidate"`
+	RequestedEndpoint string            `json:"requested_endpoint"`
+	RemoteEndpoint    string            `json:"remote_endpoint,omitempty"`
+	Status            ProbeStatus       `json:"status"`
+	FailureReason     FailureReason     `json:"failure_reason"`
+	Error             string            `json:"error,omitempty"`
+	ErrorType         string            `json:"error_type,omitempty"`
+}
+
 // Endpoint is a concrete network endpoint. It is intentionally distinct from
 // Target.RequestedIdentity: a resolved address is not the requested identity,
-// and a tested endpoint is not merely a name-resolution result.
+// and a tested endpoint is not merely a name-resolution result. Selection
+// metadata is about Tadori's evidence and never implies OS/application
+// selection.
 type Endpoint struct {
-	Address string `json:"address"`
-	Port    uint16 `json:"port"`
+	Address         string                  `json:"address"`
+	Port            uint16                  `json:"port"`
+	Family          EndpointFamily          `json:"family,omitempty"`
+	SelectionReason EndpointSelectionReason `json:"selection_reason,omitempty"`
+	Provenance      string                  `json:"provenance,omitempty"`
 }
 
 // Target is the canonical normalized service endpoint. OriginalInput is kept
 // for provenance. RequestedIdentity is the hostname or explicitly requested
 // literal; LiteralIP is populated only when the input explicitly supplied an
-// IP literal. ResolvedAddresses, SelectedEndpoint, and TestedEndpoint are
-// separate lifecycle facts and are never used as aliases for identity.
+// IP literal. ResolvedAddresses is retained as a compact compatibility view;
+// ResolvedCandidates is the canonical family-preserving answer set.
+// SelectedEndpoint is Tadori's probe candidate, not an assertion about the
+// effective OS/application endpoint. TestedEndpoint is the concrete endpoint
+// observed by transport evidence. CandidateAttempts retain bounded failures.
 type Target struct {
 	OriginalInput       string              `json:"original_input"`
 	RequestedIdentity   string              `json:"requested_identity"`
@@ -240,6 +297,9 @@ type Target struct {
 	Port                uint16              `json:"port"`
 	Resource            string              `json:"resource,omitempty"`
 	ResolvedAddresses   []string            `json:"resolved_addresses,omitempty"`
+	ResolvedCandidates  []EndpointCandidate `json:"resolved_candidates,omitempty"`
+	ProbeCandidates     []EndpointCandidate `json:"probe_candidates,omitempty"`
+	CandidateAttempts   []EndpointAttempt   `json:"candidate_attempts,omitempty"`
 	SelectedEndpoint    *Endpoint           `json:"selected_endpoint,omitempty"`
 	TestedEndpoint      *Endpoint           `json:"tested_endpoint,omitempty"`
 	NetworkContext      *NetworkContext     `json:"network_context,omitempty"`
@@ -581,6 +641,26 @@ func NormalizeTarget(target Target) Target {
 	if target.ResolvedAddresses != nil {
 		target.ResolvedAddresses = append([]string(nil), target.ResolvedAddresses...)
 	}
+	if target.ResolvedCandidates != nil {
+		target.ResolvedCandidates = normalizeEndpointCandidates(target.ResolvedCandidates)
+	}
+	if target.ProbeCandidates != nil {
+		target.ProbeCandidates = normalizeEndpointCandidates(target.ProbeCandidates)
+	}
+	if target.CandidateAttempts != nil {
+		target.CandidateAttempts = append([]EndpointAttempt(nil), target.CandidateAttempts...)
+		for index := range target.CandidateAttempts {
+			target.CandidateAttempts[index].Candidate = normalizeEndpointCandidate(target.CandidateAttempts[index].Candidate, target.CandidateAttempts[index].Candidate.Order)
+		}
+	}
+	if target.SelectedEndpoint != nil {
+		endpoint := *target.SelectedEndpoint
+		target.SelectedEndpoint = &endpoint
+	}
+	if target.TestedEndpoint != nil {
+		endpoint := *target.TestedEndpoint
+		target.TestedEndpoint = &endpoint
+	}
 	if target.NetworkContext != nil {
 		context := *target.NetworkContext
 		context.CompetingRoutes = append([]RouteCandidate(nil), target.NetworkContext.CompetingRoutes...)
@@ -594,6 +674,128 @@ func NormalizeTarget(target Target) Target {
 		target.NetworkContext = &context
 	}
 	return target
+}
+
+// EndpointCandidatesFromAnswers combines resolver answers in a stable
+// family-preserving order. Resolver order within each family is evidence and
+// is retained; the A-then-AAAA family order is Tadori's deterministic input
+// order, not a claim about platform connection behavior.
+func EndpointCandidatesFromAnswers(a, aaaa []string) []EndpointCandidate {
+	candidates := make([]EndpointCandidate, 0, len(a)+len(aaaa))
+	seen := make(map[string]struct{}, len(a)+len(aaaa))
+	appendFamily := func(values []string, family EndpointFamily) {
+		for _, raw := range values {
+			address, err := netip.ParseAddr(strings.Trim(strings.TrimSpace(raw), "[]"))
+			if err != nil {
+				continue
+			}
+			address = NormalizeAddr(address)
+			value := address.String()
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			candidates = append(candidates, EndpointCandidate{Address: value, Family: family, Order: len(candidates) + 1})
+		}
+	}
+	appendFamily(a, EndpointFamilyIPv4)
+	appendFamily(aaaa, EndpointFamilyIPv6)
+	return candidates
+}
+
+// LimitEndpointCandidates returns a copy of candidates capped at limit. A
+// non-positive limit selects MaxEndpointCandidates. Candidate order is
+// normalized so callers cannot accidentally make the bound nondeterministic.
+func LimitEndpointCandidates(candidates []EndpointCandidate, limit int) []EndpointCandidate {
+	if limit <= 0 {
+		limit = MaxEndpointCandidates
+	}
+	result := normalizeEndpointCandidates(candidates)
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return append([]EndpointCandidate(nil), result...)
+}
+
+// ProbeEndpointCandidates returns the bounded candidate list for one target.
+// Literal targets are always represented by exactly one deterministic
+// candidate, even when a caller constructed the Target without resolution
+// fields.
+func (target Target) ProbeEndpointCandidates() []EndpointCandidate {
+	target = NormalizeTarget(target)
+	if target.LiteralIP != "" {
+		address, err := netip.ParseAddr(target.LiteralIP)
+		if err == nil {
+			family := EndpointFamilyIPv6
+			if address.Is4() {
+				family = EndpointFamilyIPv4
+			}
+			return []EndpointCandidate{{Address: NormalizeAddr(address).String(), Family: family, Order: 1}}
+		}
+	}
+	if len(target.ProbeCandidates) != 0 {
+		return LimitEndpointCandidates(target.ProbeCandidates, MaxEndpointCandidates)
+	}
+	if len(target.ResolvedCandidates) == 0 && len(target.ResolvedAddresses) != 0 {
+		var a, aaaa []string
+		for _, address := range target.ResolvedAddresses {
+			parsed, err := netip.ParseAddr(strings.Trim(strings.TrimSpace(address), "[]"))
+			if err != nil {
+				continue
+			}
+			if parsed.Is4() {
+				a = append(a, address)
+			} else {
+				aaaa = append(aaaa, address)
+			}
+		}
+		return LimitEndpointCandidates(EndpointCandidatesFromAnswers(a, aaaa), MaxEndpointCandidates)
+	}
+	if target.SelectedEndpoint != nil && target.SelectedEndpoint.Address != "" {
+		candidate := EndpointCandidate{
+			Address: target.SelectedEndpoint.Address,
+			Family:  target.SelectedEndpoint.Family,
+			Order:   1,
+		}
+		return []EndpointCandidate{normalizeEndpointCandidate(candidate, 1)}
+	}
+	return LimitEndpointCandidates(target.ResolvedCandidates, MaxEndpointCandidates)
+}
+
+func normalizeEndpointCandidates(candidates []EndpointCandidate) []EndpointCandidate {
+	result := make([]EndpointCandidate, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		candidate = normalizeEndpointCandidate(candidate, len(result)+1)
+		if candidate.Address == "" {
+			continue
+		}
+		if _, exists := seen[candidate.Address]; exists {
+			continue
+		}
+		seen[candidate.Address] = struct{}{}
+		candidate.Order = len(result) + 1
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func normalizeEndpointCandidate(candidate EndpointCandidate, fallbackOrder int) EndpointCandidate {
+	candidate.Address = strings.Trim(strings.TrimSpace(candidate.Address), "[]")
+	if address, err := netip.ParseAddr(candidate.Address); err == nil {
+		address = NormalizeAddr(address)
+		candidate.Address = address.String()
+		if candidate.Family == "" {
+			candidate.Family = EndpointFamilyIPv6
+			if address.Is4() {
+				candidate.Family = EndpointFamilyIPv4
+			}
+		}
+	}
+	if candidate.Order <= 0 {
+		candidate.Order = fallbackOrder
+	}
+	return candidate
 }
 
 // HTTPURL builds the only URL needed by the HTTP-family probes from the

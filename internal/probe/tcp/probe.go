@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -53,16 +55,18 @@ func (f DialContextFunc) DialContext(ctx context.Context, network, address strin
 // Config controls a Probe. Timeout is normalized to DefaultTimeout when it is
 // zero or negative. Dialer defaults to net.Dialer when nil.
 type Config struct {
-	Timeout time.Duration
-	Dialer  ContextDialer
+	Timeout       time.Duration
+	Dialer        ContextDialer
+	MaxCandidates int
 }
 
 // Probe performs a single TCP connect. The exported fields allow a caller to
 // configure a probe directly; New and NewWithConfig are provided for the
 // common cases.
 type Probe struct {
-	Timeout time.Duration
-	Dialer  ContextDialer
+	Timeout       time.Duration
+	Dialer        ContextDialer
+	MaxCandidates int
 }
 
 var _ probecontract.Probe = Probe{}
@@ -86,8 +90,9 @@ func NewProbe(timeout ...time.Duration) *Probe {
 // NewWithConfig creates a TCP probe using config.
 func NewWithConfig(config Config) *Probe {
 	return &Probe{
-		Timeout: boundedTimeout(config.Timeout),
-		Dialer:  config.Dialer,
+		Timeout:       boundedTimeout(config.Timeout),
+		Dialer:        config.Dialer,
+		MaxCandidates: boundedCandidateLimit(config.MaxCandidates),
 	}
 }
 
@@ -111,7 +116,7 @@ func (p Probe) Run(ctx context.Context, execution probecontract.ExecutionContext
 	}
 
 	start := time.Now()
-	target := execution.Target
+	target := model.NormalizeTarget(execution.Target)
 	address, addressErr := targetAddress(target)
 	if addressErr != nil {
 		completed := time.Now()
@@ -145,39 +150,109 @@ func (p Probe) Run(ctx context.Context, execution probecontract.ExecutionContext
 		dialer = &net.Dialer{}
 	}
 
-	dialContext, cancel := context.WithTimeout(ctx, timeout)
-	conn, err := dialer.DialContext(dialContext, "tcp", address)
-	dialContextErr := dialContext.Err()
-	cancel()
-	completed := time.Now()
+	candidates := target.ProbeEndpointCandidates()
+	if len(candidates) == 0 {
+		// If DNS evidence is unavailable, retain the normal resolver behavior as
+		// one opaque candidate. There is no family claim in that case.
+		candidates = []model.EndpointCandidate{{Address: target.RequestedIdentity, Order: 1}}
+	}
+	if len(candidates) > boundedCandidateLimit(p.MaxCandidates) {
+		candidates = candidates[:boundedCandidateLimit(p.MaxCandidates)]
+	}
+	if candidates[0].Address == "" {
+		completed := time.Now()
+		observation := tcpObservation{RequestedEndpoint: address, Error: "selected endpoint address is empty", ErrorType: "*errors.errorString"}
+		return p.result(execution, start, completed, model.ProbeStatusError, FailureReasonTCPInvalidAddress, model.FaultDomainLocal, observation)
+	}
 
-	if err == nil {
-		observation := tcpObservation{RequestedEndpoint: address}
+	// One overall deadline bounds the comparison. Each candidate receives an
+	// equal deterministic slice so a hanging first address cannot consume the
+	// entire budget and prevent later candidates from being tested.
+	runContext, runCancel := context.WithTimeout(ctx, timeout)
+	defer runCancel()
+	attemptBudget := timeout / time.Duration(len(candidates))
+	if attemptBudget <= 0 {
+		attemptBudget = time.Nanosecond
+	}
+	attempts := make([]model.EndpointAttempt, 0, len(candidates))
+	var firstReason model.FailureReason
+	var firstStatus model.ProbeStatus
+	var firstError error
+	var firstObservation tcpObservation
+
+	for index, candidate := range candidates {
+		candidate = normalizeCandidate(candidate, index+1)
+		requested := net.JoinHostPort(candidate.Address, strconv.Itoa(int(target.Port)))
+		if index == 0 {
+			target.SelectedEndpoint = endpointForCandidate(candidate, target.Port, model.EndpointSelectionDeterministic)
+		} else if target.SelectedEndpoint == nil {
+			target.SelectedEndpoint = endpointForCandidate(candidates[0], target.Port, model.EndpointSelectionDeterministic)
+		}
+
+		attemptContext, attemptCancel := context.WithTimeout(runContext, attemptBudget)
+		conn, err := dialer.DialContext(attemptContext, "tcp", requested)
+		dialContextErr := attemptContext.Err()
+		attemptCancel()
+		if err == nil && conn == nil {
+			err = errors.New("dialer returned a nil connection without an error")
+		}
+
+		observation := tcpObservation{RequestedEndpoint: requested}
 		if conn != nil {
 			observation.LocalEndpoint = endpointString(conn.LocalAddr())
 			observation.RemoteEndpoint = endpointString(conn.RemoteAddr())
 			observation.ResolvedEndpoint = observation.RemoteEndpoint
 			_ = conn.Close()
-		} else {
-			// A nil connection with nil error violates the net dialer contract;
-			// retain it as an execution error rather than reporting false success.
-			err = errors.New("dialer returned a nil connection without an error")
 		}
 		if err == nil {
+			concrete := endpointFromRemote(observation.RemoteEndpoint, candidate, target.Port)
+			target.TestedEndpoint = &concrete
+			attempts = append(attempts, model.EndpointAttempt{
+				Candidate: candidate, RequestedEndpoint: requested, RemoteEndpoint: observation.RemoteEndpoint,
+				Status: model.ProbeStatusPassed, FailureReason: model.FailureReasonNone,
+			})
+			observation.CandidateAttempts = attempts
+			observation.SelectedEndpoint = requested
+			observation.TestedEndpoint = concreteString(concrete)
+			completed := time.Now()
+			target.CandidateAttempts = attempts
+			execution.Target = target
 			return p.result(execution, start, completed, model.ProbeStatusPassed, model.FailureReasonNone, model.FaultDomainTransport, observation)
+		}
+
+		// A custom dialer may return a context error without updating the parent
+		// context. Check both contexts so cancellation remains observable.
+		reason, status := normalizeError(err, ctx.Err(), dialContextErr)
+		attempt := model.EndpointAttempt{
+			Candidate: candidate, RequestedEndpoint: requested, Status: status,
+			FailureReason: reason, Error: err.Error(), ErrorType: fmt.Sprintf("%T", err),
+		}
+		addErrorDetails(&observation, err)
+		attempt.RemoteEndpoint = observation.RemoteEndpoint
+		attempts = append(attempts, attempt)
+		if index == 0 {
+			firstReason, firstStatus, firstError, firstObservation = reason, status, err, observation
+		}
+		if ctx.Err() != nil {
+			break
 		}
 	}
 
-	// A custom dialer may return a context error without updating the parent
-	// context. Check both contexts so cancellation remains observable.
-	reason, status := normalizeError(err, ctx.Err(), dialContextErr)
-	observation := tcpObservation{
-		RequestedEndpoint: address,
-		Error:             err.Error(),
-		ErrorType:         fmt.Sprintf("%T", err),
+	if firstError == nil {
+		firstError = errors.New("all endpoint candidates were exhausted")
+		firstReason = model.FailureReasonUnknown
+		firstStatus = model.ProbeStatusFailed
 	}
-	addErrorDetails(&observation, err)
-	return p.result(execution, start, completed, status, reason, faultDomainFor(reason), observation)
+	firstObservation.CandidateAttempts = attempts
+	if target.SelectedEndpoint != nil {
+		firstObservation.SelectedEndpoint = concreteString(*target.SelectedEndpoint)
+	}
+	firstObservation.Error = firstError.Error()
+	firstObservation.ErrorType = fmt.Sprintf("%T", firstError)
+	completed := time.Now()
+	target.CandidateAttempts = attempts
+	execution.Target = target
+	return p.result(execution, start, completed, firstStatus, firstReason, faultDomainFor(firstReason), firstObservation)
 }
 
 // RunTarget is a convenience one-shot operation for callers that do not need
@@ -187,17 +262,20 @@ func RunTarget(ctx context.Context, target model.Target, timeout time.Duration) 
 }
 
 type tcpObservation struct {
-	RequestedEndpoint string `json:"requested_endpoint"`
-	LocalEndpoint     string `json:"local_endpoint,omitempty"`
-	RemoteEndpoint    string `json:"remote_endpoint,omitempty"`
-	ResolvedEndpoint  string `json:"resolved_endpoint,omitempty"`
-	ElapsedNS         int64  `json:"elapsed_ns"`
-	ElapsedMS         int64  `json:"elapsed_ms"`
-	Error             string `json:"error,omitempty"`
-	ErrorType         string `json:"error_type,omitempty"`
-	ErrorCode         int64  `json:"error_code,omitempty"`
-	Operation         string `json:"operation,omitempty"`
-	Network           string `json:"network,omitempty"`
+	RequestedEndpoint string                  `json:"requested_endpoint"`
+	LocalEndpoint     string                  `json:"local_endpoint,omitempty"`
+	RemoteEndpoint    string                  `json:"remote_endpoint,omitempty"`
+	ResolvedEndpoint  string                  `json:"resolved_endpoint,omitempty"`
+	ElapsedNS         int64                   `json:"elapsed_ns"`
+	ElapsedMS         int64                   `json:"elapsed_ms"`
+	Error             string                  `json:"error,omitempty"`
+	ErrorType         string                  `json:"error_type,omitempty"`
+	ErrorCode         int64                   `json:"error_code,omitempty"`
+	Operation         string                  `json:"operation,omitempty"`
+	Network           string                  `json:"network,omitempty"`
+	SelectedEndpoint  string                  `json:"selected_endpoint,omitempty"`
+	TestedEndpoint    string                  `json:"tested_endpoint,omitempty"`
+	CandidateAttempts []model.EndpointAttempt `json:"candidate_attempts,omitempty"`
 }
 
 func (Probe) result(execution probecontract.ExecutionContext, start, completed time.Time, status model.ProbeStatus, reason model.FailureReason, domain model.FaultDomain, observation tcpObservation) model.ProbeResult {
@@ -249,6 +327,73 @@ func targetAddress(target model.Target) (string, error) {
 		return "", fmt.Errorf("TCP target endpoint: %w", err)
 	}
 	return address, nil
+}
+
+func boundedCandidateLimit(limit int) int {
+	if limit <= 0 {
+		return model.MaxEndpointCandidates
+	}
+	if limit > model.MaxEndpointCandidates {
+		return model.MaxEndpointCandidates
+	}
+	return limit
+}
+
+func normalizeCandidate(candidate model.EndpointCandidate, order int) model.EndpointCandidate {
+	candidate.Address = strings.Trim(strings.TrimSpace(candidate.Address), "[]")
+	if address, err := netip.ParseAddr(candidate.Address); err == nil {
+		address = model.NormalizeAddr(address)
+		candidate.Address = address.String()
+		if candidate.Family == "" {
+			candidate.Family = model.EndpointFamilyIPv6
+			if address.Is4() {
+				candidate.Family = model.EndpointFamilyIPv4
+			}
+		}
+	}
+	if candidate.Order <= 0 {
+		candidate.Order = order
+	}
+	return candidate
+}
+
+func endpointForCandidate(candidate model.EndpointCandidate, port uint16, reason model.EndpointSelectionReason) *model.Endpoint {
+	return &model.Endpoint{
+		Address: candidate.Address, Port: port, Family: candidate.Family,
+		SelectionReason: reason,
+		Provenance:      "tadori bounded deterministic transport selection",
+	}
+}
+
+func endpointFromRemote(remote string, candidate model.EndpointCandidate, port uint16) model.Endpoint {
+	host, remotePort, err := net.SplitHostPort(remote)
+	if err != nil {
+		host = strings.Trim(strings.TrimSpace(remote), "[]")
+		remotePort = strconv.Itoa(int(port))
+	}
+	if host == "" {
+		host = candidate.Address
+	}
+	if parsed, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		parsed = model.NormalizeAddr(parsed)
+		host = parsed.String()
+	}
+	parsedPort, err := strconv.ParseUint(remotePort, 10, 16)
+	if err != nil || parsedPort == 0 {
+		parsedPort = uint64(port)
+	}
+	return model.Endpoint{
+		Address: host, Port: uint16(parsedPort), Family: candidate.Family,
+		SelectionReason: model.EndpointSelectionTransport,
+		Provenance:      "transport conn.RemoteAddr observation",
+	}
+}
+
+func concreteString(endpoint model.Endpoint) string {
+	if endpoint.Address == "" {
+		return ""
+	}
+	return net.JoinHostPort(endpoint.Address, strconv.Itoa(int(endpoint.Port)))
 }
 
 func boundedTimeout(timeout time.Duration) time.Duration {

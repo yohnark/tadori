@@ -139,8 +139,9 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 	if concurrency <= 0 {
 		concurrency = DefaultProbeConcurrency
 	}
-	var resolvedAddr netip.Addr
+	selection := &endpointSelectionState{}
 	resolvedReady := make(chan struct{})
+	transportReady := make(chan struct{})
 
 	type job struct {
 		name       string
@@ -152,7 +153,7 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 		{name: "dns", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			defer close(resolvedReady)
 			result := dns.New().Run(runCtx, execution)
-			resolvedAddr = resolvedAddress(result)
+			selection.setCandidates(endpointCandidatesFromDNS(target, result))
 			return result
 		}},
 		{name: "interface_state", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
@@ -161,23 +162,29 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 		{name: "dns_configuration", run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			return interfacecfg.NewDNSProbe().Run(runCtx, execution)
 		}},
+		{name: "tcp", packetType: packet.ProbeTypeTCP, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
+			defer close(transportReady)
+			result := tcp.New(timeout).Run(runCtx, execution)
+			selection.setTested(result.Target.TestedEndpoint)
+			return result
+		}},
 		{name: route.DefaultRouteProbeName, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			p := route.NewDefaultRouteProbe()
-			if targetIP := waitForAddress(runCtx, resolvedReady, &resolvedAddr); targetIP.IsValid() {
+			if targetIP := targetAddressForProbe(execution.Target); targetIP.IsValid() {
 				return p.RunForAddress(runCtx, execution, targetIP)
 			}
 			return p.Run(runCtx, execution)
 		}},
 		{name: route.TargetRouteProbeName, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			p := route.NewTargetRouteProbe()
-			if targetIP := waitForAddress(runCtx, resolvedReady, &resolvedAddr); targetIP.IsValid() {
+			if targetIP := targetAddressForProbe(execution.Target); targetIP.IsValid() {
 				return p.RunForAddress(runCtx, execution, targetIP)
 			}
 			return p.Run(runCtx, execution)
 		}},
 		{name: route.GatewayProbeName, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			p := route.NewGatewayProbe()
-			if targetIP := waitForAddress(runCtx, resolvedReady, &resolvedAddr); targetIP.IsValid() {
+			if targetIP := targetAddressForProbe(execution.Target); targetIP.IsValid() {
 				return p.RunForAddress(runCtx, execution, targetIP)
 			}
 			return p.Run(runCtx, execution)
@@ -187,9 +194,6 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 		}},
 		{name: enterprise.Name, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			return enterprise.New().Run(runCtx, execution)
-		}},
-		{name: "tcp", packetType: packet.ProbeTypeTCP, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
-			return tcp.New(timeout).Run(runCtx, execution)
 		}},
 		{name: pathprobe.PathProbeName, packetType: packet.ProbeTypePath, run: func(runCtx context.Context, execution probe.ExecutionContext) model.ProbeResult {
 			return pathprobe.New(pathprobe.Config{Timeout: timeout}).Run(runCtx, execution)
@@ -271,7 +275,10 @@ func runProbes(ctx context.Context, target model.Target, timeout time.Duration, 
 				probeTarget := target
 				result := runBounded(ctx, timeout, item.job.name, func(runCtx context.Context) model.ProbeResult {
 					if item.job.name != "dns" && item.job.name != "interface_state" && item.job.name != "dns_configuration" {
-						probeTarget = targetWithResolvedAddress(runCtx, resolvedReady, &resolvedAddr, target)
+						probeTarget = targetWithResolvedCandidates(runCtx, resolvedReady, selection, target)
+						if waitsForTransportEndpoint(item.job.name) {
+							probeTarget = targetWithTransportEndpoint(runCtx, transportReady, selection, probeTarget)
+						}
 					}
 					execution := probe.ExecutionContext{Target: probeTarget, SessionID: identity.SessionID, ProbeID: identity.ProbeID, CorrelationID: identity.CorrelationID}
 					if item.job.packetType == "" {
@@ -359,6 +366,172 @@ func notifyProbeCompleted(callback ProbeCompletedFunc, result model.ProbeResult)
 	callback(result)
 }
 
+// endpointSelectionState is the small orchestration hand-off between DNS,
+// transport, and the dependent route/path/application lanes. The mutex makes
+// publication and snapshots race-safe while the channels provide the explicit
+// ordering edges between probe phases.
+type endpointSelectionState struct {
+	mu         sync.RWMutex
+	candidates []model.EndpointCandidate
+	tested     *model.Endpoint
+}
+
+func (s *endpointSelectionState) setCandidates(candidates []model.EndpointCandidate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.candidates = append([]model.EndpointCandidate(nil), candidates...)
+}
+
+func (s *endpointSelectionState) candidatesSnapshot() []model.EndpointCandidate {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]model.EndpointCandidate(nil), s.candidates...)
+}
+
+func (s *endpointSelectionState) setTested(endpoint *model.Endpoint) {
+	if endpoint == nil || endpoint.Address == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	copy := *endpoint
+	s.tested = &copy
+}
+
+func (s *endpointSelectionState) testedSnapshot() *model.Endpoint {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.tested == nil {
+		return nil
+	}
+	copy := *s.tested
+	return &copy
+}
+
+func endpointCandidatesFromDNS(target model.Target, result model.ProbeResult) []model.EndpointCandidate {
+	if target.LiteralIP != "" {
+		return target.ProbeEndpointCandidates()
+	}
+	if result.NameResolution != nil {
+		return model.EndpointCandidatesFromAnswers(result.NameResolution.A, result.NameResolution.AAAA)
+	}
+	for _, evidence := range result.Evidence {
+		if evidence.Kind != model.EvidenceKindDNSResolution {
+			continue
+		}
+		var resolution dns.DNSResolutionEvidence
+		if err := json.Unmarshal(evidence.Raw, &resolution); err == nil {
+			return model.EndpointCandidatesFromAnswers(resolution.A, resolution.AAAA)
+		}
+	}
+	return nil
+}
+
+func endpointForCandidate(candidate model.EndpointCandidate, port uint16, reason model.EndpointSelectionReason) *model.Endpoint {
+	return &model.Endpoint{
+		Address: candidate.Address, Port: port, Family: candidate.Family,
+		SelectionReason: reason,
+		Provenance:      "tadori bounded deterministic candidate selection",
+	}
+}
+
+func targetWithResolvedCandidates(ctx context.Context, ready <-chan struct{}, state *endpointSelectionState, target model.Target) model.Target {
+	target = model.NormalizeTarget(target)
+	if target.LiteralIP != "" {
+		candidates := target.ProbeEndpointCandidates()
+		if len(candidates) > 0 {
+			applyCandidates(&target, candidates)
+		}
+		return target
+	}
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		return target
+	}
+	candidates := state.candidatesSnapshot()
+	if len(candidates) == 0 {
+		candidates = target.ProbeEndpointCandidates()
+	}
+	if len(candidates) > 0 {
+		applyCandidates(&target, candidates)
+	}
+	return target
+}
+
+func targetWithTransportEndpoint(ctx context.Context, ready <-chan struct{}, state *endpointSelectionState, target model.Target) model.Target {
+	select {
+	case <-ready:
+		if tested := state.testedSnapshot(); tested != nil {
+			target.TestedEndpoint = tested
+			selected := *tested
+			target.SelectedEndpoint = &selected
+		}
+	case <-ctx.Done():
+	}
+	return target
+}
+
+func applyCandidates(target *model.Target, candidates []model.EndpointCandidate) {
+	if target == nil || len(candidates) == 0 {
+		return
+	}
+	target.ResolvedCandidates = append([]model.EndpointCandidate(nil), candidates...)
+	target.ProbeCandidates = model.LimitEndpointCandidates(candidates, model.MaxEndpointCandidates)
+	if len(target.ProbeCandidates) == 0 {
+		return
+	}
+	target.ResolvedAddresses = make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		target.ResolvedAddresses = append(target.ResolvedAddresses, candidate.Address)
+	}
+	selected := endpointForCandidate(target.ProbeCandidates[0], target.Port, model.EndpointSelectionDeterministic)
+	target.SelectedEndpoint = selected
+}
+
+func waitsForTransportEndpoint(name string) bool {
+	switch name {
+	case "path", "tls", "http", route.DefaultRouteProbeName, route.TargetRouteProbeName, route.GatewayProbeName:
+		return true
+	default:
+		return false
+	}
+}
+
+func targetAddressForProbe(target model.Target) netip.Addr {
+	target = model.NormalizeTarget(target)
+	values := make([]string, 0, 4)
+	if target.SelectedEndpoint != nil {
+		values = append(values, target.SelectedEndpoint.Address)
+	}
+	if target.TestedEndpoint != nil {
+		values = append(values, target.TestedEndpoint.Address)
+	}
+	for _, candidate := range target.ProbeCandidates {
+		values = append(values, candidate.Address)
+	}
+	values = append(values, target.LiteralIP, target.RequestedIdentity)
+	for _, value := range values {
+		if address, err := netip.ParseAddr(strings.Trim(strings.TrimSpace(value), "[]")); err == nil {
+			return model.NormalizeAddr(address)
+		}
+	}
+	return netip.Addr{}
+}
+
+func applyLegacyResolvedAddress(target *model.Target, address netip.Addr) {
+	if target == nil || !address.IsValid() {
+		return
+	}
+	candidate := model.EndpointCandidate{Address: model.NormalizeAddr(address).String(), Order: 1}
+	if address.Is4() {
+		candidate.Family = model.EndpointFamilyIPv4
+	} else {
+		candidate.Family = model.EndpointFamilyIPv6
+	}
+	applyCandidates(target, []model.EndpointCandidate{candidate})
+}
+
 // waitForAddress blocks until the DNS probe publishes its resolved address by
 // closing ready, or until runCtx's own deadline expires (including when the
 // DNS job never publishes because it panicked or was itself canceled). addr
@@ -376,13 +549,15 @@ func waitForAddress(runCtx context.Context, ready <-chan struct{}, addr *netip.A
 func targetWithResolvedAddress(ctx context.Context, ready <-chan struct{}, addr *netip.Addr, target model.Target) model.Target {
 	if target.LiteralIP != "" {
 		if target.SelectedEndpoint == nil {
-			target.SelectedEndpoint = &model.Endpoint{Address: target.LiteralIP, Port: target.Port}
+			if parsed, err := netip.ParseAddr(target.LiteralIP); err == nil {
+				applyLegacyResolvedAddress(&target, parsed)
+			}
 		}
 		return target
 	}
 	selected := waitForAddress(ctx, ready, addr)
 	if selected.IsValid() {
-		target.SelectedEndpoint = &model.Endpoint{Address: model.NormalizeAddr(selected).String(), Port: target.Port}
+		applyLegacyResolvedAddress(&target, selected)
 	}
 	return target
 }
@@ -443,21 +618,7 @@ func resolvedAddress(result model.ProbeResult) netip.Addr {
 
 func enrichTargetEndpoints(target model.Target, results []model.ProbeResult) model.Target {
 	target = model.NormalizeTarget(target)
-	addresses := make([]string, 0, len(target.ResolvedAddresses)+2)
-	addAddress := func(raw string) {
-		if raw == "" {
-			return
-		}
-		if address, err := netip.ParseAddr(strings.Trim(raw, "[]")); err == nil {
-			raw = model.NormalizeAddr(address).String()
-		}
-		for _, existing := range addresses {
-			if existing == raw {
-				return
-			}
-		}
-		addresses = append(addresses, raw)
-	}
+	var a, aaaa []string
 	for _, result := range results {
 		for _, evidence := range result.Evidence {
 			if evidence.Kind != model.EvidenceKindDNSResolution {
@@ -467,34 +628,60 @@ func enrichTargetEndpoints(target model.Target, results []model.ProbeResult) mod
 			if err := json.Unmarshal(evidence.Raw, &value); err != nil {
 				continue
 			}
-			for _, address := range append(append([]string{}, value.A...), value.AAAA...) {
-				addAddress(address)
-			}
+			a = append(a, value.A...)
+			aaaa = append(aaaa, value.AAAA...)
 		}
 	}
-	if len(addresses) > 0 {
-		target.ResolvedAddresses = addresses
-		target.SelectedEndpoint = &model.Endpoint{Address: addresses[0], Port: target.Port}
-	} else if target.LiteralIP != "" {
-		target.SelectedEndpoint = &model.Endpoint{Address: target.LiteralIP, Port: target.Port}
+	candidates := model.EndpointCandidatesFromAnswers(a, aaaa)
+	if len(candidates) == 0 {
+		candidates = append([]model.EndpointCandidate(nil), target.ResolvedCandidates...)
 	}
+	if len(candidates) > 0 {
+		applyCandidates(&target, candidates)
+	} else if target.LiteralIP != "" {
+		if address, err := netip.ParseAddr(target.LiteralIP); err == nil {
+			applyLegacyResolvedAddress(&target, address)
+		}
+	}
+
 	for _, result := range results {
+		if result.Name != "tcp" {
+			continue
+		}
+		if result.Target.CandidateAttempts != nil {
+			target.CandidateAttempts = append([]model.EndpointAttempt(nil), result.Target.CandidateAttempts...)
+		}
+		if result.Target.TestedEndpoint != nil && result.Target.TestedEndpoint.Address != "" {
+			endpoint := *result.Target.TestedEndpoint
+			target.TestedEndpoint = &endpoint
+		}
 		for _, evidence := range result.Evidence {
 			if evidence.Kind != model.EvidenceKindTCPConnection {
 				continue
 			}
-			var value map[string]any
+			var value struct {
+				RemoteEndpoint    string                  `json:"remote_endpoint"`
+				TestedEndpoint    string                  `json:"tested_endpoint"`
+				CandidateAttempts []model.EndpointAttempt `json:"candidate_attempts"`
+			}
 			if err := json.Unmarshal(evidence.Raw, &value); err != nil {
 				continue
 			}
-			for _, key := range []string{"remote_endpoint", "address"} {
-				endpoint, ok := value[key].(string)
-				if !ok || endpoint == "" {
-					continue
-				}
-				if concrete, ok := concreteEndpoint(endpoint, target.Port); ok {
+			if len(value.CandidateAttempts) > 0 && len(target.CandidateAttempts) == 0 {
+				target.CandidateAttempts = append([]model.EndpointAttempt(nil), value.CandidateAttempts...)
+			}
+			if value.TestedEndpoint != "" {
+				if concrete, ok := concreteEndpoint(value.TestedEndpoint, target.Port); ok {
+					concrete.SelectionReason = model.EndpointSelectionTransport
+					concrete.Provenance = "transport conn.RemoteAddr observation"
 					target.TestedEndpoint = &concrete
-					return target
+				}
+			}
+			if target.TestedEndpoint == nil && result.Status == model.ProbeStatusPassed && value.RemoteEndpoint != "" {
+				if concrete, ok := concreteEndpoint(value.RemoteEndpoint, target.Port); ok {
+					concrete.SelectionReason = model.EndpointSelectionTransport
+					concrete.Provenance = "transport conn.RemoteAddr observation"
+					target.TestedEndpoint = &concrete
 				}
 			}
 		}

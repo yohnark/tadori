@@ -387,7 +387,7 @@
       ["Policy", policyText(effective)],
       ["Answers A", listText(resolution.a)],
       ["Answers AAAA", listText(resolution.aaaa)],
-      ["Selected endpoint", resolution.selected_address || "not selected"],
+      ["Resolver representative answer (not OS/application selection)", resolution.selected_address || "not selected"],
       ["Certainty", effective.certainty || "not observable"],
     ];
     const table = element("div", "resolution-table");
