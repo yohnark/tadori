@@ -26,6 +26,23 @@
   const browserCaptureJSON = document.querySelector("#browser-capture-json");
   const browserCaptureFQDNs = document.querySelector("#browser-capture-fqdns");
   const browserCaptureCopy = document.querySelector("#browser-capture-copy");
+  const browserCaptureValidateAll = document.querySelector("#browser-capture-validate-all");
+  const browserCaptureValidateFailed = document.querySelector("#browser-capture-validate-failed");
+  const browserCaptureValidateSelected = document.querySelector("#browser-capture-validate-selected");
+  const browserValidationPanel = document.querySelector("#browser-validation-panel");
+  const browserValidationState = document.querySelector("#browser-validation-state");
+  const browserValidationError = document.querySelector("#browser-validation-error");
+  const browserValidationCancel = document.querySelector("#browser-validation-cancel");
+  const browserValidationJSON = document.querySelector("#browser-validation-json");
+  const browserValidationFailed = document.querySelector("#browser-validation-failed");
+  const browserValidationCopy = document.querySelector("#browser-validation-copy");
+  const browserValidationTotal = document.querySelector("#browser-validation-total");
+  const browserValidationCompleted = document.querySelector("#browser-validation-completed");
+  const browserValidationPassed = document.querySelector("#browser-validation-passed");
+  const browserValidationFailedCount = document.querySelector("#browser-validation-failed-count");
+  const browserValidationPartial = document.querySelector("#browser-validation-partial");
+  const browserValidationResultsBody = document.querySelector("#browser-validation-results-body");
+  const browserValidationEmpty = document.querySelector("#browser-validation-empty");
   const reportSection = document.querySelector("#report");
   const runStateLabel = document.querySelector("#run-state-label");
   const runStateBadge = document.querySelector("#run-state-badge");
@@ -92,6 +109,9 @@
   let eventSource = null;
   let activeCaptureID = "";
   let capturePollTimer = null;
+  let activeValidationID = "";
+  let validationPollTimer = null;
+  const selectedCaptureDestinations = new Set();
   let activePathView = "graph";
   let renderedSessionID = "";
   let currentSessionState = "idle";
@@ -713,6 +733,98 @@
     return "neutral";
   }
 
+  function browserCaptureIsTerminal(state) {
+    return state === "completed" || state === "failed" || state === "cancelled";
+  }
+
+  function browserCaptureSelectionKey(destination) {
+    return `${text(destination.requested_hostname).toLowerCase()}:${text(destination.port)}`;
+  }
+
+  function browserValidationTone(outcome) {
+    if (outcome === "passed") {
+      return "positive";
+    }
+    if (outcome === "failed") {
+      return "negative";
+    }
+    if (outcome === "partial" || outcome === "cancelled") {
+      return "warning";
+    }
+    return "neutral";
+  }
+
+  function observationResult(observation, fallback) {
+    if (!observation) {
+      return fallback;
+    }
+    if (observation.connected) {
+      return "connected";
+    }
+    if (observation.handshake_complete) {
+      return "handshake ok";
+    }
+    if (observation.status_code) {
+      return `HTTP ${observation.status_code}`;
+    }
+    if ((Array.isArray(observation.a) && observation.a.length > 0) || (Array.isArray(observation.aaaa) && observation.aaaa.length > 0) || observation.selected_address) {
+      return "resolved";
+    }
+    return text(observation.connection_outcome || observation.failure_reason || observation.result || observation.protocol_result || observation.applicability || fallback);
+  }
+
+  function renderBrowserValidation(snapshot) {
+    const state = text(snapshot.state || "unknown");
+    browserValidationPanel.hidden = false;
+    browserValidationState.textContent = state;
+    browserValidationState.className = toneClass("badge", state === "completed" ? "positive" : state === "cancelled" || state === "cancelling" ? "warning" : state === "failed" ? "negative" : "neutral");
+    browserValidationCancel.hidden = state !== "starting" && state !== "running" && state !== "cancelling";
+    browserValidationCancel.disabled = state === "cancelling";
+    const summary = snapshot.summary || {};
+    browserValidationTotal.textContent = text(summary.total || 0);
+    browserValidationCompleted.textContent = text(summary.completed || 0);
+    browserValidationPassed.textContent = text(summary.passed || 0);
+    browserValidationFailedCount.textContent = text(summary.failed || 0);
+    browserValidationPartial.textContent = text(summary.partial || 0);
+    browserValidationResultsBody.replaceChildren();
+    const results = Array.isArray(snapshot.results) ? snapshot.results : [];
+    browserValidationEmpty.hidden = results.length !== 0;
+    for (const result of results) {
+      const row = element("tr");
+      const endpoint = `${text(result.requested_hostname || "unknown")}:${text(result.port || "—")} · ${text((result.service && (result.service.label || result.service.id)) || "unsupported")}`;
+      row.appendChild(element("td", "", endpoint));
+      const captureLabel = result.capture_failed ? `${text(result.capture_outcome || "unknown")} · priority` : text(result.capture_outcome || "unknown");
+      row.appendChild(element("td", `validation-${result.capture_failed ? "negative" : "neutral"}`, captureLabel));
+      row.appendChild(element("td", `validation-${browserValidationTone(result.validation_outcome)}`, text(result.validation_outcome || result.state || "not run")));
+      row.appendChild(element("td", "", observationResult(result.dns, "not observed")));
+      row.appendChild(element("td", "", observationResult(result.tcp, "not observed")));
+      const tls = result.tls ? observationResult(result.tls, "not observed") : "not applicable";
+      const application = result.application ? observationResult(result.application, "not observed") : "not applicable";
+      row.appendChild(element("td", "", `${tls} / ${application}`));
+      const boundary = result.failure_boundary || {};
+      const boundaryText = boundary.reason && boundary.reason !== "none" ? `${text(boundary.reason)} · ${text(boundary.fault_domain || boundary.layer || "unknown")}` : "none";
+      row.appendChild(element("td", `validation-${result.validation_outcome === "failed" ? "negative" : "neutral"}`, boundaryText));
+      const reportCell = element("td");
+      if (result.report && activeValidationID) {
+        const link = element("a", "secondary-button", "JSON");
+        link.href = `/api/browser-capture-validations/${encodeURIComponent(activeValidationID)}/endpoints/${encodeURIComponent(result.id)}/report.json`;
+        link.download = "tadori-endpoint-report.json";
+        reportCell.appendChild(link);
+      } else {
+        reportCell.textContent = "—";
+      }
+      row.appendChild(reportCell);
+      browserValidationResultsBody.appendChild(row);
+    }
+    if (activeValidationID) {
+      browserValidationJSON.hidden = false;
+      browserValidationJSON.href = `/api/browser-capture-validations/${encodeURIComponent(activeValidationID)}/report.json`;
+      browserValidationFailed.hidden = false;
+      browserValidationFailed.href = `/api/browser-capture-validations/${encodeURIComponent(activeValidationID)}/failed.txt`;
+      browserValidationCopy.hidden = false;
+    }
+  }
+
   function renderBrowserCapture(snapshot) {
     activeCaptureSnapshot = snapshot;
     const state = text(snapshot.state || "unknown");
@@ -734,6 +846,22 @@
     browserCaptureEmpty.hidden = destinations.length !== 0;
     for (const destination of destinations) {
       const row = element("tr");
+      const selectCell = element("td");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = selectedCaptureDestinations.has(browserCaptureSelectionKey(destination));
+      checkbox.setAttribute("aria-label", `Select ${text(destination.requested_hostname)}:${text(destination.port)}`);
+      checkbox.addEventListener("change", () => {
+        const key = browserCaptureSelectionKey(destination);
+        if (checkbox.checked) {
+          selectedCaptureDestinations.add(key);
+        } else {
+          selectedCaptureDestinations.delete(key);
+        }
+        browserCaptureValidateSelected.disabled = selectedCaptureDestinations.size === 0;
+      });
+      selectCell.appendChild(checkbox);
+      row.appendChild(selectCell);
       row.appendChild(element("td", "", destination.requested_hostname || t("browser.unknown")));
       row.appendChild(element("td", "", destination.port || "—"));
       const outcome = text(destination.outcome || "unknown");
@@ -750,6 +878,11 @@
       browserCaptureFQDNs.href = `/api/browser-captures/${encodeURIComponent(snapshot.id)}/fqdns.txt`;
       browserCaptureCopy.hidden = false;
     }
+    const terminal = browserCaptureIsTerminal(state) && destinations.length > 0;
+    browserCaptureValidateAll.hidden = !terminal;
+    browserCaptureValidateFailed.hidden = !terminal;
+    browserCaptureValidateSelected.hidden = !terminal;
+    browserCaptureValidateSelected.disabled = selectedCaptureDestinations.size === 0;
   }
 
   function formatSeconds(seconds) {
@@ -779,6 +912,70 @@
     } catch (err) {
       showBrowserCaptureError(err instanceof Error ? err.message : t("browser.loadError"));
       capturePollTimer = setTimeout(() => void pollBrowserCapture(), 1500);
+    }
+  }
+
+  function clearBrowserValidationPoll() {
+    if (validationPollTimer !== null) {
+      clearTimeout(validationPollTimer);
+      validationPollTimer = null;
+    }
+  }
+
+  function showBrowserValidationError(message) {
+    browserValidationError.textContent = text(message);
+    browserValidationError.hidden = false;
+  }
+
+  function clearBrowserValidationError() {
+    browserValidationError.textContent = "";
+    browserValidationError.hidden = true;
+  }
+
+  async function pollBrowserValidation() {
+    if (!activeValidationID) {
+      return;
+    }
+    try {
+      const response = await fetch(`/api/browser-capture-validations/${encodeURIComponent(activeValidationID)}`, { cache: "no-store" });
+      const snapshot = await readResponse(response);
+      renderBrowserValidation(snapshot);
+      if (snapshot.state === "starting" || snapshot.state === "running" || snapshot.state === "cancelling") {
+        validationPollTimer = setTimeout(() => void pollBrowserValidation(), 500);
+      } else {
+        clearBrowserValidationPoll();
+      }
+    } catch (err) {
+      showBrowserValidationError(err instanceof Error ? err.message : "could not load validation state");
+      validationPollTimer = setTimeout(() => void pollBrowserValidation(), 1500);
+    }
+  }
+
+  async function startBrowserValidation(selection, selected) {
+    if (!activeCaptureID) {
+      return;
+    }
+    clearBrowserValidationError();
+    clearBrowserValidationPoll();
+    browserCaptureValidateAll.disabled = true;
+    browserCaptureValidateFailed.disabled = true;
+    browserCaptureValidateSelected.disabled = true;
+    try {
+      const response = await fetch(`/api/browser-captures/${encodeURIComponent(activeCaptureID)}/validation-batches`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ selection, selected: selected || [] }),
+      });
+      const snapshot = await readResponse(response);
+      activeValidationID = text(snapshot.id);
+      renderBrowserValidation(snapshot);
+      void pollBrowserValidation();
+    } catch (err) {
+      showBrowserValidationError(err instanceof Error ? err.message : "validation request failed");
+    } finally {
+      browserCaptureValidateAll.disabled = false;
+      browserCaptureValidateFailed.disabled = false;
+      browserCaptureValidateSelected.disabled = selectedCaptureDestinations.size === 0;
     }
   }
 
@@ -2218,6 +2415,10 @@
   browserCaptureStart.addEventListener("click", async () => {
     clearBrowserCaptureError();
     clearBrowserCapturePoll();
+    clearBrowserValidationPoll();
+    activeValidationID = "";
+    browserValidationPanel.hidden = true;
+    selectedCaptureDestinations.clear();
     browserCaptureStart.disabled = true;
     activeCaptureSnapshot = { state: "starting", unique_destination_count: 0, unique_address_count: 0, observation_count: 0, failure_count: 0, destinations: [] };
     renderBrowserCapture(activeCaptureSnapshot);
@@ -2277,6 +2478,56 @@
       setTimeout(() => { browserCaptureCopy.textContent = t("browser.copyFQDNs"); }, 1500);
     } catch (err) {
       showBrowserCaptureError(err instanceof Error ? err.message : t("browser.copyError"));
+    }
+  });
+
+  browserCaptureValidateAll.addEventListener("click", () => {
+    void startBrowserValidation("all", []);
+  });
+
+  browserCaptureValidateFailed.addEventListener("click", () => {
+    void startBrowserValidation("failed_only", []);
+  });
+
+  browserCaptureValidateSelected.addEventListener("click", () => {
+    void startBrowserValidation("selected", Array.from(selectedCaptureDestinations));
+  });
+
+  browserValidationCancel.addEventListener("click", async () => {
+    if (!activeValidationID) {
+      return;
+    }
+    clearBrowserValidationError();
+    browserValidationCancel.disabled = true;
+    try {
+      const response = await fetch(`/api/browser-capture-validations/${encodeURIComponent(activeValidationID)}`, { method: "DELETE" });
+      const snapshot = await readResponse(response);
+      renderBrowserValidation(snapshot);
+    } catch (err) {
+      browserValidationCancel.disabled = false;
+      showBrowserValidationError(err instanceof Error ? err.message : "validation cancellation failed");
+    }
+  });
+
+  browserValidationCopy.addEventListener("click", async () => {
+    if (!activeValidationID) {
+      return;
+    }
+    clearBrowserValidationError();
+    try {
+      const response = await fetch(`/api/browser-capture-validations/${encodeURIComponent(activeValidationID)}/failed.txt`, { cache: "no-store" });
+      const failedIdentities = await response.text();
+      if (!response.ok) {
+        throw new Error("could not load failed identities");
+      }
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+        throw new Error("clipboard access is unavailable; use Export Failed Identities");
+      }
+      await navigator.clipboard.writeText(failedIdentities);
+      browserValidationCopy.textContent = "Copied Failed Identities";
+      setTimeout(() => { browserValidationCopy.textContent = "Copy Failed Identities"; }, 1500);
+    } catch (err) {
+      showBrowserValidationError(err instanceof Error ? err.message : "could not copy failed identities");
     }
   });
 

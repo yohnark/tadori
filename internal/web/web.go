@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yohnark/tadori/internal/batch"
 	"github.com/yohnark/tadori/internal/capture"
 	"github.com/yohnark/tadori/internal/model"
 	"github.com/yohnark/tadori/internal/orchestrate"
@@ -69,6 +70,13 @@ type HandlerOptions struct {
 	CaptureManager *capture.Manager
 	// CaptureOptions configures the production browser capture manager.
 	CaptureOptions capture.Options
+	// ValidationManager can be supplied by tests or an embedding application.
+	// When nil, NewHandler creates a bounded in-memory manager that uses the
+	// canonical orchestration runner.
+	ValidationManager *batch.Manager
+	// ValidationOptions configures the production batch validation manager when
+	// ValidationManager is nil.
+	ValidationOptions batch.Options
 	// Progress is the optional UI projection adapter for the legacy synchronous
 	// view endpoint. Session/SSE consumers use SessionRun instead.
 	Progress              ProgressRunner
@@ -83,6 +91,7 @@ type Handler struct {
 	mux            http.Handler
 	sessions       *session.Manager
 	captures       *capture.Manager
+	validations    *batch.Manager
 	legacyRun      Runner
 	legacyTimeout  time.Duration
 	legacyCapacity chan struct{}
@@ -135,10 +144,15 @@ func NewHandler(opts HandlerOptions) *Handler {
 	if captureManager == nil {
 		captureManager = capture.NewManager(capture.ManagerOptions{Capture: opts.CaptureOptions})
 	}
+	validationManager := opts.ValidationManager
+	if validationManager == nil {
+		validationManager = batch.NewManager(opts.ValidationOptions)
+	}
 
 	h := &Handler{
 		sessions:       manager,
 		captures:       captureManager,
+		validations:    validationManager,
 		legacyRun:      legacyRun,
 		legacyTimeout:  overallTimeout,
 		legacyCapacity: make(chan struct{}, legacyMaxConcurrent),
@@ -157,6 +171,7 @@ func NewHandler(opts HandlerOptions) *Handler {
 	mux.HandleFunc("/api/diagnoses/", h.diagnosisResource)
 	mux.HandleFunc("/api/browser-captures", h.browserCaptureCollection)
 	mux.HandleFunc("/api/browser-captures/", h.browserCaptureResource)
+	mux.HandleFunc("/api/browser-capture-validations/", h.browserCaptureValidationResource)
 	h.mux = mux
 	return h
 }
@@ -170,6 +185,9 @@ func (h *Handler) Close() {
 		}
 		if h.captures != nil {
 			h.captures.Close()
+		}
+		if h.validations != nil {
+			h.validations.Close()
 		}
 	})
 }
@@ -227,16 +245,22 @@ func admitRequest(r *http.Request) *requestAdmissionError {
 
 func requiresRequestAdmission(r *http.Request) bool {
 	switch {
-	case r.Method == http.MethodPost && (r.URL.Path == "/api/diagnoses" ||
-		r.URL.Path == "/api/diagnose" || r.URL.Path == "/api/diagnose/view" ||
-		r.URL.Path == "/api/browser-captures"):
-		return true
+	case r.Method == http.MethodPost:
+		if r.URL.Path == "/api/diagnoses" || r.URL.Path == "/api/diagnose" || r.URL.Path == "/api/diagnose/view" || r.URL.Path == "/api/browser-captures" {
+			return true
+		}
+		_, action, ok := parseBrowserCapturePath(r.URL.Path)
+		return ok && action == browserCaptureValidationCollection
 	case r.Method == http.MethodDelete:
 		if _, events, ok := parseDiagnosisPath(r.URL.Path); ok && !events {
 			return true
 		}
 		_, action, ok := parseBrowserCapturePath(r.URL.Path)
-		return ok && action == browserCaptureSession
+		if ok && action == browserCaptureSession {
+			return true
+		}
+		_, _, _, ok = parseBrowserCaptureValidationPath(r.URL.Path)
+		return ok
 	default:
 		return false
 	}

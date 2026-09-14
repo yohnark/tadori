@@ -82,6 +82,9 @@
         <a id="browser-capture-json" class="secondary-button" href="#" download data-i18n="browser.exportJSON" hidden>Export JSON</a>
         <a id="browser-capture-fqdns" class="secondary-button" href="#" download data-i18n="browser.exportFQDNs" hidden>Export FQDNs</a>
         <button id="browser-capture-copy" class="secondary-button" type="button" data-i18n="browser.copyFQDNs" hidden>Copy FQDNs</button>
+        <button id="browser-capture-validate-all" class="secondary-button" type="button" hidden>Validate All</button>
+        <button id="browser-capture-validate-failed" class="secondary-button" type="button" hidden>Validate Failed Only</button>
+        <button id="browser-capture-validate-selected" class="secondary-button" type="button" hidden>Validate Selected</button>
       </div>
       <p id="browser-capture-error" class="error" role="alert" hidden></p>
       <div class="browser-capture-stats" aria-live="polite">
@@ -93,11 +96,43 @@
       </div>
       <div class="browser-capture-table-wrap">
         <table class="browser-capture-table">
-          <thead><tr><th data-i18n="browser.destination">Destination</th><th data-i18n="browser.port">Port</th><th data-i18n="browser.outcome">Outcome</th><th data-i18n="browser.connections">Connections</th><th data-i18n="browser.connectedEndpoint">Connected endpoint</th><th data-i18n="browser.failure">Failure</th></tr></thead>
+          <thead><tr><th>Select</th><th data-i18n="browser.destination">Destination</th><th data-i18n="browser.port">Port</th><th data-i18n="browser.outcome">Outcome</th><th data-i18n="browser.connections">Connections</th><th data-i18n="browser.connectedEndpoint">Connected endpoint</th><th data-i18n="browser.failure">Failure</th></tr></thead>
           <tbody id="browser-capture-destinations-body"></tbody>
         </table>
       </div>
       <p id="browser-capture-empty" class="empty-state compact" data-i18n="browser.empty">No browser destinations observed yet.</p>
+    </section>
+
+    <section id="browser-validation-panel" class="browser-validation-panel panel" aria-labelledby="browser-validation-title" hidden>
+      <div class="browser-capture-heading">
+        <div>
+          <p class="eyebrow">Active validation</p>
+          <h2 id="browser-validation-title">Captured endpoint validation</h2>
+          <p class="section-note">Active validation is an independent observation. Capture outcomes and validation outcomes remain separate.</p>
+        </div>
+        <span id="browser-validation-state" class="badge neutral">idle</span>
+      </div>
+      <div class="browser-capture-controls">
+        <button id="browser-validation-cancel" class="secondary-button" type="button" hidden>Cancel Validation</button>
+        <a id="browser-validation-json" class="secondary-button" href="#" download hidden>Export Batch JSON</a>
+        <a id="browser-validation-failed" class="secondary-button" href="#" download hidden>Export Failed Identities</a>
+        <button id="browser-validation-copy" class="secondary-button" type="button" hidden>Copy Failed Identities</button>
+      </div>
+      <p id="browser-validation-error" class="error" role="alert" hidden></p>
+      <div class="browser-capture-stats" aria-live="polite">
+        <span><strong id="browser-validation-total">0</strong> endpoints</span>
+        <span><strong id="browser-validation-completed">0</strong> completed</span>
+        <span><strong id="browser-validation-passed">0</strong> passed</span>
+        <span><strong id="browser-validation-failed-count">0</strong> failed</span>
+        <span><strong id="browser-validation-partial">0</strong> partial</span>
+      </div>
+      <div class="browser-capture-table-wrap">
+        <table class="browser-validation-table">
+          <thead><tr><th>Endpoint</th><th>Capture</th><th>Validation</th><th>DNS</th><th>TCP</th><th>TLS / app</th><th>Failure boundary</th><th>Report</th></tr></thead>
+          <tbody id="browser-validation-results-body"></tbody>
+        </table>
+      </div>
+      <p id="browser-validation-empty" class="empty-state compact">No validation batch has been started.</p>
     </section>
 
     <section id="run-state" class="run-state" aria-live="polite">
