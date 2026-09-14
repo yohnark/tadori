@@ -41,3 +41,20 @@ report contract do not need to change.
 The endpoint is intentionally additive so existing API and CLI consumers keep
 receiving canonical JSON. Loopback binding and request validation remain in
 the existing handler.
+
+Browser Capture is a separate bounded workflow over the same local handler:
+
+- `POST /api/browser-captures` starts Edge or Chrome with a dedicated temporary
+  profile and an explicit loopback proxy.
+- `GET /api/browser-captures/{id}` returns live counts and destination rows;
+  `DELETE` on the same resource stops the session and cleans up its listener,
+  tunnels, browser process, and profile.
+- `GET /api/browser-captures/{id}/report.json` exports the canonical report,
+  with the browser data under `observations.browser_capture`.
+- `GET /api/browser-captures/{id}/fqdns.txt` exports the sorted observed host
+  identities without inferring wildcard policy.
+
+The capture adapter retains only destination metadata and records HTTPS from
+CONNECT authority. It does not decrypt TLS or store browser payloads. Its
+network caveats and explicit unsupported states are documented in
+`docs/browser-capture.md`.

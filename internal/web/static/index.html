@@ -53,6 +53,44 @@
       <p id="error" class="error" role="alert" hidden></p>
     </section>
 
+    <section id="browser-capture-panel" class="browser-capture-panel panel" aria-labelledby="browser-capture-title">
+      <div class="browser-capture-heading">
+        <div>
+          <p class="eyebrow">Browser workflow</p>
+          <h2 id="browser-capture-title">Browser Capture</h2>
+          <p class="section-note">Launch a dedicated browser profile through a loopback-only proxy to discover workflow destinations. HTTPS is recorded from CONNECT authority; TLS payloads are never decrypted.</p>
+        </div>
+        <span id="browser-capture-state" class="badge neutral">idle</span>
+      </div>
+      <div class="browser-capture-controls">
+        <label for="browser-capture-browser">Browser</label>
+        <select id="browser-capture-browser">
+          <option value="edge">Microsoft Edge</option>
+          <option value="chrome">Google Chrome</option>
+        </select>
+        <button id="browser-capture-start" class="primary-button" type="button">Start Browser Capture</button>
+        <button id="browser-capture-stop" class="secondary-button" type="button" hidden>Stop Capture</button>
+        <a id="browser-capture-json" class="secondary-button" href="#" download hidden>Export JSON</a>
+        <a id="browser-capture-fqdns" class="secondary-button" href="#" download hidden>Export FQDNs</a>
+        <button id="browser-capture-copy" class="secondary-button" type="button" hidden>Copy FQDNs</button>
+      </div>
+      <p id="browser-capture-error" class="error" role="alert" hidden></p>
+      <div class="browser-capture-stats" aria-live="polite">
+        <span><strong id="browser-capture-elapsed">0s</strong> elapsed</span>
+        <span><strong id="browser-capture-destinations">0</strong> destinations</span>
+        <span><strong id="browser-capture-addresses">0</strong> addresses</span>
+        <span><strong id="browser-capture-observations">0</strong> observations</span>
+        <span><strong id="browser-capture-failures">0</strong> failures</span>
+      </div>
+      <div class="browser-capture-table-wrap">
+        <table class="browser-capture-table">
+          <thead><tr><th>Destination</th><th>Port</th><th>Outcome</th><th>Connections</th><th>Connected endpoint</th><th>Failure</th></tr></thead>
+          <tbody id="browser-capture-destinations-body"></tbody>
+        </table>
+      </div>
+      <p id="browser-capture-empty" class="empty-state compact">No browser destinations observed yet.</p>
+    </section>
+
     <section id="run-state" class="run-state" aria-live="polite">
       <div class="state-heading">
         <div class="state-copy">
