@@ -174,6 +174,8 @@ type EnterprisePathObservation struct {
 	CertificateTrusted      bool                 `json:"certificate_trusted"`
 	HostnameVerified        bool                 `json:"hostname_verified"`
 	CertificateSHA256       string               `json:"certificate_sha256,omitempty"`
+	CertificateSubject      string               `json:"certificate_subject,omitempty"`
+	CertificateIssuer       string               `json:"certificate_issuer,omitempty"`
 	FailureReason           FailureReason        `json:"failure_reason"`
 	Error                   string               `json:"error,omitempty"`
 	Certainty               ObservationCertainty `json:"certainty"`
@@ -272,27 +274,36 @@ type EnterpriseNetworkCorrelationObservation struct {
 // facts that can support a policy/interception suspicion. Suspicion is never
 // elevated to certainty merely because certificates differ.
 type EnterpriseTLSPolicyObservation struct {
-	State                   EnterpriseObservationState `json:"state"`
-	TrustStoreAvailable     bool                       `json:"trust_store_available"`
-	TrustStoreRootCount     int                        `json:"trust_store_root_count,omitempty"`
-	TrustStoreInsufficient  bool                       `json:"trust_store_insufficient_privilege,omitempty"`
-	DirectCertificateSHA256 string                     `json:"direct_certificate_sha256,omitempty"`
-	ProxyCertificateSHA256  string                     `json:"proxy_certificate_sha256,omitempty"`
-	CertificatesDiffer      bool                       `json:"certificates_differ"`
-	CertificatesDifferKnown bool                       `json:"certificates_differ_known"`
-	BothTrusted             bool                       `json:"both_trusted"`
-	BothTrustedKnown        bool                       `json:"both_trusted_known"`
-	BothHostnameVerified    bool                       `json:"both_hostname_verified"`
-	BothHostnameKnown       bool                       `json:"both_hostname_verified_known"`
-	PossibleInterception    bool                       `json:"possible_interception"`
-	InterceptionSuspicion   string                     `json:"interception_suspicion"`
-	InterceptionBasis       string                     `json:"interception_basis,omitempty"`
-	TrustMismatch           bool                       `json:"trust_mismatch"`
-	TrustMismatchKnown      bool                       `json:"trust_mismatch_known"`
-	Certainty               ObservationCertainty       `json:"certainty"`
-	Provenance              []string                   `json:"provenance,omitempty"`
-	EvidenceIDs             []string                   `json:"evidence_ids,omitempty"`
-	Limitations             []string                   `json:"limitations,omitempty"`
+	State                            EnterpriseObservationState `json:"state"`
+	TrustStoreAvailable              bool                       `json:"trust_store_available"`
+	TrustStoreRootCount              int                        `json:"trust_store_root_count,omitempty"`
+	TrustStoreInsufficient           bool                       `json:"trust_store_insufficient_privilege,omitempty"`
+	DirectCertificateSHA256          string                     `json:"direct_certificate_sha256,omitempty"`
+	ProxyCertificateSHA256           string                     `json:"proxy_certificate_sha256,omitempty"`
+	DirectCertificateSubject         string                     `json:"direct_certificate_subject,omitempty"`
+	ProxyCertificateSubject          string                     `json:"proxy_certificate_subject,omitempty"`
+	DirectCertificateIssuer          string                     `json:"direct_certificate_issuer,omitempty"`
+	ProxyCertificateIssuer           string                     `json:"proxy_certificate_issuer,omitempty"`
+	CertificatesDiffer               bool                       `json:"certificates_differ"`
+	CertificatesDifferKnown          bool                       `json:"certificates_differ_known"`
+	IssuersDiffer                    bool                       `json:"issuers_differ"`
+	IssuersDifferKnown               bool                       `json:"issuers_differ_known"`
+	BothTrusted                      bool                       `json:"both_trusted"`
+	BothTrustedKnown                 bool                       `json:"both_trusted_known"`
+	BothHostnameVerified             bool                       `json:"both_hostname_verified"`
+	BothHostnameKnown                bool                       `json:"both_hostname_verified_known"`
+	PossibleInterception             bool                       `json:"possible_interception"`
+	InterceptionSuspicion            string                     `json:"interception_suspicion"`
+	InterceptionBasis                string                     `json:"interception_basis,omitempty"`
+	TrustMismatch                    bool                       `json:"trust_mismatch"`
+	TrustMismatchKnown               bool                       `json:"trust_mismatch_known"`
+	TrustedCorporatePrivateRootKnown bool                       `json:"trusted_corporate_private_root_known"`
+	TrustedCorporatePrivateRoot      bool                       `json:"trusted_corporate_private_root"`
+	Certainty                        ObservationCertainty       `json:"certainty"`
+	Provenance                       []string                   `json:"provenance,omitempty"`
+	EvidenceIDs                      []string                   `json:"evidence_ids,omitempty"`
+	Limitations                      []string                   `json:"limitations,omitempty"`
+	Conflicts                        []ObservationConflict      `json:"conflicts,omitempty"`
 }
 
 // EnterprisePolicyObservation is the single report-level enterprise/policy
@@ -468,6 +479,7 @@ func normalizeEnterpriseTLS(value EnterpriseTLSPolicyObservation) EnterpriseTLSP
 	value.Provenance = uniqueStringValues(value.Provenance)
 	value.EvidenceIDs = uniqueStringValues(value.EvidenceIDs)
 	value.Limitations = uniqueStringValues(value.Limitations)
+	value.Conflicts = cloneObservationConflicts(value.Conflicts)
 	return value
 }
 

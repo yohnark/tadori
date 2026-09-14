@@ -211,6 +211,23 @@ func TestTLSInterceptionRequiresPairedTrustedHostnameValidCertificates(t *testin
 	}
 }
 
+func TestTLSPairedComparisonRetainsIssuerChanges(t *testing.T) {
+	comparison := compareTLS([]PathObservation{
+		{Name: PathApplicationDirect, Mode: PathModeDirect, TLSAttempted: true, CertificateTrusted: true, HostnameVerified: true, Certificate: &CertificateObservation{
+			Subject: "CN=service.example.test", Issuer: "CN=Public Example CA", SHA256: strings.Repeat("a", 64),
+		}},
+		{Name: PathBrowserWinINET, Mode: PathModeProxy, TLSAttempted: true, CertificateTrusted: true, HostnameVerified: true, Certificate: &CertificateObservation{
+			Subject: "CN=service.example.test", Issuer: "CN=Enterprise Inspection CA", SHA256: strings.Repeat("b", 64),
+		}},
+	})
+	if !comparison.IssuersDiffer || !comparison.IssuersDifferKnown || comparison.DirectCertificateIssuer == "" || comparison.ProxyCertificateIssuer == "" {
+		t.Fatalf("issuer comparison = %#v", comparison)
+	}
+	if !comparison.CertificatesDifferKnown || !comparison.BothTrustedKnown || !comparison.BothHostnameKnown {
+		t.Fatalf("comparison known flags = %#v", comparison)
+	}
+}
+
 func TestEffectiveRouteDifferenceIsEvidenceAndDiagnosis(t *testing.T) {
 	result := testProbe(Snapshot{Paths: []PathObservation{
 		{Name: PathApplicationDirect, Mode: PathModeDirect},

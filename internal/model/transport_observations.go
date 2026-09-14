@@ -67,6 +67,79 @@ type TLSCertificateObservation struct {
 	SHA256             string   `json:"sha256,omitempty"`
 }
 
+// TLSInspectionState is the evidence-bounded assessment of whether the TLS
+// peer appears to have been substituted by an inspection layer.  The state is
+// deliberately not a boolean: a configured proxy, an unfamiliar issuer, or a
+// locally trusted root is not sufficient evidence on its own.
+type TLSInspectionState string
+
+const (
+	TLSInspectionNotObserved TLSInspectionState = "not_observed"
+	TLSInspectionObserved    TLSInspectionState = "observed"
+	TLSInspectionSuspected   TLSInspectionState = "suspected"
+	TLSInspectionUnknown     TLSInspectionState = "unknown"
+	TLSInspectionConflicting TLSInspectionState = "conflicting"
+)
+
+// State-prefixed aliases make the enum discoverable alongside the other
+// model constants while preserving the concise names used by this package.
+const (
+	TLSInspectionStateNotObserved = TLSInspectionNotObserved
+	TLSInspectionStateObserved    = TLSInspectionObserved
+	TLSInspectionStateSuspected   = TLSInspectionSuspected
+	TLSInspectionStateUnknown     = TLSInspectionUnknown
+	TLSInspectionStateConflicting = TLSInspectionConflicting
+)
+
+const (
+	TLSInspectionSignalTrustedChainSubstitution        = "trusted_hostname_valid_chain_substitution"
+	TLSInspectionSignalTrustedIssuerChange             = "trusted_hostname_valid_issuer_change"
+	TLSInspectionSignalCorporatePrivateIssuerWithProxy = "corporate_private_issuer_with_proxy_policy"
+	TLSInspectionSignalExplicitEnterpriseEvidence      = "explicit_enterprise_interception_evidence"
+	TLSInspectionSignalChainDifferenceInsufficient     = "chain_difference_insufficient_evidence"
+	TLSInspectionSignalProxyWithoutComparison          = "proxy_observed_without_comparison"
+)
+
+// TLSInspectionAssessment is the canonical explanation of the TLS inspection
+// assessment.  It contains the concrete facts used by the assessment so
+// presentation layers do not need to infer meaning from certificate strings.
+// A field marked Known distinguishes an observed negative from unavailable
+// evidence, especially for trust-store and comparison facts.
+type TLSInspectionAssessment struct {
+	State                            TLSInspectionState         `json:"state"`
+	Certainty                        ObservationCertainty       `json:"certainty"`
+	RequestedHostname                string                     `json:"requested_hostname,omitempty"`
+	PresentedLeafSubject             string                     `json:"presented_leaf_subject,omitempty"`
+	PresentedLeafSANs                []string                   `json:"presented_leaf_sans,omitempty"`
+	PresentedLeafIssuer              string                     `json:"presented_leaf_issuer,omitempty"`
+	PresentedIssuerChain             []string                   `json:"presented_issuer_chain,omitempty"`
+	CertificateValidation            CertificateValidationState `json:"certificate_validation"`
+	LocalTrustKnown                  bool                       `json:"local_trust_known"`
+	LocallyTrusted                   bool                       `json:"locally_trusted"`
+	TrustedCorporatePrivateRootKnown bool                       `json:"trusted_corporate_private_root_known"`
+	TrustedCorporatePrivateRoot      bool                       `json:"trusted_corporate_private_root"`
+	EnterpriseProxyKnown             bool                       `json:"enterprise_proxy_known"`
+	EnterpriseProxyObserved          bool                       `json:"enterprise_proxy_observed"`
+	EnterprisePolicyKnown            bool                       `json:"enterprise_policy_known"`
+	EnterprisePolicyObserved         bool                       `json:"enterprise_policy_observed"`
+	OriginComparisonKnown            bool                       `json:"origin_comparison_known"`
+	OriginLeafSHA256                 string                     `json:"origin_leaf_sha256,omitempty"`
+	PresentedLeafSHA256              string                     `json:"presented_leaf_sha256,omitempty"`
+	ChainDivergenceKnown             bool                       `json:"chain_divergence_known"`
+	ChainDiverges                    bool                       `json:"chain_diverges"`
+	IssuerChangeKnown                bool                       `json:"issuer_change_known"`
+	IssuerChanged                    bool                       `json:"issuer_changed"`
+	Signals                          []string                   `json:"signals,omitempty"`
+	Provenance                       []string                   `json:"provenance,omitempty"`
+	EvidenceIDs                      []string                   `json:"evidence_ids,omitempty"`
+	Limitations                      []string                   `json:"limitations,omitempty"`
+	Conflicts                        []ObservationConflict      `json:"conflicts,omitempty"`
+}
+
+// TLSInspectionObservation is retained as a descriptive alias for callers
+// that use “observation” consistently for canonical projections.
+type TLSInspectionObservation = TLSInspectionAssessment
+
 // TransportObservation is the canonical report-level projection of TCP
 // evidence.  RequestedEndpoint preserves intent, ProbeEndpoint preserves the
 // candidate selected for the attempt, and TestedEndpoint is concrete transport
@@ -113,6 +186,7 @@ type SecurityObservation struct {
 	Timing                  Timing                      `json:"timing"`
 	Certificates            []TLSCertificateObservation `json:"certificates,omitempty"`
 	PeerCertificateCount    int                         `json:"peer_certificate_count"`
+	TLSInspection           TLSInspectionAssessment     `json:"tls_inspection"`
 	TrustEvidenceIDs        []string                    `json:"trust_evidence_ids,omitempty"`
 	InterceptionEvidenceIDs []string                    `json:"interception_evidence_ids,omitempty"`
 	FailureReason           FailureReason               `json:"failure_reason"`
@@ -308,10 +382,31 @@ func NormalizeSecurityObservation(value SecurityObservation) SecurityObservation
 		value.Certificates[index].IPAddresses = append([]string(nil), value.Certificates[index].IPAddresses...)
 		value.Certificates[index].EmailAddresses = append([]string(nil), value.Certificates[index].EmailAddresses...)
 	}
+	value.TLSInspection = normalizeTLSInspectionAssessment(value.TLSInspection)
 	if value.EndpointUsed != nil {
 		endpoint := cloneEndpoint(*value.EndpointUsed)
 		value.EndpointUsed = &endpoint
 	}
+	return value
+}
+
+func normalizeTLSInspectionAssessment(value TLSInspectionAssessment) TLSInspectionAssessment {
+	if value.State == "" {
+		value.State = TLSInspectionNotObserved
+	}
+	if value.Certainty == "" {
+		value.Certainty = ObservationCertaintyUnknown
+	}
+	if value.CertificateValidation == "" {
+		value.CertificateValidation = CertificateValidationUnknown
+	}
+	value.PresentedLeafSANs = uniqueStringValues(value.PresentedLeafSANs)
+	value.PresentedIssuerChain = uniqueStringValues(value.PresentedIssuerChain)
+	value.Signals = uniqueStringValues(value.Signals)
+	value.Provenance = uniqueStringValues(value.Provenance)
+	value.EvidenceIDs = uniqueStringValues(value.EvidenceIDs)
+	value.Limitations = uniqueStringValues(value.Limitations)
+	value.Conflicts = cloneObservationConflicts(value.Conflicts)
 	return value
 }
 

@@ -277,10 +277,38 @@ func renderSecurity(out *bytes.Buffer, observation model.SecurityObservation) {
 	}
 	fact(out, "Certainty", string(observation.Certainty))
 	out.WriteString("</dl>")
+	renderTLSInspection(out, observation.TLSInspection)
 	renderStringList(out, "Security limitations", observation.Limitations)
 	renderProvenanceRefs(out, observation.Provenance, observation.EvidenceIDs, observation.ProbeNames)
 	renderConflicts(out, observation.Conflicts)
 	out.WriteString("</section>")
+}
+
+func renderTLSInspection(out *bytes.Buffer, observation model.TLSInspectionAssessment) {
+	out.WriteString("<div class=\"subsection tls-inspection\"><h3>TLS inspection assessment</h3>")
+	out.WriteString("<p class=\"section-note\">This assessment correlates presented certificate facts with explicit enterprise and comparison evidence. Proxy configuration, local trust, or an unfamiliar issuer alone does not establish inspection.</p><dl class=\"facts\">")
+	fact(out, "Assessment", string(observation.State))
+	fact(out, "Assessment certainty", string(observation.Certainty))
+	fact(out, "Requested hostname", observation.RequestedHostname)
+	fact(out, "Presented leaf subject", observation.PresentedLeafSubject)
+	fact(out, "Presented leaf SANs", strings.Join(observation.PresentedLeafSANs, ", "))
+	fact(out, "Presented leaf issuer", observation.PresentedLeafIssuer)
+	fact(out, "Presented issuer chain", strings.Join(observation.PresentedIssuerChain, " → "))
+	fact(out, "Certificate validation", string(observation.CertificateValidation))
+	fact(out, "Locally trusted", knownBool(observation.LocallyTrusted, observation.LocalTrustKnown))
+	fact(out, "Trusted corporate/private root", knownBool(observation.TrustedCorporatePrivateRoot, observation.TrustedCorporatePrivateRootKnown))
+	fact(out, "Enterprise proxy observed", knownBool(observation.EnterpriseProxyObserved, observation.EnterpriseProxyKnown))
+	fact(out, "Enterprise policy observed", knownBool(observation.EnterprisePolicyObserved, observation.EnterprisePolicyKnown))
+	fact(out, "Origin comparison", knownBool(observation.ChainDiverges, observation.ChainDivergenceKnown))
+	fact(out, "Origin leaf SHA-256", observation.OriginLeafSHA256)
+	fact(out, "Presented leaf SHA-256", observation.PresentedLeafSHA256)
+	fact(out, "Issuer changed", knownBool(observation.IssuerChanged, observation.IssuerChangeKnown))
+	out.WriteString("</dl>")
+	renderStringList(out, "Assessment signals", observation.Signals)
+	renderStringList(out, "Assessment limitations", observation.Limitations)
+	renderProvenanceRefs(out, observation.Provenance, observation.EvidenceIDs, nil)
+	renderConflicts(out, observation.Conflicts)
+	out.WriteString("</div>")
 }
 
 func renderApplication(out *bytes.Buffer, observation model.ApplicationObservation) {
@@ -504,15 +532,24 @@ func renderEnterpriseNetwork(out *bytes.Buffer, observation model.EnterpriseNetw
 func renderEnterpriseTLS(out *bytes.Buffer, observation model.EnterpriseTLSPolicyObservation) {
 	out.WriteString("<div class=\"subsection\"><h3>Enterprise TLS policy</h3><dl class=\"facts\">")
 	fact(out, "State", string(observation.State))
+	fact(out, "Direct certificate subject", observation.DirectCertificateSubject)
+	fact(out, "Proxy certificate subject", observation.ProxyCertificateSubject)
 	fact(out, "Certificates differ", knownBool(observation.CertificatesDiffer, observation.CertificatesDifferKnown))
+	fact(out, "Direct certificate issuer", observation.DirectCertificateIssuer)
+	fact(out, "Proxy certificate issuer", observation.ProxyCertificateIssuer)
+	fact(out, "Issuers differ", knownBool(observation.IssuersDiffer, observation.IssuersDifferKnown))
 	fact(out, "Both trusted", knownBool(observation.BothTrusted, observation.BothTrustedKnown))
 	fact(out, "Both hostnames verified", knownBool(observation.BothHostnameVerified, observation.BothHostnameKnown))
 	fact(out, "Possible interception", boolState(observation.PossibleInterception))
 	fact(out, "Interception suspicion", observation.InterceptionSuspicion)
 	fact(out, "Interception basis", observation.InterceptionBasis)
 	fact(out, "Trust mismatch", knownBool(observation.TrustMismatch, observation.TrustMismatchKnown))
+	fact(out, "Trusted corporate/private root", knownBool(observation.TrustedCorporatePrivateRoot, observation.TrustedCorporatePrivateRootKnown))
 	fact(out, "Certainty", string(observation.Certainty))
-	out.WriteString("</dl></div>")
+	out.WriteString("</dl>")
+	renderStringList(out, "Limitations", observation.Limitations)
+	renderConflicts(out, observation.Conflicts)
+	out.WriteString("</div>")
 }
 
 func renderFindings(out *bytes.Buffer, diagnosticReport model.DiagnosticReport) {

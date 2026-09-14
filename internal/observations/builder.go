@@ -43,6 +43,7 @@ func Build(target model.Target, probes []model.ProbeResult) model.Observations {
 	runtimeTarget := targetWithEndpointObservation(target, endpoint)
 	networkContext := buildNetworkObservation(runtimeTarget, ordered)
 	enterprisePolicy := buildEnterprisePolicyObservation(runtimeTarget, ordered, networkContext)
+	security.TLSInspection = assessTLSInspection(target, security, enterprisePolicy)
 
 	return model.NormalizeObservations(model.Observations{
 		Endpoint:             endpoint,
@@ -401,7 +402,7 @@ func buildSecurityObservation(target model.Target, endpoint model.EndpointObserv
 		used := cloneEndpointValue(*endpoint.TestedEndpoint)
 		observation.EndpointUsed = &used
 	}
-	var versions, ciphers, validations, endpoints []sourceValue
+	var versions, ciphers, validations, endpoints, certificateLeaves, certificateIssuers []sourceValue
 	seenTLS := false
 	for _, probe := range probes {
 		for _, evidence := range probe.Evidence {
@@ -487,6 +488,14 @@ func buildSecurityObservation(target model.Target, endpoint model.EndpointObserv
 				if !certificateAlreadyPresent(observation.Certificates, certificate) {
 					observation.Certificates = append(observation.Certificates, certificate)
 				}
+				if value.ChainIndex == 0 {
+					if value.SHA256 != "" {
+						certificateLeaves = append(certificateLeaves, sourceValue{value: value.SHA256, probe: probe.Name, evidenceID: evidence.ID})
+					}
+					if value.Issuer != "" {
+						certificateIssuers = append(certificateIssuers, sourceValue{value: value.Issuer, probe: probe.Name, evidenceID: evidence.ID})
+					}
+				}
 			case model.EvidenceKindTLSTrust:
 				observation.Attempted = true
 				observation.TrustEvidenceIDs = appendUnique(observation.TrustEvidenceIDs, evidence.ID)
@@ -519,6 +528,12 @@ func buildSecurityObservation(target model.Target, endpoint model.EndpointObserv
 	if values := distinctSourceValues(endpoints); len(values) > 1 {
 		observation.Conflicts = append(observation.Conflicts, conflict("security.endpoint_used", values, endpoints))
 	}
+	if values := distinctSourceValues(certificateLeaves); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("security.presented_leaf_certificate", values, certificateLeaves))
+	}
+	if values := distinctSourceValues(certificateIssuers); len(values) > 1 {
+		observation.Conflicts = append(observation.Conflicts, conflict("security.presented_leaf_issuer", values, certificateIssuers))
+	}
 	if seenTLS || len(observation.Certificates) != 0 || len(observation.TrustEvidenceIDs) != 0 {
 		observation.Applicability = model.ObservationApplicabilityApplicable
 		observation.Certainty = model.ObservationCertaintyObserved
@@ -531,6 +546,181 @@ func buildSecurityObservation(target model.Target, endpoint model.EndpointObserv
 		observation.Applicability = model.ObservationApplicabilityNotAttempted
 	}
 	return model.NormalizeSecurityObservation(observation)
+}
+
+// assessTLSInspection correlates the canonical TLS and enterprise projections.
+// It intentionally does not inspect raw evidence: all signals used here were
+// already normalized by their owning observation builders. In particular, a
+// configured proxy or an uncommon issuer remains insufficient without a
+// comparison or explicit enterprise certificate evidence.
+func assessTLSInspection(target model.Target, security model.SecurityObservation, enterprise model.EnterprisePolicyObservation) model.TLSInspectionAssessment {
+	assessment := model.TLSInspectionAssessment{
+		State:                 model.TLSInspectionNotObserved,
+		Certainty:             model.ObservationCertaintyUnknown,
+		RequestedHostname:     firstNonEmptyValue(security.ServerName, target.RequestedIdentity),
+		CertificateValidation: security.CertificateValidation,
+		Provenance:            []string{"assessment:tls_inspection"},
+		EvidenceIDs:           appendUnique(nil, security.EvidenceIDs...),
+		Limitations:           appendUnique(nil, security.Limitations...),
+	}
+
+	if len(security.Certificates) > 0 {
+		leaf := security.Certificates[0]
+		assessment.PresentedLeafSubject = leaf.Subject
+		assessment.PresentedLeafSANs = append([]string(nil), leaf.DNSNames...)
+		assessment.PresentedLeafIssuer = leaf.Issuer
+		assessment.PresentedLeafSHA256 = leaf.SHA256
+		for _, certificate := range security.Certificates {
+			if certificate.Issuer != "" {
+				assessment.PresentedIssuerChain = appendUnique(assessment.PresentedIssuerChain, certificate.Issuer)
+			}
+		}
+	}
+
+	switch security.CertificateValidation {
+	case model.CertificateValidationValid, model.CertificateValidationHostnameMismatch:
+		assessment.LocalTrustKnown = true
+		assessment.LocallyTrusted = true
+	case model.CertificateValidationUntrusted, model.CertificateValidationInvalid, model.CertificateValidationExpired:
+		assessment.LocalTrustKnown = true
+		assessment.LocallyTrusted = false
+	}
+
+	tlsPolicy := enterprise.TLS
+	assessment.TrustedCorporatePrivateRootKnown = tlsPolicy.TrustedCorporatePrivateRootKnown
+	assessment.TrustedCorporatePrivateRoot = tlsPolicy.TrustedCorporatePrivateRoot
+	assessment.OriginLeafSHA256 = tlsPolicy.DirectCertificateSHA256
+	assessment.OriginComparisonKnown = tlsPolicy.CertificatesDifferKnown || tlsPolicy.IssuersDifferKnown
+	if assessment.OriginLeafSHA256 == "" && tlsPolicy.DirectCertificateSubject != "" {
+		assessment.OriginComparisonKnown = true
+	}
+	if tlsPolicy.ProxyCertificateSHA256 != "" {
+		assessment.PresentedLeafSHA256 = tlsPolicy.ProxyCertificateSHA256
+	}
+	if tlsPolicy.ProxyCertificateSubject != "" {
+		assessment.PresentedLeafSubject = tlsPolicy.ProxyCertificateSubject
+	}
+	if tlsPolicy.ProxyCertificateIssuer != "" {
+		assessment.PresentedLeafIssuer = tlsPolicy.ProxyCertificateIssuer
+	}
+	if tlsPolicy.BothTrustedKnown {
+		assessment.LocalTrustKnown = true
+		assessment.LocallyTrusted = tlsPolicy.BothTrusted
+	}
+	assessment.ChainDivergenceKnown = tlsPolicy.CertificatesDifferKnown ||
+		tlsPolicy.IssuersDifferKnown ||
+		(tlsPolicy.DirectCertificateSHA256 != "" && tlsPolicy.ProxyCertificateSHA256 != "") ||
+		(tlsPolicy.DirectCertificateIssuer != "" && tlsPolicy.ProxyCertificateIssuer != "")
+	assessment.ChainDiverges = tlsPolicy.CertificatesDiffer || tlsPolicy.IssuersDiffer
+	assessment.IssuerChangeKnown = tlsPolicy.IssuersDifferKnown ||
+		(tlsPolicy.DirectCertificateIssuer != "" && tlsPolicy.ProxyCertificateIssuer != "")
+	assessment.IssuerChanged = tlsPolicy.IssuersDiffer
+	assessment.EvidenceIDs = appendUnique(assessment.EvidenceIDs, tlsPolicy.EvidenceIDs...)
+	assessment.Provenance = appendUnique(assessment.Provenance, tlsPolicy.Provenance...)
+	assessment.Limitations = appendUnique(assessment.Limitations, tlsPolicy.Limitations...)
+
+	assessment.EnterprisePolicyKnown = len(enterprise.EvidenceIDs) > 0 || enterprise.State != model.EnterpriseObservationStateUnknown
+	assessment.EnterprisePolicyObserved = enterprise.State == model.EnterpriseObservationStateObserved || enterprise.State == model.EnterpriseObservationStatePartial
+	assessment.EvidenceIDs = appendUnique(assessment.EvidenceIDs, enterprise.EvidenceIDs...)
+	assessment.Provenance = appendUnique(assessment.Provenance, enterprise.Provenance...)
+
+	for _, source := range []model.EnterpriseProxySourceObservation{enterprise.WinHTTP, enterprise.WinINET} {
+		if source.Effective.Observed {
+			assessment.EnterpriseProxyKnown = true
+			if source.Effective.Mode == model.EnterpriseProxyModeProxy || source.Effective.Mode == model.EnterpriseProxyModePAC {
+				assessment.EnterpriseProxyObserved = true
+			}
+			assessment.EvidenceIDs = appendUnique(assessment.EvidenceIDs, source.Effective.EvidenceIDs...)
+			assessment.Provenance = appendUnique(assessment.Provenance, source.Effective.Provenance...)
+		}
+	}
+	for _, path := range enterprise.Paths {
+		if path.Mode != enterpriseprobe.PathModeProxy && path.Mode != enterpriseprobe.PathModePAC {
+			continue
+		}
+		assessment.EnterpriseProxyKnown = true
+		if path.RequestAttempted || path.TCPConnected || path.TLSAttempted || path.HTTPResponse {
+			assessment.EnterpriseProxyObserved = true
+		}
+		assessment.EvidenceIDs = appendUnique(assessment.EvidenceIDs, path.EvidenceIDs...)
+		assessment.Provenance = appendUnique(assessment.Provenance, path.Provenance...)
+	}
+	if assessment.OriginComparisonKnown && (tlsPolicy.ProxyCertificateSHA256 != "" || tlsPolicy.ProxyCertificateIssuer != "") {
+		assessment.EnterpriseProxyKnown = true
+		assessment.EnterpriseProxyObserved = true
+	}
+
+	for _, conflict := range security.Conflicts {
+		if isTLSInspectionConflict(conflict.Field) {
+			assessment.Conflicts = append(assessment.Conflicts, conflict)
+		}
+	}
+	assessment.Conflicts = append(assessment.Conflicts, tlsPolicy.Conflicts...)
+	if tlsPolicy.TrustStoreInsufficient {
+		assessment.Limitations = appendUnique(assessment.Limitations, "enterprise trust-store evidence is insufficient")
+	}
+	if len(assessment.Conflicts) > 0 {
+		assessment.State = model.TLSInspectionConflicting
+		assessment.Certainty = model.ObservationCertaintyUnknown
+		return assessment
+	}
+
+	if len(security.InterceptionEvidenceIDs) > 0 {
+		assessment.State = model.TLSInspectionObserved
+		assessment.Certainty = model.ObservationCertaintyObserved
+		assessment.Signals = appendUnique(assessment.Signals, model.TLSInspectionSignalExplicitEnterpriseEvidence)
+		assessment.EvidenceIDs = appendUnique(assessment.EvidenceIDs, security.InterceptionEvidenceIDs...)
+	}
+	if tlsPolicy.PossibleInterception || assessment.ChainDiverges && tlsPolicy.BothTrusted && tlsPolicy.BothHostnameVerified {
+		assessment.State = model.TLSInspectionObserved
+		assessment.Certainty = model.ObservationCertaintyInferred
+		if assessment.IssuerChanged && !tlsPolicy.CertificatesDiffer {
+			assessment.Signals = appendUnique(assessment.Signals, model.TLSInspectionSignalTrustedIssuerChange)
+		} else {
+			assessment.Signals = appendUnique(assessment.Signals, model.TLSInspectionSignalTrustedChainSubstitution)
+		}
+	}
+	if assessment.State != model.TLSInspectionObserved && assessment.TrustedCorporatePrivateRootKnown && assessment.TrustedCorporatePrivateRoot && assessment.EnterpriseProxyObserved {
+		assessment.State = model.TLSInspectionSuspected
+		assessment.Certainty = model.ObservationCertaintyInferred
+		assessment.Signals = appendUnique(assessment.Signals, model.TLSInspectionSignalCorporatePrivateIssuerWithProxy)
+	}
+
+	if assessment.State != model.TLSInspectionObserved && assessment.State != model.TLSInspectionSuspected {
+		switch {
+		case assessment.ChainDivergenceKnown && assessment.ChainDiverges:
+			assessment.State = model.TLSInspectionUnknown
+			assessment.Signals = appendUnique(assessment.Signals, model.TLSInspectionSignalChainDifferenceInsufficient)
+		case assessment.OriginComparisonKnown && !assessment.ChainDiverges && tlsPolicy.BothTrusted && tlsPolicy.BothHostnameVerified:
+			assessment.State = model.TLSInspectionNotObserved
+			assessment.Certainty = model.ObservationCertaintyObserved
+		case assessment.EnterpriseProxyObserved && !assessment.OriginComparisonKnown:
+			assessment.State = model.TLSInspectionUnknown
+			assessment.Signals = appendUnique(assessment.Signals, model.TLSInspectionSignalProxyWithoutComparison)
+		case len(security.Certificates) > 0 && security.CertificateValidation == model.CertificateValidationValid && !assessment.EnterpriseProxyObserved:
+			assessment.State = model.TLSInspectionNotObserved
+			assessment.Certainty = model.ObservationCertaintyObserved
+		case len(security.Certificates) == 0 && !security.Attempted:
+			assessment.State = model.TLSInspectionNotObserved
+		default:
+			assessment.State = model.TLSInspectionUnknown
+		}
+	}
+	return assessment
+}
+
+func isTLSInspectionConflict(field string) bool {
+	field = strings.ToLower(field)
+	return strings.Contains(field, "certificate") || strings.Contains(field, "issuer") || strings.Contains(field, "interception")
+}
+
+func firstNonEmptyValue(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // buildApplicationObservation projects HTTP response/error evidence without
@@ -2285,7 +2475,11 @@ func buildEnterprisePolicyObservation(target model.Target, probes []model.ProbeR
 			case model.EvidenceKindTLSTrust:
 				var value enterpriseTLSEvidence
 				if err := json.Unmarshal(evidence.Raw, &value); err == nil {
+					previous := observation.TLS
+					previousConflicts := append([]model.ObservationConflict(nil), previous.Conflicts...)
 					projectEnterpriseTLS(&observation, value, probe, evidence)
+					observation.TLS.Conflicts = append(previousConflicts, observation.TLS.Conflicts...)
+					appendEnterpriseTLSConflicts(&observation.TLS, previous, value.Comparison, evidence)
 					evidenceCopy := evidence
 					tlsEvidence = &evidenceCopy
 				} else {
@@ -2654,6 +2848,8 @@ func projectEnterprisePath(value enterpriseprobe.PathObservation, probe model.Pr
 	}
 	if value.Certificate != nil {
 		result.CertificateSHA256 = value.Certificate.SHA256
+		result.CertificateSubject = value.Certificate.Subject
+		result.CertificateIssuer = value.Certificate.Issuer
 	}
 	return result
 }
@@ -2849,12 +3045,22 @@ func projectEnterpriseTLS(observation *model.EnterprisePolicyObservation, value 
 		State: model.EnterpriseObservationStateObserved, TrustStoreAvailable: value.TrustStore.Available,
 		TrustStoreRootCount: value.TrustStore.RootCount, TrustStoreInsufficient: value.TrustStore.Insufficient,
 		DirectCertificateSHA256: comparison.DirectCertificateSHA256, ProxyCertificateSHA256: comparison.ProxyCertificateSHA256,
-		CertificatesDiffer: comparison.CertificatesDiffer, CertificatesDifferKnown: true,
-		BothTrusted: comparison.BothTrusted, BothTrustedKnown: true, BothHostnameVerified: comparison.BothHostnameVerified, BothHostnameKnown: true,
-		PossibleInterception: comparison.PossibleInterception, InterceptionSuspicion: model.EnterpriseInterceptionSuspicionNotEstablished,
-		TrustMismatch: comparison.TrustMismatch, TrustMismatchKnown: true, Certainty: certainty,
+		DirectCertificateSubject: comparison.DirectCertificateSubject, ProxyCertificateSubject: comparison.ProxyCertificateSubject,
+		DirectCertificateIssuer: comparison.DirectCertificateIssuer, ProxyCertificateIssuer: comparison.ProxyCertificateIssuer,
+		CertificatesDiffer:      comparison.CertificatesDiffer,
+		CertificatesDifferKnown: comparison.CertificatesDifferKnown || comparison.DirectCertificateSHA256 != "" && comparison.ProxyCertificateSHA256 != "",
+		IssuersDiffer:           comparison.IssuersDiffer,
+		IssuersDifferKnown:      comparison.IssuersDifferKnown || comparison.DirectCertificateIssuer != "" && comparison.ProxyCertificateIssuer != "",
+		BothTrusted:             comparison.BothTrusted,
+		BothTrustedKnown:        comparison.BothTrustedKnown || comparison.DirectCertificateSHA256 != "" && comparison.ProxyCertificateSHA256 != "",
+		BothHostnameVerified:    comparison.BothHostnameVerified,
+		BothHostnameKnown:       comparison.BothHostnameKnown || comparison.DirectCertificateSHA256 != "" && comparison.ProxyCertificateSHA256 != "",
+		PossibleInterception:    comparison.PossibleInterception, InterceptionSuspicion: model.EnterpriseInterceptionSuspicionNotEstablished,
+		TrustMismatch: comparison.TrustMismatch, TrustMismatchKnown: comparison.TrustMismatch || comparison.ProxyCertificateSHA256 != "" || comparison.DirectCertificateSHA256 != "", Certainty: certainty,
 		Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
 	}
+	result.TrustedCorporatePrivateRootKnown = value.TrustStore.TrustedCorporatePrivateRootKnown
+	result.TrustedCorporatePrivateRoot = value.TrustStore.TrustedCorporatePrivateRoot
 	if comparison.PossibleInterception {
 		result.InterceptionSuspicion = model.EnterpriseInterceptionSuspicionPossible
 		result.InterceptionBasis = comparison.InterceptionBasis
@@ -2868,6 +3074,30 @@ func projectEnterpriseTLS(observation *model.EnterprisePolicyObservation, value 
 		result.Limitations = append(result.Limitations, "trust store: "+value.TrustStore.Error)
 	}
 	observation.TLS = result
+}
+
+func appendEnterpriseTLSConflicts(observation *model.EnterpriseTLSPolicyObservation, previous model.EnterpriseTLSPolicyObservation, current enterpriseprobe.TLSComparison, evidence model.Evidence) {
+	appendConflict := func(field string, left, right string) {
+		if left == "" || right == "" || left == right {
+			return
+		}
+		observation.Conflicts = append(observation.Conflicts, model.ObservationConflict{
+			Field: field, Values: []string{left, right},
+			Provenance:  []string{"comparison:enterprise_tls", "source:" + evidence.Source},
+			EvidenceIDs: appendUnique(append([]string(nil), previous.EvidenceIDs...), evidence.ID),
+		})
+	}
+	appendConflict("enterprise.tls.direct_certificate", previous.DirectCertificateSHA256, current.DirectCertificateSHA256)
+	appendConflict("enterprise.tls.proxy_certificate", previous.ProxyCertificateSHA256, current.ProxyCertificateSHA256)
+	appendConflict("enterprise.tls.direct_issuer", previous.DirectCertificateIssuer, current.DirectCertificateIssuer)
+	appendConflict("enterprise.tls.proxy_issuer", previous.ProxyCertificateIssuer, current.ProxyCertificateIssuer)
+	if previous.EvidenceIDs != nil && previous.PossibleInterception != current.PossibleInterception {
+		observation.Conflicts = append(observation.Conflicts, model.ObservationConflict{
+			Field: "enterprise.tls.possible_interception", Values: []string{strconv.FormatBool(previous.PossibleInterception), strconv.FormatBool(current.PossibleInterception)},
+			Provenance:  []string{"comparison:enterprise_tls", "source:" + evidence.Source},
+			EvidenceIDs: appendUnique(append([]string(nil), previous.EvidenceIDs...), evidence.ID),
+		})
+	}
 }
 
 func appendEnterpriseIssues(observation *model.EnterprisePolicyObservation, issues []enterpriseprobe.ObservationIssue) {
