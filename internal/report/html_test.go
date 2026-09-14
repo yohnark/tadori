@@ -118,6 +118,39 @@ func TestRenderHTMLDoesNotDecodeProbeEvidenceForSemantics(t *testing.T) {
 	}
 }
 
+func TestRenderHTMLExposesEffectiveProxyDecisionAndSeparateCONNECTObservation(t *testing.T) {
+	report := semanticHTMLFixture()
+	report.Observations.EnterprisePolicy.WinINET = model.EnterpriseProxySourceObservation{
+		Source: "wininet",
+		Configuration: model.EnterpriseProxyConfigurationObservation{
+			State:         "pac_configured",
+			PACConfigured: true,
+			PACURL:        "https://pac.corp.example/proxy.pac",
+			ProxyBypass:   []string{"*.internal.example"},
+		},
+		Effective: model.EnterpriseProxyEffectiveObservation{
+			Observed: true, Decision: model.EnterpriseProxyDecisionPACSelectedProxy, Mode: model.EnterpriseProxyModePAC,
+			Endpoint: "proxy.corp.example:8080", ResolutionAttempted: true, ResolutionOK: true,
+			PACUsed: true, Certainty: model.ObservationCertaintyObserved,
+		},
+		EndpointReachability: []model.EnterpriseProxyEndpointObservation{{
+			Endpoint: "proxy.corp.example:8080", Reachability: model.EnterpriseEndpointReachable,
+			TCPConnected: true, ConnectOutcome: "authentication_required", StatusCode: 407,
+			Certainty: model.ObservationCertaintyObserved,
+		}},
+	}
+	report.Observations.EnterprisePolicy.EffectiveDecisionKnown = true
+	document, err := RenderHTML(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Effective decision", "pac_selected_proxy", "PAC URL", "proxy.corp.example:8080", "Selected proxy endpoint observations", "authentication_required", "407"} {
+		if !strings.Contains(string(document), want) {
+			t.Fatalf("HTML missing effective proxy fact %q", want)
+		}
+	}
+}
+
 func semanticHTMLFixture() model.DiagnosticReport {
 	legacyTarget, _ := model.ParseTarget(model.TargetIntent{Input: "https://legacy.example"})
 	canonicalTarget, _ := model.ParseTarget(model.TargetIntent{Input: "https://canonical.example/health"})

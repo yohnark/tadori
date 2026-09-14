@@ -2357,6 +2357,22 @@ func buildEnterprisePolicyObservation(target model.Target, probes []model.ProbeR
 			})
 		}
 	}
+	if observation.WinHTTP.Effective.Observed && observation.WinINET.Effective.Observed {
+		observation.EffectiveDecisionKnown = effectiveDecisionKnown(observation.WinHTTP.Effective) && effectiveDecisionKnown(observation.WinINET.Effective)
+		if observation.EffectiveDecisionKnown {
+			observation.EffectiveDecisionDiverges = observation.WinHTTP.Effective.Decision != observation.WinINET.Effective.Decision ||
+				observation.WinHTTP.Effective.Mode != observation.WinINET.Effective.Mode ||
+				observation.WinHTTP.Effective.Endpoint != observation.WinINET.Effective.Endpoint
+			if observation.EffectiveDecisionDiverges {
+				observation.Conflicts = append(observation.Conflicts, model.ObservationConflict{
+					Field:       "enterprise_policy.effective_proxy_decision",
+					Values:      []string{observation.WinHTTP.Effective.Decision, observation.WinINET.Effective.Decision},
+					Provenance:  appendUnique(append([]string(nil), observation.WinHTTP.Effective.Provenance...), observation.WinINET.Effective.Provenance...),
+					EvidenceIDs: appendUnique(append([]string(nil), observation.WinHTTP.Effective.EvidenceIDs...), observation.WinINET.Effective.EvidenceIDs...),
+				})
+			}
+		}
+	}
 	if pathEvidence != nil {
 		observation.DirectVsProxy = compareEnterprisePaths(observation.Paths)
 		observation.DirectVsProxy.EvidenceIDs = appendUnique(observation.DirectVsProxy.EvidenceIDs, pathEvidence.ID)
@@ -2382,8 +2398,8 @@ func emptyEnterpriseProxySource(source string) model.EnterpriseProxySourceObserv
 	return model.EnterpriseProxySourceObservation{
 		Source:        source,
 		Configuration: model.EnterpriseProxyConfigurationObservation{Certainty: model.ObservationCertaintyUnknown},
-		Effective:     model.EnterpriseProxyEffectiveObservation{Mode: model.EnterpriseProxyModeUnknown, Certainty: model.ObservationCertaintyUnknown},
-		PAC:           model.EnterprisePACObservation{Mode: model.EnterpriseProxyModeUnknown, Certainty: model.ObservationCertaintyUnknown},
+		Effective:     model.EnterpriseProxyEffectiveObservation{Decision: model.EnterpriseProxyDecisionUnknown, Mode: model.EnterpriseProxyModeUnknown, Certainty: model.ObservationCertaintyUnknown},
+		PAC:           model.EnterprisePACObservation{Decision: model.EnterpriseProxyDecisionUnknown, Mode: model.EnterpriseProxyModeUnknown, Certainty: model.ObservationCertaintyUnknown},
 		Certainty:     model.ObservationCertaintyUnknown,
 	}
 }
@@ -2464,19 +2480,25 @@ func projectEnterpriseConnectivity(observation *model.EnterprisePolicyObservatio
 			continue
 		}
 		markEnterpriseProxySource(destination, probe, evidence, model.ObservationCertaintyObserved)
-		destination.Effective = model.EnterpriseProxyEffectiveObservation{
-			Observed: true, Mode: effective.Mode, Endpoint: effective.Endpoint, Bypass: append([]string(nil), effective.Bypass...),
-			PACUsed: effective.PACUsed, AutoDetect: effective.AutoDetect, ResolutionOK: effective.ResolutionOK, Error: effective.Error,
-			Certainty: model.ObservationCertaintyObserved, Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
+		candidate := model.EnterpriseProxyEffectiveObservation{
+			Observed: true, Decision: enterpriseEffectiveDecision(effective), Mode: effective.Mode,
+			Endpoint: effective.Endpoint, Bypass: append([]string(nil), effective.Bypass...), BypassMatched: effective.BypassMatched,
+			PACUsed: effective.PACUsed, AutoDetect: effective.AutoDetect,
+			ResolutionAttempted: effective.ResolutionAttempted || effective.ResolutionOK, ResolutionOK: effective.ResolutionOK,
+			Error: effective.Error, Certainty: model.ObservationCertaintyObserved,
+			Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
 		}
-		if effective.PACUsed || effective.AutoDetect {
+		mergeEnterpriseEffective(destination, candidate)
+		if effective.PACUsed || effective.AutoDetect || destination.Configuration.PACConfigured || destination.PAC.Configured {
 			destination.PAC.ResolutionObserved = true
 			destination.PAC.ResolutionOK = effective.ResolutionOK
 			destination.PAC.Used = effective.PACUsed
 			destination.PAC.AutoDetect = destination.PAC.AutoDetect || effective.AutoDetect
 			destination.PAC.Mode = effective.Mode
+			destination.PAC.Decision = candidate.Decision
 			destination.PAC.Endpoint = effective.Endpoint
 			destination.PAC.Bypass = append([]string(nil), effective.Bypass...)
+			destination.PAC.BypassMatched = effective.BypassMatched
 			destination.PAC.Certainty = model.ObservationCertaintyObserved
 			destination.PAC.Provenance = appendUnique(destination.PAC.Provenance, enterpriseEvidenceProvenance(probe, evidence)...)
 			destination.PAC.EvidenceIDs = appendUnique(destination.PAC.EvidenceIDs, evidence.ID)
@@ -2497,9 +2519,90 @@ func projectEnterpriseConnectivity(observation *model.EnterprisePolicyObservatio
 		if path.Endpoint != "" && (path.Mode == enterpriseprobe.PathModeProxy || path.Mode == enterpriseprobe.PathModePAC) {
 			source := enterpriseProxySource(observation, path.Source)
 			if source != nil {
+				ensureEnterpriseEffectiveFromPath(source, path, probe, evidence)
 				source.EndpointReachability = append(source.EndpointReachability, projectEnterpriseEndpoint(path, probe, evidence))
 			}
 		}
+	}
+}
+
+func enterpriseEffectiveDecision(value enterpriseprobe.EffectiveProxy) string {
+	if decision := strings.TrimSpace(value.Decision); decision != "" {
+		return decision
+	}
+	if value.BypassMatched {
+		return model.EnterpriseProxyDecisionBypassMatch
+	}
+	if !value.ResolutionOK && (value.PACUsed || value.AutoDetect) {
+		return model.EnterpriseProxyDecisionPACResultUnavailable
+	}
+	switch value.Mode {
+	case enterpriseprobe.PathModeDirect:
+		return model.EnterpriseProxyDecisionDirect
+	case enterpriseprobe.PathModeProxy:
+		return model.EnterpriseProxyDecisionStaticProxy
+	case enterpriseprobe.PathModePAC:
+		return model.EnterpriseProxyDecisionPACSelectedProxy
+	default:
+		return model.EnterpriseProxyDecisionUnknown
+	}
+}
+
+func effectiveDecisionKnown(value model.EnterpriseProxyEffectiveObservation) bool {
+	return value.Observed && value.ResolutionOK && value.Decision != "" && value.Decision != model.EnterpriseProxyDecisionUnknown && value.Decision != model.EnterpriseProxyDecisionConflicting
+}
+
+func sameEnterpriseEffective(left, right model.EnterpriseProxyEffectiveObservation) bool {
+	return left.Decision == right.Decision && left.Mode == right.Mode && left.Endpoint == right.Endpoint && left.BypassMatched == right.BypassMatched && left.ResolutionOK == right.ResolutionOK
+}
+
+func mergeEnterpriseEffective(destination *model.EnterpriseProxySourceObservation, candidate model.EnterpriseProxyEffectiveObservation) {
+	if !destination.Effective.Observed {
+		destination.Effective = candidate
+		return
+	}
+	if sameEnterpriseEffective(destination.Effective, candidate) {
+		destination.Effective.Provenance = appendUnique(destination.Effective.Provenance, candidate.Provenance...)
+		destination.Effective.EvidenceIDs = appendUnique(destination.Effective.EvidenceIDs, candidate.EvidenceIDs...)
+		destination.Effective.ResolutionAttempted = destination.Effective.ResolutionAttempted || candidate.ResolutionAttempted
+		return
+	}
+	destination.Effective.Decision = model.EnterpriseProxyDecisionConflicting
+	destination.Effective.Mode = model.EnterpriseProxyModeUnknown
+	destination.Effective.Endpoint = ""
+	destination.Effective.BypassMatched = false
+	destination.Effective.ResolutionAttempted = destination.Effective.ResolutionAttempted || candidate.ResolutionAttempted
+	destination.Effective.ResolutionOK = false
+	destination.Effective.Error = "conflicting effective proxy observations"
+	destination.Effective.Provenance = appendUnique(destination.Effective.Provenance, candidate.Provenance...)
+	destination.Effective.EvidenceIDs = appendUnique(destination.Effective.EvidenceIDs, candidate.EvidenceIDs...)
+	destination.Limitations = appendUnique(destination.Limitations, "conflicting effective proxy observations")
+}
+
+func ensureEnterpriseEffectiveFromPath(destination *model.EnterpriseProxySourceObservation, path enterpriseprobe.PathObservation, probe model.ProbeResult, evidence model.Evidence) {
+	decision := model.EnterpriseProxyDecisionStaticProxy
+	if path.Mode == enterpriseprobe.PathModePAC {
+		decision = model.EnterpriseProxyDecisionPACSelectedProxy
+	}
+	candidate := model.EnterpriseProxyEffectiveObservation{
+		Observed: true, Decision: decision, Mode: path.Mode, Endpoint: path.Endpoint,
+		PACUsed: path.Mode == enterpriseprobe.PathModePAC, ResolutionAttempted: true, ResolutionOK: true,
+		Certainty: model.ObservationCertaintyObserved, Provenance: enterpriseEvidenceProvenance(probe, evidence), EvidenceIDs: []string{evidence.ID},
+	}
+	if path.ProxyAuthenticationHint || path.ConnectOutcome == enterpriseprobe.ConnectAuthRequired {
+		candidate.Decision = model.EnterpriseProxyDecisionAuthenticationRequired
+	}
+	if !destination.Effective.Observed {
+		destination.Effective = candidate
+	} else if candidate.Decision == model.EnterpriseProxyDecisionAuthenticationRequired && destination.Effective.Decision != model.EnterpriseProxyDecisionConflicting {
+		destination.Effective.Decision = candidate.Decision
+		destination.Effective.Provenance = appendUnique(destination.Effective.Provenance, candidate.Provenance...)
+		destination.Effective.EvidenceIDs = appendUnique(destination.Effective.EvidenceIDs, candidate.EvidenceIDs...)
+	} else if destination.Effective.Decision != candidate.Decision || destination.Effective.Mode != candidate.Mode || destination.Effective.Endpoint != candidate.Endpoint {
+		mergeEnterpriseEffective(destination, candidate)
+	} else {
+		destination.Effective.Provenance = appendUnique(destination.Effective.Provenance, candidate.Provenance...)
+		destination.Effective.EvidenceIDs = appendUnique(destination.Effective.EvidenceIDs, candidate.EvidenceIDs...)
 	}
 }
 

@@ -113,6 +113,10 @@ func RenderHuman(report model.DiagnosticReport) string {
 		renderNetworkContext(&out, *report.Target.NetworkContext)
 	}
 
+	if hasEnterprisePolicyObservation(report.Observations.EnterprisePolicy) {
+		renderEnterprisePolicy(&out, report.Observations.EnterprisePolicy)
+	}
+
 	out.WriteString("Evidence:\n")
 	evidenceCount := 0
 	for _, probe := range report.Probes {
@@ -251,6 +255,53 @@ func renderNameResolution(out *strings.Builder, diagnosticReport model.Diagnosti
 				path.State, path.Mechanism, valueOrUnavailable(path.Resolver), valueOrUnavailable(path.Interface), valueOrUnavailable(path.Namespace), valueOrUnavailable(string(path.Certainty)))
 		}
 	}
+}
+
+func hasEnterprisePolicyObservation(observation model.EnterprisePolicyObservation) bool {
+	if observation.State != "" || observation.RequestedIdentity != "" || observation.Unsupported ||
+		observation.EffectiveDecisionKnown || observation.EffectiveDecisionDiverges || len(observation.Paths) > 0 {
+		return true
+	}
+	for _, source := range []model.EnterpriseProxySourceObservation{observation.WinHTTP, observation.WinINET} {
+		if source.Configuration.Certainty != "" || source.Effective.Observed || source.PAC.Configured {
+			return true
+		}
+	}
+	return false
+}
+
+func renderEnterprisePolicy(out *strings.Builder, observation model.EnterprisePolicyObservation) {
+	out.WriteString("Enterprise Proxy Decisions:\n")
+	if observation.RequestedIdentity != "" {
+		fmt.Fprintf(out, "  Target identity: %s\n", observation.RequestedIdentity)
+	}
+	fmt.Fprintf(out, "  Effective decision divergence: %s\n", knownBoolText(observation.EffectiveDecisionDiverges, observation.EffectiveDecisionKnown))
+	renderEnterpriseSource(out, "WinHTTP", observation.WinHTTP)
+	renderEnterpriseSource(out, "WinINET", observation.WinINET)
+}
+
+func renderEnterpriseSource(out *strings.Builder, label string, source model.EnterpriseProxySourceObservation) {
+	fmt.Fprintf(out, "  %s:\n", label)
+	fmt.Fprintf(out, "    configuration: %s\n", valueOrUnavailable(source.Configuration.State))
+	fmt.Fprintf(out, "    PAC URL: %s\n", valueOrUnavailable(firstNonEmpty(source.Configuration.PACURL, source.PAC.URL)))
+	fmt.Fprintf(out, "    effective decision: %s\n", valueOrUnavailable(source.Effective.Decision))
+	fmt.Fprintf(out, "    effective mode: %s\n", valueOrUnavailable(source.Effective.Mode))
+	fmt.Fprintf(out, "    effective endpoint: %s\n", valueOrUnavailable(source.Effective.Endpoint))
+	known := source.Effective.Observed || source.Effective.ResolutionAttempted
+	fmt.Fprintf(out, "    target-specific result observed: %s\n", knownBoolText(source.Effective.Observed, known))
+	fmt.Fprintf(out, "    resolution succeeded: %s\n", knownBoolText(source.Effective.ResolutionOK, known))
+	fmt.Fprintf(out, "    bypass matched: %s\n", knownBoolText(source.Effective.BypassMatched, known))
+	for _, endpoint := range source.EndpointReachability {
+		fmt.Fprintf(out, "    endpoint observation: endpoint=%s reachability=%s connect=%s status=%d\n",
+			valueOrUnavailable(endpoint.Endpoint), valueOrUnavailable(endpoint.Reachability), valueOrUnavailable(endpoint.ConnectOutcome), endpoint.StatusCode)
+	}
+}
+
+func knownBoolText(value, known bool) string {
+	if !known {
+		return "not observable"
+	}
+	return strconv.FormatBool(value)
 }
 
 func formatEndpoint(endpoint model.Endpoint) string {

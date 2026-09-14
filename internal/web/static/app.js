@@ -1362,6 +1362,8 @@
       [t("policy.unsupported"), booleanText(observation.unsupported)],
       [t("policy.proxyDiverges"), booleanText(observation.proxy_configuration_diverges)],
       [t("policy.divergenceKnown"), booleanText(observation.proxy_configuration_divergence_known)],
+      ["Effective decision diverges", booleanText(observation.effective_decision_diverges)],
+      ["Effective decision divergence known", booleanText(observation.effective_decision_divergence_known)],
       [t("policy.directVsProxy"), comparisonText(observation.direct_vs_proxy)],
       [t("policy.firewall"), observation.firewall && observation.firewall.state],
       [t("policy.tlsPolicy"), observation.tls && observation.tls.state],
@@ -1377,7 +1379,7 @@
     if (observation.paths && observation.paths.length) {
       policyObservation.appendChild(element("h3", "observation-subheading", t("policy.paths")));
       const table = element("table", "observation-grid");
-      appendTableHeader(table, [t("policy.path"), t("policy.mode"), t("policy.endpoint"), t("policy.tcp"), t("policy.http"), t("policy.tls"), t("policy.failure"), t("policy.evidence")]);
+      appendTableHeader(table, [t("policy.path"), t("policy.mode"), t("policy.endpoint"), t("policy.tcp"), "CONNECT", t("policy.http"), t("policy.tls"), t("policy.failure"), t("policy.evidence")]);
       const body = table.querySelector("tbody");
       for (const path of observation.paths) {
         const row = element("tr");
@@ -1385,6 +1387,7 @@
         row.appendChild(element("td", "", path.mode));
         row.appendChild(element("td", "", path.endpoint || t("common.notSpecified")));
         row.appendChild(element("td", "", booleanText(path.tcp_connected)));
+        row.appendChild(element("td", "", path.connect_outcome || "not tested"));
         row.appendChild(element("td", "", path.http_response ? text(path.http_status_code || t("policy.received")) : t("common.no")));
         row.appendChild(element("td", "", booleanText(path.tls_handshake)));
         row.appendChild(element("td", "", path.failure_reason ? failureText(path.failure_reason) : t("common.none")));
@@ -1420,13 +1423,36 @@
       [t("policy.source"), source.source],
       [t("policy.configuration"), source.configuration && source.configuration.state],
       [t("policy.configuredEndpoints"), source.configuration && listText(source.configuration.proxy_endpoints)],
+      ["PAC URL", source.configuration && source.configuration.pac_url],
+      ["Bypass patterns", source.configuration && listText(source.configuration.proxy_bypass)],
       [t("policy.pacConfigured"), source.configuration && booleanText(source.configuration.pac_configured)],
+      ["Effective decision", source.effective && source.effective.decision],
+      ["Effective result observed", source.effective && booleanText(source.effective.observed)],
+      ["Resolution attempted", source.effective && booleanText(source.effective.resolution_attempted)],
+      ["Bypass matched", source.effective && booleanText(source.effective.bypass_matched)],
       [t("policy.effectiveMode"), source.effective && source.effective.mode],
       [t("policy.effectiveEndpoint"), source.effective && source.effective.endpoint],
       [t("policy.effectiveResolution"), source.effective && booleanText(source.effective.resolution_ok)],
       [t("policy.pacUsed"), source.effective && booleanText(source.effective.pac_used)],
+      ["PAC decision", source.pac && source.pac.decision],
       [t("policy.evidence"), referenceValue(source.evidence_ids)],
     ]);
+
+    if (source.endpoint_reachability && source.endpoint_reachability.length) {
+      const table = element("table", "observation-grid");
+      appendTableHeader(table, ["Proxy endpoint", "Reachability", "CONNECT", "Status", "Evidence"]);
+      const body = table.querySelector("tbody");
+      for (const endpoint of source.endpoint_reachability) {
+        const row = element("tr");
+        row.appendChild(element("td", "", endpoint.endpoint || "not observed"));
+        row.appendChild(element("td", "", endpoint.reachability || "unknown"));
+        row.appendChild(element("td", "", endpoint.connect_outcome || "not tested"));
+        row.appendChild(element("td", "", endpoint.status_code || "not observed"));
+        row.appendChild(referenceCell(endpoint.evidence_ids));
+        body.appendChild(row);
+      }
+      container.appendChild(table);
+    }
   }
 
   function comparisonText(comparison) {
