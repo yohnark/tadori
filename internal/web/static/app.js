@@ -77,6 +77,7 @@
   const htmlReportLink = document.querySelector("#html-report-link");
   const jsonReportLink = document.querySelector("#json-report-link");
   const composer = globalThis.TadoriTargetComposer;
+  const display = globalThis.TadoriWorkbenchDisplay;
 
   let currentView = null;
   let activeSessionID = "";
@@ -136,6 +137,51 @@
       node.textContent = text(value);
     }
     return node;
+  }
+
+  function semanticValueElement(label, value, className = "", tag = "span") {
+    const descriptor = display.describeSemanticValue(label, value);
+    const classes = ["semantic-value", className, `semantic-${descriptor.kind}`].filter(Boolean).join(" ");
+    const wrapper = element(tag, classes);
+    const valueText = element("span", "semantic-value-text", descriptor.text);
+    if (descriptor.truncated) {
+      valueText.title = descriptor.fullText;
+      valueText.setAttribute("aria-label", descriptor.fullText);
+    }
+    wrapper.appendChild(valueText);
+    if (descriptor.copyable) {
+      wrapper.appendChild(copyValueButton(descriptor.fullText, `Copy ${label}`));
+    }
+    return wrapper;
+  }
+
+  function copyValueButton(value, label) {
+    const button = element("button", "copy-value", "copy");
+    button.type = "button";
+    button.title = `${label}: ${text(value)}`;
+    button.setAttribute("aria-label", `${label}: ${text(value)}`);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void copyValue(value, button);
+    });
+    return button;
+  }
+
+  async function copyValue(value, button) {
+    const clipboard = globalThis.navigator && globalThis.navigator.clipboard;
+    const original = button.textContent;
+    if (!clipboard || typeof clipboard.writeText !== "function") {
+      button.textContent = "unavailable";
+      setTimeout(() => { button.textContent = original; }, 1500);
+      return;
+    }
+    try {
+      await clipboard.writeText(text(value));
+      button.textContent = "copied";
+    } catch (_) {
+      button.textContent = "failed";
+    }
+    setTimeout(() => { button.textContent = original; }, 1500);
   }
 
   function toneClass(base, tone) {
@@ -354,11 +400,18 @@
   }
 
   function referenceButton(id, label) {
-    const button = element("button", "evidence-link", label || id);
+    const evidenceID = text(id);
+    const descriptor = display.describeSemanticValue("Evidence ID", evidenceID);
+    const reference = element("span", "evidence-reference");
+    const button = element("button", "evidence-link", label || descriptor.text);
     button.type = "button";
-    button.dataset.evidenceId = text(id);
+    button.dataset.evidenceId = evidenceID;
+    button.title = `Focus evidence: ${evidenceID}`;
+    button.setAttribute("aria-label", `Focus evidence ${evidenceID}`);
     button.addEventListener("click", () => focusEvidence(id));
-    return button;
+    reference.appendChild(button);
+    reference.appendChild(copyValueButton(evidenceID, "Copy evidence ID"));
+    return reference;
   }
 
   function referenceGroup(ids) {
@@ -688,7 +741,7 @@
   function metadataItem(label, value) {
     const item = element("span", "metadata-item");
     item.appendChild(element("span", "metadata-label", `${label}:`));
-    item.appendChild(element("code", "metadata-value", value));
+    item.appendChild(semanticValueElement(label, value, "metadata-value", "code"));
     return item;
   }
 
@@ -838,6 +891,34 @@
       ["Limitations", "limitations", listText],
       ["Evidence", "evidence_ids", referenceValue],
     ]);
+    if (observation && observation.applicability && observation.certificates && observation.certificates.length) {
+      renderCertificateTable(securityObservation, observation.certificates);
+    }
+  }
+
+  function renderCertificateTable(container, certificates) {
+    container.appendChild(element("h3", "observation-subheading", "Peer certificates"));
+    const table = element("table", "observation-grid certificate-table");
+    appendTableHeader(table, ["Chain", "Subject", "Issuer", "Validity", "Serial", "SHA-256"]);
+    const body = table.querySelector("tbody");
+    for (const certificate of certificates) {
+      const row = element("tr");
+      row.appendChild(element("td", "", certificate.chain_index));
+      row.appendChild(semanticTableCell("Certificate subject", certificate.subject || "not observed"));
+      row.appendChild(semanticTableCell("Certificate issuer", certificate.issuer || "not observed"));
+      const validity = [certificate.not_before, certificate.not_after].filter(Boolean).join(" → ") || "not observed";
+      row.appendChild(semanticTableCell("Certificate validity", validity));
+      row.appendChild(semanticTableCell("Certificate serial", certificate.serial_number || "not observed"));
+      row.appendChild(semanticTableCell("Certificate SHA-256", certificate.sha256 || "not observed"));
+      body.appendChild(row);
+    }
+    container.appendChild(table);
+  }
+
+  function semanticTableCell(label, value) {
+    const cell = element("td");
+    cell.appendChild(semanticValueElement(label, value));
+    return cell;
   }
 
   function renderApplicationObservation(observation) {
@@ -1118,7 +1199,7 @@
       if (value && typeof value === "object" && value.nodeType) {
         row.appendChild(value);
       } else {
-        row.appendChild(element("span", "observation-value", value));
+        row.appendChild(semanticValueElement(label, value, "observation-value"));
       }
       table.appendChild(row);
     }
@@ -1202,7 +1283,7 @@
     for (const [label, value] of fields) {
       const row = element("div", "resolution-row");
       row.appendChild(element("span", "resolution-label", label));
-      row.appendChild(element("span", "resolution-value", value));
+      row.appendChild(semanticValueElement(label, value, "resolution-value"));
       table.appendChild(row);
     }
     nameResolution.appendChild(table);
@@ -1267,7 +1348,7 @@
   function resolutionMetadata(label, value) {
     const row = element("p", "resolution-metadata");
     row.appendChild(element("span", "resolution-label", label));
-    row.appendChild(element("span", "resolution-value", value));
+    row.appendChild(semanticValueElement(label, value, "resolution-value"));
     return row;
   }
 
@@ -1637,7 +1718,7 @@
       if (value && typeof value === "object" && value.nodeType) {
         item.appendChild(value);
       } else {
-        item.appendChild(element("code", "context-value", value));
+        item.appendChild(semanticValueElement(label, value, "context-value", "code"));
       }
       networkContext.appendChild(item);
     }
@@ -1671,7 +1752,7 @@
     for (const [label, value] of fields) {
       const row = element("div", "target-detail");
       row.appendChild(element("span", "target-detail-label", label));
-      row.appendChild(element("span", "target-detail-value", value));
+      row.appendChild(semanticValueElement(label, value, "target-detail-value"));
       reportTarget.appendChild(row);
     }
   }

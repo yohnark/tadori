@@ -74,8 +74,9 @@ jobs:
         run: |
           node --check internal/web/static/app.js
           node --check internal/web/static/composer.js
-      - name: Run deterministic target composer tests
-        run: node --test internal/web/static/composer.test.js
+          node --check internal/web/static/display.js
+      - name: Run deterministic frontend tests
+        run: node --test internal/web/static/*.test.js
 
   windows-test:
     name: Windows / Go tests
