@@ -41,7 +41,7 @@ func exportContentSecurityPolicy() string {
 	return exportContentSecurityPolicyPrefix + report.HTMLInlineStyleCSPSource() + "; style-src-attr 'none'; img-src 'none'; font-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 }
 
-//go:embed static/index.html static/style.css static/composer.js static/display.js static/app.js
+//go:embed static/index.html static/style.css static/composer.js static/display.js static/locale.js static/app.js
 var staticFiles embed.FS
 
 // Runner is retained for compatibility with the #26 synchronous endpoint and
@@ -149,6 +149,7 @@ func NewHandler(opts HandlerOptions) *Handler {
 	mux.HandleFunc("/style.css", staticHandler("style.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("/composer.js", staticHandler("composer.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/display.js", staticHandler("display.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("/locale.js", staticHandler("locale.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/app.js", staticHandler("app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/api/diagnose", h.legacyDiagnose)
 	mux.HandleFunc("/api/diagnose/view", diagnoseViewHandler(legacyRun, opts.Progress, overallTimeout))

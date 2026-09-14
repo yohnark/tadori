@@ -21,7 +21,7 @@ test("workbench keeps the page as the primary scroll container", () => {
 
 test("semantic values and raw JSON use separate overflow policies", () => {
   assert.match(app, /describeSemanticValue\(label, value\)/);
-  assert.match(app, /copyValueButton\(evidenceID, "Copy evidence ID"\)/);
+  assert.match(app, /copyValueButton\(evidenceID, t\("evidence\.copyID"\)\)/);
   assert.match(app, /renderCertificateTable\(securityObservation, observation\.certificates\)/);
   assert.match(style, /\.semantic-opaque \.semantic-value-text\s*\{[\s\S]*?text-overflow: ellipsis;[\s\S]*?white-space: nowrap;/);
   assert.match(style, /\.raw-evidence,[\s\S]*?#canonical-json\s*\{[\s\S]*?overflow-x: auto;[\s\S]*?white-space: pre-wrap;/);
