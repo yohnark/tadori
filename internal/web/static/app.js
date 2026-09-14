@@ -1,6 +1,9 @@
 (() => {
   "use strict";
 
+  // Presentation concepts such as “Destination confirmed” and “Limitations”
+  // are resolved through the locale resource below; they are not model data.
+
   const form = document.querySelector("#diagnose-form");
   const targetInput = document.querySelector("#target");
   const serviceInput = document.querySelector("#service");
@@ -78,15 +81,119 @@
   const jsonReportLink = document.querySelector("#json-report-link");
   const composer = globalThis.TadoriTargetComposer;
   const display = globalThis.TadoriWorkbenchDisplay;
+  const locale = globalThis.TadoriLocale;
+  const localeButtons = document.querySelectorAll("[data-locale]");
+  const localeStorageKey = "tadori.locale";
 
   let currentView = null;
+  let currentLocale = locale.normalizeLocale(readStoredLocale());
+  let translate = locale.createTranslator(currentLocale);
   let activeSessionID = "";
   let eventSource = null;
   let activeCaptureID = "";
   let capturePollTimer = null;
   let activePathView = "graph";
+  let renderedSessionID = "";
+  let currentSessionState = "idle";
+  let progressEvents = [];
+  let activeCaptureSnapshot = null;
   const progressItems = new Map();
+  let progressHeader = { labelKey: "target.ready", badge: "idle", tone: "neutral" };
   let composerState = composer.createState({ service: serviceInput.value });
+
+  function readStoredLocale() {
+    try {
+      return globalThis.localStorage && globalThis.localStorage.getItem(localeStorageKey);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function storeLocale(value) {
+    try {
+      if (globalThis.localStorage) {
+        globalThis.localStorage.setItem(localeStorageKey, value);
+      }
+    } catch (_) {
+      // Private browsing and embedded webviews may deny local storage.
+    }
+  }
+
+  function t(key, variables) {
+    return translate(key, variables);
+  }
+
+  function enumText(namespace, value, fallback) {
+    const raw = text(value);
+    const key = `enum.${namespace}.${raw}`;
+    if (translate.has(key)) {
+      return t(key);
+    }
+    return fallback === undefined ? raw : fallback;
+  }
+
+  function sourceText(value, variables) {
+    if (typeof locale.translateSource === "function") {
+      return locale.translateSource(value, currentLocale, variables);
+    }
+    return text(value);
+  }
+
+  function quantity(oneKey, manyKey, count) {
+    return t(count === 1 ? oneKey : manyKey, { count });
+  }
+
+  function applyStaticLocale() {
+    document.documentElement.lang = currentLocale;
+    for (const node of document.querySelectorAll("[data-i18n]")) {
+      node.textContent = t(node.dataset.i18n);
+    }
+    for (const node of document.querySelectorAll("[data-i18n-aria-label]")) {
+      node.setAttribute("aria-label", t(node.dataset.i18nAriaLabel));
+    }
+    for (const node of document.querySelectorAll("[data-i18n-placeholder]")) {
+      node.setAttribute("placeholder", t(node.dataset.i18nPlaceholder));
+    }
+    for (const node of document.querySelectorAll("[data-i18n-content]")) {
+      node.setAttribute("content", t(node.dataset.i18nContent));
+    }
+    for (const node of document.querySelectorAll("[data-i18n-title]")) {
+      node.setAttribute("title", t(node.dataset.i18nTitle));
+    }
+    for (const button of localeButtons) {
+      const selected = button.dataset.locale === currentLocale;
+      button.classList.toggle("is-active", selected);
+      button.setAttribute("aria-pressed", selected ? "true" : "false");
+    }
+  }
+
+  function changeLocale(requestedLocale) {
+    const nextLocale = locale.normalizeLocale(requestedLocale);
+    if (nextLocale === currentLocale) {
+      applyStaticLocale();
+      return;
+    }
+    currentLocale = nextLocale;
+    translate = locale.createTranslator(currentLocale);
+    storeLocale(currentLocale);
+    applyStaticLocale();
+    if (currentView) {
+      renderView(currentView);
+    } else {
+      renderProgressList();
+      if (currentSessionState !== "idle") {
+        renderSessionState(currentSessionState);
+      }
+      if (activeCaptureSnapshot) {
+        renderBrowserCapture(activeCaptureSnapshot);
+      }
+    }
+    selectPathView(activePathView);
+  }
+
+  for (const button of localeButtons) {
+    button.addEventListener("click", () => changeLocale(button.dataset.locale));
+  }
 
   function renderComposerState() {
     serviceInput.value = composerState.service.value || "";
@@ -112,6 +219,7 @@
     control.addEventListener("click", () => selectPathView(control.dataset.pathView));
   }
   renderComposerState();
+  applyStaticLocale();
   setPathGraphState("loading");
   const narrowScreen = typeof globalThis.matchMedia === "function" && globalThis.matchMedia("(max-width: 720px)").matches;
   selectPathView(narrowScreen ? "table" : "graph");
@@ -150,16 +258,17 @@
     }
     wrapper.appendChild(valueText);
     if (descriptor.copyable) {
-      wrapper.appendChild(copyValueButton(descriptor.fullText, `Copy ${label}`));
+      wrapper.appendChild(copyValueButton(descriptor.fullText, label));
     }
     return wrapper;
   }
 
   function copyValueButton(value, label) {
-    const button = element("button", "copy-value", "copy");
+    const button = element("button", "copy-value", t("common.copy"));
     button.type = "button";
-    button.title = `${label}: ${text(value)}`;
-    button.setAttribute("aria-label", `${label}: ${text(value)}`);
+    const accessibleLabel = t("common.copyValue", { label, value: text(value) });
+    button.title = accessibleLabel;
+    button.setAttribute("aria-label", accessibleLabel);
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       void copyValue(value, button);
@@ -171,15 +280,15 @@
     const clipboard = globalThis.navigator && globalThis.navigator.clipboard;
     const original = button.textContent;
     if (!clipboard || typeof clipboard.writeText !== "function") {
-      button.textContent = "unavailable";
+      button.textContent = t("common.unavailable");
       setTimeout(() => { button.textContent = original; }, 1500);
       return;
     }
     try {
       await clipboard.writeText(text(value));
-      button.textContent = "copied";
+      button.textContent = t("common.copied");
     } catch (_) {
-      button.textContent = "failed";
+      button.textContent = t("common.failed");
     }
     setTimeout(() => { button.textContent = original; }, 1500);
   }
@@ -200,7 +309,7 @@
     }
     pathGraphView.hidden = selectedView !== "graph";
     pathTableView.hidden = selectedView !== "table";
-    pathViewStatus.textContent = selectedView === "graph" ? "Graph" : "Canonical table";
+    pathViewStatus.textContent = selectedView === "graph" ? t("path.graph") : t("path.canonicalTable");
   }
 
   function setPathGraphState(state) {
@@ -217,17 +326,17 @@
     pathGraphScaffold.hidden = true;
     pathGraphReservation.hidden = true;
     if (!view) {
-      pathGraphCount.textContent = "Awaiting report";
-      pathGraphDescription.textContent = "Waiting for canonical path observations.";
+      pathGraphCount.textContent = t("path.awaitingReport");
+      pathGraphDescription.textContent = t("path.waiting");
       setPathGraphState("loading");
       return;
     }
 
     const pathViews = Array.isArray(view.paths) ? view.paths : [];
     const pathCount = pathViews.length;
-    pathGraphCount.textContent = `${pathCount} observed path${pathCount === 1 ? "" : "s"}`;
+    pathGraphCount.textContent = quantity("path.observedPathsOne", "path.observedPathsMany", pathCount);
     if (!pathCount) {
-      pathGraphDescription.textContent = "No responder/path visibility was retained for this report.";
+      pathGraphDescription.textContent = t("path.noPath");
       setPathGraphState("empty");
       return;
     }
@@ -238,13 +347,13 @@
     const onlyUnsupported = pathViews.every((path) => path && path.graph && !path.graph.supported);
     if (!graphs.length) {
       pathGraphDescription.textContent = onlyUnsupported
-        ? "The report retained the supported Table projection for this path lane."
-        : "No graph-compatible canonical path projection is available.";
+        ? t("path.supportedTable")
+        : t("path.noGraph");
       setPathGraphState("unsupported");
       return;
     }
 
-    pathGraphDescription.textContent = "Canonical nodes preserve TTL order, responder visibility, and destination confirmation.";
+    pathGraphDescription.textContent = t("path.graphDescription");
     for (const [index, graph] of graphs.entries()) {
       pathGraphContent.appendChild(renderGraphLane(graph, index));
     }
@@ -253,20 +362,20 @@
 
   function renderGraphLane(graph, index) {
     const lane = element("section", "path-graph-lane");
-    lane.setAttribute("aria-label", `${text(graph.protocol_label || graph.protocol)} observed path ${index + 1}`);
+    lane.setAttribute("aria-label", `${protocolText(graph.protocol, graph.protocol_label)} ${t("path.observedPath")} ${index + 1}`);
 
     const heading = element("div", "path-graph-lane-heading");
     const copy = element("div");
-    copy.appendChild(element("strong", "path-graph-lane-title", `${text(graph.protocol_label || graph.protocol).toUpperCase()} observation`));
+    copy.appendChild(element("strong", "path-graph-lane-title", `${protocolText(graph.protocol, graph.protocol_label).toUpperCase()} ${t("path.observation")}`));
     copy.appendChild(element("span", "path-graph-lane-endpoint", `${text(graph.destination)} · ${portText(graph.destination_port)}`));
     heading.appendChild(copy);
     const laneMetadata = element("div", "path-graph-lane-meta");
-    laneMetadata.appendChild(badge(graph.observation_label || graph.observation_status, graph.observation_tone));
-    laneMetadata.appendChild(element("span", "path-graph-context", graph.port_aware ? "port-aware" : graph.protocol === "icmp" ? "ICMP endpoint context" : "not port-aware"));
+    laneMetadata.appendChild(badge(enumText("pathStatus", graph.observation_status, sourceText(graph.observation_label || graph.observation_status)), graph.observation_tone));
+    laneMetadata.appendChild(element("span", "path-graph-context", graph.port_aware ? t("path.portAware") : graph.protocol === "icmp" ? t("path.icmpContext") : t("path.notPortAware")));
     if (graph.destination_tcp_connected) {
-      laneMetadata.appendChild(badge("TCP connected", "positive"));
+      laneMetadata.appendChild(badge(t("path.tcpConnected"), "positive"));
     } else if (graph.destination_reached) {
-      laneMetadata.appendChild(badge("destination reached", "positive"));
+      laneMetadata.appendChild(badge(t("path.destinationReached"), "positive"));
     }
     heading.appendChild(laneMetadata);
     lane.appendChild(heading);
@@ -281,7 +390,7 @@
       const groupTone = group.kind === "ttl_hop" || (group.kind === "destination_confirmation" && graph.destination_reached) ? "positive" : "neutral";
       const column = element("div", toneClass("path-graph-group", groupTone));
       column.appendChild(element("span", "path-graph-group-label", graphGroupRangeLabel(group)));
-      column.appendChild(element("span", "path-graph-group-detail", group.detail || group.label));
+      column.appendChild(element("span", "path-graph-group-detail", graphGroupDetailText(group)));
       const nodeList = element("div", "path-graph-node-list");
       for (const nodeID of group.node_ids || []) {
         const node = nodeByID.get(nodeID);
@@ -294,7 +403,7 @@
     }
     lane.appendChild(track);
     if (graph.limitations && graph.limitations.length) {
-      lane.appendChild(element("p", "path-graph-limitation", graph.limitations.join(" · ")));
+      lane.appendChild(element("p", "path-graph-limitation", graph.limitations.map(sourceText).join(" · ")));
     }
     return lane;
   }
@@ -305,9 +414,9 @@
     const currentIDs = current.node_ids || [];
     const edge = (graph.edges || []).find((candidate) => previousIDs.includes(candidate.from) && currentIDs.includes(candidate.to));
     connector.classList.add(edgeTone(edge && edge.kind));
-    connector.title = edge ? text(edge.detail) : "Canonical observation order";
+    connector.title = edge ? sourceText(edge.detail) : t("path.canonicalOrder");
     connector.appendChild(element("span", "path-graph-connector-line"));
-    connector.appendChild(element("span", "path-graph-connector-label", edge ? edge.label : "observed order"));
+    connector.appendChild(element("span", "path-graph-connector-label", edge ? graphEdgeLabel(edge.kind, edge.label) : t("path.observedOrder")));
     return connector;
   }
 
@@ -326,9 +435,9 @@
 
   function graphGroupRangeLabel(group) {
     if (!group.from_ttl && !group.to_ttl) {
-      return group.kind === "destination_confirmation" ? "DESTINATION" : "START";
+      return group.kind === "destination_confirmation" ? t("path.destinationGroup") : t("path.startGroup");
     }
-    return group.from_ttl === group.to_ttl ? `TTL ${text(group.from_ttl)}` : `TTL ${text(group.from_ttl)}–${text(group.to_ttl)}`;
+    return group.from_ttl === group.to_ttl ? t("path.ttl", { value: group.from_ttl }) : t("path.ttlRange", { from: group.from_ttl, to: group.to_ttl });
   }
 
   function renderGraphNode(node) {
@@ -336,29 +445,29 @@
     button.type = "button";
     button.dataset.graphNodeId = text(node.id);
     button.dataset.evidenceId = text((node.evidence_ids || [])[0]);
-    button.title = text(node.detail);
+    button.title = graphNodeDetailText(node);
     const heading = element("span", "path-graph-node-heading");
-    heading.appendChild(element("strong", "path-graph-node-title", node.label));
+    heading.appendChild(element("strong", "path-graph-node-title", graphNodeLabel(node)));
     if (node.destination_confirmed) {
-      heading.appendChild(badge("destination confirmed", "positive"));
+      heading.appendChild(badge(t("path.destinationConfirmed"), "positive"));
     }
     button.appendChild(heading);
-    button.appendChild(element("span", "path-graph-node-detail", node.detail));
+    button.appendChild(element("span", "path-graph-node-detail", graphNodeDetailText(node)));
     if (node.address) {
       button.appendChild(element("code", "path-graph-node-address", node.address));
     }
     const metadata = [];
     if (node.rtt_ms) {
-      metadata.push(`${node.rtt_ms} ms RTT`);
+      metadata.push(`${node.rtt_ms} ms ${t("path.rtt")}`);
     }
     if (node.response) {
       metadata.push(node.response);
     }
     if (node.attempts) {
-      metadata.push(`${node.attempts} attempt${node.attempts === 1 ? "" : "s"}`);
+      metadata.push(t("path.attempts", { count: node.attempts, plural: node.attempts === 1 ? "" : "s" }));
     }
     if (node.certainty) {
-      metadata.push(`certainty: ${node.certainty}`);
+      metadata.push(`${t("path.certainty")}: ${enumText("certainty", node.certainty)}`);
     }
     if (metadata.length) {
       button.appendChild(element("span", "path-graph-node-meta", metadata.join(" · ")));
@@ -367,28 +476,106 @@
     return button;
   }
 
+  function protocolText(protocol, presentationFallback) {
+    const raw = text(protocol || presentationFallback);
+    return enumText("protocol", raw, raw.toUpperCase());
+  }
+
+  function graphNodeLabel(node) {
+    switch (node.kind) {
+      case "probe_vantage":
+        return t("path.probeVantage");
+      case "responder":
+        return node.role === "destination_responder" ? t("path.destinationResponder") : t("path.intermediateResponder");
+      case "unobservable_range":
+        return t("path.unobservableTTLRange");
+      case "unknown_range":
+        return t("path.unknownTTLRange");
+      case "destination_confirmation":
+        return t("path.destinationConfirmation");
+      default:
+        return sourceText(node.label) || text(node.label);
+    }
+  }
+
+  function graphNodeDetailText(node) {
+    const range = node.ttl_from === node.ttl_to
+      ? text(node.ttl_from)
+      : `${text(node.ttl_from)}–${text(node.ttl_to)}`;
+    switch (node.kind) {
+      case "probe_vantage":
+        return t("source.graphVantage");
+      case "responder":
+        return t(node.role === "destination_responder" ? "source.graphDestinationResponder" : "source.graphResponder", { ttl: node.ttl });
+      case "unobservable_range":
+        return t("source.graphUnobservable", { range });
+      case "unknown_range":
+        return t("source.graphUnknown", { range });
+      case "destination_confirmation":
+        if (node.destination_tcp_connected) {
+          return t("source.graphDestinationTCP");
+        }
+        return node.destination_confirmed ? t("source.graphDestinationConfirmed") : t("source.graphDestinationNotConfirmed");
+      default:
+        return sourceText(node.detail) || text(node.detail);
+    }
+  }
+
+  function graphGroupDetailText(group) {
+    switch (group.kind) {
+      case "probe_vantage":
+        return t("source.graphVantage");
+      case "ttl_hop":
+        return group.node_ids && group.node_ids.length === 1
+          ? t("source.graphResponderOne")
+          : t("source.graphResponderMany", { count: (group.node_ids || []).length });
+      case "unobservable_range":
+        return t("source.graphUnobservable", { range: ttlRangeValue(group.from_ttl, group.to_ttl) });
+      case "unknown_range":
+        return t("source.graphUnknown", { range: ttlRangeValue(group.from_ttl, group.to_ttl) });
+      case "destination_confirmation":
+        return t("source.graphDestination");
+      default:
+        return sourceText(group.detail || group.label) || text(group.detail || group.label);
+    }
+  }
+
+  function graphEdgeLabel(kind, fallback) {
+    const keys = {
+      unobservable_visibility: "path.edgeUnobservable",
+      bounded_inference: "path.edgeInferred",
+      destination_confirmation: "path.edgeDestination",
+      observation_order: "path.edgeObserved",
+    };
+    return keys[kind] ? t(keys[kind]) : sourceText(fallback) || text(fallback);
+  }
+
+  function ttlRangeValue(from, to) {
+    return from === to ? text(from) : `${text(from)}–${text(to)}`;
+  }
+
   function selectGraphNode(node) {
     pathSelection.hidden = false;
     pathSelection.replaceChildren();
     const range = node.ttl_from === node.ttl_to ? `TTL ${text(node.ttl_from)}` : `TTL ${text(node.ttl_from)}–${text(node.ttl_to)}`;
     appendObservationRows(pathSelection, [
-      ["Role", node.role],
-      ["TTL / hop", node.kind === "probe_vantage" || node.kind === "destination_confirmation" ? node.label : range],
-      ["Observed address", node.address || "not applicable for this graph element"],
-      ["RTT", node.rtt_ms ? `${node.rtt_ms} ms` : "not observed"],
-      ["Response", node.response || "not specified"],
-      ["Attempts", node.attempts || "not specified"],
-      ["Protocol", node.protocol],
-      ["Destination port", portText(node.destination_port)],
-      ["Port-aware", booleanText(node.port_aware)],
-      ["Certainty", node.certainty || "unknown"],
-      ["Destination confirmed", booleanText(node.destination_confirmed)],
-      ["TCP connected", booleanText(node.destination_tcp_connected)],
-      ["Provenance", listText(node.provenance)],
-      ["Evidence", referenceValue(node.evidence_ids)],
-      ["Limitations", listText(node.limitations)],
+      [t("path.role"), enumText("role", node.role, text(node.role))],
+      [t("path.ttlHop"), node.kind === "probe_vantage" || node.kind === "destination_confirmation" ? graphNodeLabel(node) : range],
+      [t("path.observedAddress"), node.address || t("path.notApplicable")],
+      [t("path.rtt"), node.rtt_ms ? `${node.rtt_ms} ms` : t("path.notObserved")],
+      [t("path.response"), node.response || t("path.notSpecified")],
+      [t("path.attempts"), node.attempts || t("path.notSpecified")],
+      [t("path.protocol"), protocolText(node.protocol)],
+      [t("path.destinationPort"), portText(node.destination_port)],
+      [t("path.portAware"), booleanText(node.port_aware)],
+      [t("path.certainty"), enumText("certainty", node.certainty, t("path.unknown"))],
+      [t("path.destinationConfirmed"), booleanText(node.destination_confirmed)],
+      [t("path.tcpConnected"), booleanText(node.destination_tcp_connected)],
+      [t("path.provenance"), listText(node.provenance)],
+      [t("path.evidence"), referenceValue(node.evidence_ids)],
+      [t("path.limitations"), listText(node.limitations)],
     ]);
-    evidenceHeading.textContent = `Evidence inspector · ${text(node.label)}`;
+    evidenceHeading.textContent = `${t("evidence.inspector")} · ${graphNodeLabel(node)}`;
     const evidenceID = (node.evidence_ids || [])[0];
     if (evidenceID) {
       focusEvidence(evidenceID);
@@ -406,11 +593,11 @@
     const button = element("button", "evidence-link", label || descriptor.text);
     button.type = "button";
     button.dataset.evidenceId = evidenceID;
-    button.title = `Focus evidence: ${evidenceID}`;
-    button.setAttribute("aria-label", `Focus evidence ${evidenceID}`);
+    button.title = t("evidence.focus", { id: evidenceID });
+    button.setAttribute("aria-label", t("evidence.focus", { id: evidenceID }));
     button.addEventListener("click", () => focusEvidence(id));
     reference.appendChild(button);
-    reference.appendChild(copyValueButton(evidenceID, "Copy evidence ID"));
+    reference.appendChild(copyValueButton(evidenceID, t("evidence.copyID")));
     return reference;
   }
 
@@ -422,13 +609,19 @@
     return group;
   }
 
-  function setProgress(events, label, badgeLabel, tone) {
-    runStateLabel.textContent = label;
-    runStateBadge.textContent = badgeLabel;
-    runStateBadge.className = toneClass("badge", tone);
+  function setProgress(events, labelKey, badgeLabel, tone) {
+    progressHeader = { labelKey, badge: badgeLabel, tone };
+    progressEvents = (events || []).map((event) => ({ ...event }));
+    renderProgressList();
+  }
+
+  function renderProgressList() {
+    runStateLabel.textContent = t(progressHeader.labelKey);
+    runStateBadge.textContent = enumText("state", progressHeader.badge, progressHeader.badge);
+    runStateBadge.className = toneClass("badge", progressHeader.tone);
     progressList.replaceChildren();
     progressItems.clear();
-    for (const event of events || []) {
+    for (const event of progressEvents) {
       renderProgressEvent(event);
     }
   }
@@ -436,6 +629,12 @@
   function renderProgressEvent(event) {
     const name = text(event.probe_name);
     const key = name || "__lifecycle";
+    const eventIndex = progressEvents.findIndex((candidate) => (text(candidate.probe_name) || "__lifecycle") === key);
+    if (eventIndex >= 0) {
+      progressEvents[eventIndex] = { ...event };
+    } else {
+      progressEvents.push({ ...event });
+    }
     let item = progressItems.get(key);
     if (!item) {
       item = element("li", "progress-item neutral");
@@ -449,22 +648,22 @@
     const eventLabel = name ? `${name} · ${progressState(event.state)}` : progressState(event.state);
     item.appendChild(element("span", "progress-label", eventLabel));
     if (event.status) {
-      item.appendChild(badge(event.status, itemTone));
+      item.appendChild(badge(enumText("probeStatus", event.status, text(event.status)), itemTone));
     }
   }
 
   function progressState(state) {
     switch (state) {
       case "started":
-        return "Diagnostic started";
+        return t("progress.started");
       case "running":
-        return "Collecting observations";
+        return t("progress.running");
       case "complete":
-        return "Report available";
+        return t("progress.complete");
       case "error":
-        return "Run error";
+        return t("progress.error");
       default:
-        return "Waiting for observation";
+        return t("progress.waiting");
     }
   }
 
@@ -515,8 +714,9 @@
   }
 
   function renderBrowserCapture(snapshot) {
+    activeCaptureSnapshot = snapshot;
     const state = text(snapshot.state || "unknown");
-    browserCaptureState.textContent = state;
+    browserCaptureState.textContent = enumText("state", state, state);
     browserCaptureState.className = toneClass("badge", browserCaptureTone(state));
     browserCaptureStart.disabled = state === "starting" || state === "running" || state === "stopping";
     browserCaptureStop.hidden = state !== "starting" && state !== "running";
@@ -527,20 +727,20 @@
     browserCaptureFailures.textContent = text(snapshot.failure_count || 0);
     const started = snapshot.started_at ? Date.parse(snapshot.started_at) : NaN;
     const finished = snapshot.stopped_at ? Date.parse(snapshot.stopped_at) : Date.now();
-    browserCaptureElapsed.textContent = Number.isFinite(started) ? `${Math.max(0, Math.floor((finished - started) / 1000))}s` : "0s";
+    browserCaptureElapsed.textContent = formatSeconds(Number.isFinite(started) ? Math.max(0, Math.floor((finished - started) / 1000)) : 0);
 
     browserCaptureDestinationsBody.replaceChildren();
     const destinations = Array.isArray(snapshot.destinations) ? snapshot.destinations : [];
     browserCaptureEmpty.hidden = destinations.length !== 0;
     for (const destination of destinations) {
       const row = element("tr");
-      row.appendChild(element("td", "", destination.requested_hostname || "unknown"));
+      row.appendChild(element("td", "", destination.requested_hostname || t("browser.unknown")));
       row.appendChild(element("td", "", destination.port || "—"));
       const outcome = text(destination.outcome || "unknown");
-      row.appendChild(element("td", `capture-outcome-${browserCaptureOutcomeTone(outcome)}`, outcome));
+      row.appendChild(element("td", `capture-outcome-${browserCaptureOutcomeTone(outcome)}`, enumText("browserOutcome", outcome, outcome)));
       row.appendChild(element("td", "", destination.connection_count || 0));
-      row.appendChild(element("td", "", (destination.connected_endpoints || []).join(", ") || destination.connected_endpoint || "not observed"));
-      row.appendChild(element("td", "", destination.failure_reason || "none"));
+      row.appendChild(element("td", "", (destination.connected_endpoints || []).join(", ") || destination.connected_endpoint || t("browser.notObserved")));
+      row.appendChild(element("td", "", destination.failure_reason ? failureText(destination.failure_reason) : t("browser.none")));
       browserCaptureDestinationsBody.appendChild(row);
     }
     if (snapshot.id) {
@@ -550,6 +750,10 @@
       browserCaptureFQDNs.href = `/api/browser-captures/${encodeURIComponent(snapshot.id)}/fqdns.txt`;
       browserCaptureCopy.hidden = false;
     }
+  }
+
+  function formatSeconds(seconds) {
+    return `${seconds}${t("browser.seconds")}`;
   }
 
   function clearBrowserCapturePoll() {
@@ -573,19 +777,30 @@
         clearBrowserCapturePoll();
       }
     } catch (err) {
-      showBrowserCaptureError(err instanceof Error ? err.message : "could not load browser capture state");
+      showBrowserCaptureError(err instanceof Error ? err.message : t("browser.loadError"));
       capturePollTimer = setTimeout(() => void pollBrowserCapture(), 1500);
     }
   }
 
   function setSessionState(state) {
-    const label = state === "running" ? "Collecting diagnostic observations" :
-      state === "cancelling" ? "Cancelling diagnostic run" :
-        state === "completed" ? "Diagnostic report ready" :
-          state === "cancelled" ? "Diagnostic run cancelled" : text(state);
+    currentSessionState = state;
+    renderSessionState(state);
+  }
+
+  function renderSessionState(state) {
+    const labelKeys = {
+      starting: "session.starting",
+      running: "session.running",
+      cancelling: "session.cancelling",
+      completed: "session.completed",
+      cancelled: "session.cancelled",
+      failed: "session.failed",
+      error: "session.requestFailed",
+    };
+    const label = labelKeys[state] ? t(labelKeys[state]) : enumText("state", state, text(state));
     const tone = state === "completed" ? "positive" : state === "cancelled" ? "warning" : state === "failed" ? "negative" : "neutral";
     runStateLabel.textContent = label;
-    runStateBadge.textContent = text(state);
+    runStateBadge.textContent = enumText("state", state, text(state));
     runStateBadge.className = toneClass("badge", tone);
     cancelButton.hidden = state !== "running" && state !== "cancelling";
     cancelButton.disabled = state === "cancelling";
@@ -606,7 +821,7 @@
       body = {};
     }
     if (!response.ok) {
-      throw new Error(body.error || `request failed (${response.status})`);
+      throw new Error(body.error || t("session.requestFailedWithStatus", { status: response.status }));
     }
     return body;
   }
@@ -615,7 +830,7 @@
     const response = await fetch(`/api/diagnoses/${encodeURIComponent(id)}/view`, { cache: "no-store" });
     const view = await readResponse(response);
     if (!view.report || !view.canonical_json) {
-      throw new Error("diagnostic session ended without a canonical report");
+      throw new Error(t("session.endedWithoutReport"));
     }
     renderView(view);
   }
@@ -628,10 +843,10 @@
         await loadSessionView(activeSessionID);
       }
     } catch (err) {
-      showError(err instanceof Error ? err.message : "could not load diagnostic report");
+      showError(err instanceof Error ? err.message : t("session.reportLoadError"));
     }
     button.disabled = false;
-    button.textContent = "Diagnose →";
+    button.textContent = t("target.diagnoseArrow");
     activeSessionID = "";
   }
 
@@ -640,7 +855,7 @@
     try {
       body = JSON.parse(event.data);
     } catch (_) {
-      showError("received invalid progress data");
+      showError(t("session.invalidProgress"));
       return;
     }
 
@@ -686,7 +901,7 @@
     }
     eventSource.onerror = () => {
       if (eventSource && eventSource.readyState === EventSource.CLOSED && activeSessionID) {
-        showError("progress stream closed before the session completed");
+        showError(t("session.progressClosed"));
       }
     };
   }
@@ -694,16 +909,16 @@
   function renderProbeBody(probe) {
     const body = element("div", "card-body");
     const metadata = element("div", "metadata");
-    metadata.appendChild(metadataItem("duration", `${text(probe.duration_ms)} ms`));
-    metadata.appendChild(metadataItem("layer", probe.layer));
-    metadata.appendChild(metadataItem("fault domain", probe.fault_domain));
+    metadata.appendChild(metadataItem(t("probe.duration"), `${text(probe.duration_ms)} ${t("common.milliseconds")}`));
+    metadata.appendChild(metadataItem(t("probe.layer"), enumText("layer", probe.layer, probe.layer)));
+    metadata.appendChild(metadataItem(t("probe.faultDomain"), enumText("faultDomain", probe.fault_domain, probe.fault_domain)));
     body.appendChild(metadata);
 
-    const interpretation = element("p", "interpretation", `Reason: ${text(probe.failure_reason)}`);
+    const interpretation = element("p", "interpretation", `${t("probe.reason")}: ${failureText(probe.failure_reason)}`);
     body.appendChild(interpretation);
     if (probe.evidence_ids && probe.evidence_ids.length) {
       const refs = element("div", "card-references");
-      refs.appendChild(element("span", "reference-label", "Evidence"));
+      refs.appendChild(element("span", "reference-label", t("evidence.structured")));
       refs.appendChild(referenceGroup(probe.evidence_ids));
       body.appendChild(refs);
     }
@@ -720,7 +935,7 @@
       const card = element("article", cardClass);
       const header = element("div", "card-heading");
       header.appendChild(element("h3", "card-title", `${index + 1}. ${text(probe.name)}`));
-      header.appendChild(badge(probe.status_label || probe.status, badgeTone));
+      header.appendChild(badge(enumText("probeStatus", probe.status, sourceText(probe.status_label || probe.status)), badgeTone));
       card.appendChild(header);
       card.appendChild(renderProbeBody(probe));
       probes.appendChild(card);
@@ -732,7 +947,7 @@
     const title = element("h3", "card-title", `${index + 1}. ${text(probe.name)}`);
     title.title = text(probe.name);
     summary.appendChild(title);
-    summary.appendChild(badge(probe.status_label || probe.status, badgeTone));
+    summary.appendChild(badge(enumText("probeStatus", probe.status, sourceText(probe.status_label || probe.status)), badgeTone));
     card.appendChild(summary);
     card.appendChild(renderProbeBody(probe));
     probes.appendChild(card);
@@ -748,21 +963,21 @@
   function renderFinding(finding) {
     const card = element("article", toneClass("finding-card", finding.tone));
     const header = element("div", "card-heading");
-    header.appendChild(element("h3", "card-title", finding.label || finding.failure_reason));
-    header.appendChild(badge(finding.tone === "warning" ? "Review" : "Finding", finding.tone));
+    header.appendChild(element("h3", "card-title", failureText(finding.failure_reason, finding.label)));
+    header.appendChild(badge(finding.tone === "warning" ? t("finding.review") : t("finding.label"), finding.tone));
     card.appendChild(header);
 
     const metadata = element("div", "metadata");
-    metadata.appendChild(metadataItem("reason", finding.failure_reason));
-    metadata.appendChild(metadataItem("layer", finding.layer));
-    metadata.appendChild(metadataItem("fault domain", finding.fault_domain));
+    metadata.appendChild(metadataItem(t("finding.reason"), failureText(finding.failure_reason)));
+    metadata.appendChild(metadataItem(t("finding.layer"), enumText("layer", finding.layer, finding.layer)));
+    metadata.appendChild(metadataItem(t("finding.faultDomain"), enumText("faultDomain", finding.fault_domain, finding.fault_domain)));
     card.appendChild(metadata);
     if (finding.probe_names && finding.probe_names.length) {
-      card.appendChild(element("p", "reference-line", `Probe lanes: ${finding.probe_names.join(", ")}`));
+      card.appendChild(element("p", "reference-line", `${t("finding.probeLanes")}: ${finding.probe_names.join(", ")}`));
     }
     if (finding.evidence_ids && finding.evidence_ids.length) {
       const refs = element("div", "card-references");
-      refs.appendChild(element("span", "reference-label", "Drill into evidence"));
+      refs.appendChild(element("span", "reference-label", t("evidence.drill")));
       refs.appendChild(referenceGroup(finding.evidence_ids));
       card.appendChild(refs);
     }
@@ -772,55 +987,105 @@
   function renderDestinationStatus(status) {
     const destination = status || {};
     destinationStatusStrip.className = toneClass("destination-status-strip", destinationTone(destination.status));
-    destinationStatusLabel.textContent = text(destination.label || destination.status).toUpperCase();
-    destinationStatusDetail.textContent = text(destination.detail);
-    destinationStatusService.textContent = text(destination.requested_service || "Service not observed");
-    destinationStatusIdentity.textContent = text(destination.requested_identity || "Identity not observed");
+    destinationStatusLabel.textContent = destinationStateText(destination.status, destination.label).toUpperCase();
+    destinationStatusDetail.textContent = destinationDetailText(destination);
+    destinationStatusService.textContent = serviceText(destination.requested_service) || t("destination.serviceNotObserved");
+    destinationStatusIdentity.textContent = text(destination.requested_identity) || t("destination.identityNotObserved");
     destinationStatusEndpoint.textContent = endpointText(destination.effective_endpoint);
     if (destination.failure_reason && destination.failure_reason !== "none") {
       destinationStatusReason.hidden = false;
-      destinationStatusReason.textContent = `Reason: ${text(destination.failure_reason)}`;
+      destinationStatusReason.textContent = t("destination.reason", { value: failureText(destination.failure_reason) });
     } else {
       destinationStatusReason.hidden = true;
       destinationStatusReason.textContent = "";
     }
   }
 
+  function destinationStateText(state, fallback) {
+    const keys = {
+      reachable: "destination.reachable",
+      unreachable: "destination.unreachable",
+      degraded: "destination.degraded",
+      indeterminate: "destination.indeterminate",
+    };
+    return keys[state] ? t(keys[state]) : sourceText(fallback || state) || text(fallback || state);
+  }
+
+  function destinationDetailText(destination) {
+    const detail = text(destination.detail);
+    if (detail === "") {
+      return "";
+    }
+    const httpStatus = /^HTTP returned (\d+)\.$/.exec(detail);
+    if (httpStatus) {
+      return t("destination.detail.httpStatus", { code: httpStatus[1] });
+    }
+    return sourceText(detail) || detail;
+  }
+
+  function serviceText(value) {
+    const raw = text(value);
+    const keys = {
+      http: "service.http",
+      https: "service.https",
+      smb: "service.smb",
+      "file sharing (smb)": "service.smb",
+      rdp: "service.rdp",
+      ssh: "service.ssh",
+      dns: "service.dns",
+      custom_tcp: "service.customTCP",
+      "custom tcp": "service.customTCP",
+      custom_tls: "service.customTLS",
+      "custom tls": "service.customTLS",
+    };
+    const key = keys[raw.toLowerCase()];
+    return key ? t(key) : raw;
+  }
+
+  function failureText(reason, presentationFallback) {
+    const raw = text(reason);
+    const key = `enum.failure.${raw}`;
+    if (translate.has(key)) {
+      return t(key);
+    }
+    return sourceText(presentationFallback) || (presentationFallback ? text(presentationFallback) : raw);
+  }
+
   function renderEndpointObservation(endpoint) {
     endpointObservation.replaceChildren();
     endpointCandidates.replaceChildren();
     if (!endpoint || !endpoint.requested_identity) {
-      endpointObservation.appendChild(element("div", "empty-state compact", "No normalized endpoint observation is available."));
+      endpointObservation.appendChild(element("div", "empty-state compact", t("endpoint.noObservation")));
       return;
     }
     appendObservationRows(endpointObservation, [
-      ["Original input", endpoint.original_input],
-      ["Requested identity", endpoint.requested_identity],
-      ["Literal IP", endpoint.literal_ip],
-      ["Service", endpoint.service && (endpoint.service.label || endpoint.service.id)],
-      ["Application protocol", endpoint.application_protocol],
-      ["Transport protocol", endpoint.transport_protocol],
-      ["Port", endpoint.port || "not specified"],
-      ["Resource", endpoint.resource],
-      ["Selected endpoint", endpointText(endpoint.selected_endpoint)],
-      ["Tested endpoint", endpointText(endpoint.tested_endpoint)],
-      ["Certainty", endpoint.certainty],
-      ["Provenance", listText(endpoint.provenance)],
-      ["Evidence", referenceValue(endpoint.evidence_ids)],
+      [t("endpoint.originalInput"), endpoint.original_input],
+      [t("endpoint.requestedIdentity"), endpoint.requested_identity],
+      [t("endpoint.literalIP"), endpoint.literal_ip],
+      [t("endpoint.service"), endpoint.service && serviceText(endpoint.service.id || endpoint.service.label)],
+      [t("endpoint.applicationProtocol"), protocolText(endpoint.application_protocol)],
+      [t("endpoint.transportProtocol"), protocolText(endpoint.transport_protocol)],
+      [t("endpoint.port"), endpoint.port || t("endpoint.notSpecified")],
+      [t("endpoint.resource"), endpoint.resource],
+      [t("endpoint.selectedEndpoint"), endpointText(endpoint.selected_endpoint)],
+      [t("endpoint.testedEndpoint"), endpointText(endpoint.tested_endpoint)],
+      [t("endpoint.certainty"), enumText("certainty", endpoint.certainty, endpoint.certainty)],
+      [t("endpoint.provenance"), listText(endpoint.provenance)],
+      [t("endpoint.evidence"), referenceValue(endpoint.evidence_ids)],
     ]);
-    renderCandidateTable(endpointCandidates, "Resolved candidates", endpoint.resolved_candidates);
-    renderCandidateTable(endpointCandidates, "Probe candidates", endpoint.probe_candidates);
+    renderCandidateTable(endpointCandidates, t("endpoint.resolvedCandidates"), endpoint.resolved_candidates);
+    renderCandidateTable(endpointCandidates, t("endpoint.probeCandidates"), endpoint.probe_candidates);
     if (endpoint.candidate_attempts && endpoint.candidate_attempts.length) {
-      const title = element("h3", "observation-subheading", "Candidate attempts");
+      const title = element("h3", "observation-subheading", t("endpoint.candidateAttempts"));
       endpointCandidates.appendChild(title);
       const table = element("table", "observation-grid");
-      appendTableHeader(table, ["Candidate", "Status", "Failure", "Evidence"]);
+      appendTableHeader(table, [t("endpoint.candidate"), t("endpoint.status"), t("endpoint.failure"), t("endpoint.evidence")]);
       const body = table.querySelector("tbody");
       for (const attempt of endpoint.candidate_attempts) {
         const row = element("tr");
         row.appendChild(element("td", "", endpointText(attempt.candidate)));
-        row.appendChild(element("td", "", attempt.status));
-        row.appendChild(element("td", "", attempt.failure_reason || "none"));
+        row.appendChild(element("td", "", enumText("probeStatus", attempt.status, attempt.status)));
+        row.appendChild(element("td", "", attempt.failure_reason ? failureText(attempt.failure_reason) : t("common.none")));
         row.appendChild(referenceCell(attempt.evidence_ids));
         body.appendChild(row);
       }
@@ -834,15 +1099,15 @@
     }
     container.appendChild(element("h3", "observation-subheading", title));
     const table = element("table", "observation-grid");
-    appendTableHeader(table, ["Address", "Family", "Order", "Certainty", "Provenance", "Evidence"]);
+    appendTableHeader(table, [t("endpoint.address"), t("endpoint.family"), t("endpoint.order"), t("endpoint.certainty"), t("endpoint.provenance"), t("endpoint.evidence")]);
     const body = table.querySelector("tbody");
     for (const candidate of candidates) {
       const row = element("tr");
       row.appendChild(element("td", "", candidate.address));
       row.appendChild(element("td", "", candidate.family));
       row.appendChild(element("td", "", candidate.order));
-      row.appendChild(element("td", "", candidate.certainty || "unknown"));
-      row.appendChild(element("td", "", candidate.provenance || "not specified"));
+      row.appendChild(element("td", "", candidate.certainty ? enumText("certainty", candidate.certainty, candidate.certainty) : t("common.unknown")));
+      row.appendChild(element("td", "", candidate.provenance || t("common.notSpecified")));
       row.appendChild(referenceCell(candidate.evidence_ids));
       body.appendChild(row);
     }
@@ -857,39 +1122,39 @@
 
   function renderTransportObservation(observation) {
     renderObservationOrEmpty(transportObservation, observation, [
-      ["Applicability", "applicability"],
-      ["Requested endpoint", "requested_endpoint"],
-      ["Probe endpoint", "probe_endpoint", endpointText],
-      ["Tested endpoint", "tested_endpoint", endpointText],
-      ["Connection outcome", "connection_outcome"],
-      ["Connected", "connected", booleanText],
-      ["Local endpoint", "local_endpoint"],
-      ["Remote endpoint", "remote_endpoint", endpointText],
-      ["Failure reason", "failure_reason"],
-      ["Fault domain", "fault_domain"],
-      ["Certainty", "certainty"],
-      ["Limitations", "limitations", listText],
-      ["Evidence", "evidence_ids", referenceValue],
+      [t("application.applicability"), "applicability", (value) => enumText("applicability", value, value)],
+      [t("application.requestedEndpoint"), "requested_endpoint"],
+      [t("application.probeEndpoint"), "probe_endpoint", endpointText],
+      [t("application.testedEndpoint"), "tested_endpoint", endpointText],
+      [t("application.connectionOutcome"), "connection_outcome", (value) => enumText("transportOutcome", value, value)],
+      [t("application.connected"), "connected", booleanText],
+      [t("application.localEndpoint"), "local_endpoint"],
+      [t("application.remoteEndpoint"), "remote_endpoint", endpointText],
+      [t("application.failureReason"), "failure_reason", failureText],
+      [t("application.faultDomain"), "fault_domain", (value) => enumText("faultDomain", value, value)],
+      [t("application.certainty"), "certainty", (value) => enumText("certainty", value, value)],
+      [t("application.limitations"), "limitations", listText],
+      [t("application.evidence"), "evidence_ids", referenceValue],
     ]);
   }
 
   function renderSecurityObservation(observation) {
     renderObservationOrEmpty(securityObservation, observation, [
-      ["Applicability", "applicability"],
-      ["Attempted", "attempted", booleanText],
-      ["Handshake complete", "handshake_complete", booleanText],
-      ["TLS version", "tls_version"],
-      ["Cipher suite", "cipher_suite"],
-      ["Negotiated protocol", "negotiated_protocol"],
-      ["Server name", "server_name"],
-      ["Endpoint used", "endpoint_used", endpointText],
-      ["Certificate validation", "certificate_validation"],
-      ["Peer certificates", "peer_certificate_count"],
-      ["Failure reason", "failure_reason"],
-      ["Fault domain", "fault_domain"],
-      ["Certainty", "certainty"],
-      ["Limitations", "limitations", listText],
-      ["Evidence", "evidence_ids", referenceValue],
+      [t("application.applicability"), "applicability", (value) => enumText("applicability", value, value)],
+      [t("application.attempted"), "attempted", booleanText],
+      [t("application.handshakeComplete"), "handshake_complete", booleanText],
+      [t("application.tlsVersion"), "tls_version"],
+      [t("application.cipherSuite"), "cipher_suite"],
+      [t("application.negotiatedProtocol"), "negotiated_protocol"],
+      [t("application.serverName"), "server_name"],
+      [t("application.endpointUsed"), "endpoint_used", endpointText],
+      [t("application.certificateValidation"), "certificate_validation", (value) => enumText("certificateValidation", value, value)],
+      [t("application.peerCertificates"), "peer_certificate_count"],
+      [t("application.failureReason"), "failure_reason", failureText],
+      [t("application.faultDomain"), "fault_domain", (value) => enumText("faultDomain", value, value)],
+      [t("application.certainty"), "certainty", (value) => enumText("certainty", value, value)],
+      [t("application.limitations"), "limitations", listText],
+      [t("application.evidence"), "evidence_ids", referenceValue],
     ]);
     if (observation && observation.applicability && observation.certificates && observation.certificates.length) {
       renderCertificateTable(securityObservation, observation.certificates);
@@ -897,19 +1162,19 @@
   }
 
   function renderCertificateTable(container, certificates) {
-    container.appendChild(element("h3", "observation-subheading", "Peer certificates"));
+    container.appendChild(element("h3", "observation-subheading", t("application.peerCertificates")));
     const table = element("table", "observation-grid certificate-table");
-    appendTableHeader(table, ["Chain", "Subject", "Issuer", "Validity", "Serial", "SHA-256"]);
+    appendTableHeader(table, [t("application.chain"), t("application.certificateSubject"), t("application.certificateIssuer"), t("application.certificateValidity"), t("application.certificateSerial"), t("application.certificateSHA256")]);
     const body = table.querySelector("tbody");
     for (const certificate of certificates) {
       const row = element("tr");
       row.appendChild(element("td", "", certificate.chain_index));
-      row.appendChild(semanticTableCell("Certificate subject", certificate.subject || "not observed"));
-      row.appendChild(semanticTableCell("Certificate issuer", certificate.issuer || "not observed"));
-      const validity = [certificate.not_before, certificate.not_after].filter(Boolean).join(" → ") || "not observed";
-      row.appendChild(semanticTableCell("Certificate validity", validity));
-      row.appendChild(semanticTableCell("Certificate serial", certificate.serial_number || "not observed"));
-      row.appendChild(semanticTableCell("Certificate SHA-256", certificate.sha256 || "not observed"));
+      row.appendChild(semanticTableCell(t("application.certificateSubject"), certificate.subject || t("common.notObserved")));
+      row.appendChild(semanticTableCell(t("application.certificateIssuer"), certificate.issuer || t("common.notObserved")));
+      const validity = [certificate.not_before, certificate.not_after].filter(Boolean).join(" → ") || t("common.notObserved");
+      row.appendChild(semanticTableCell(t("application.certificateValidity"), validity));
+      row.appendChild(semanticTableCell(t("application.certificateSerial"), certificate.serial_number || t("common.notObserved")));
+      row.appendChild(semanticTableCell(t("application.certificateSHA256"), certificate.sha256 || t("common.notObserved")));
       body.appendChild(row);
     }
     container.appendChild(table);
@@ -924,27 +1189,27 @@
   function renderApplicationObservation(observation) {
     applicationObservation.replaceChildren();
     if (!observation) {
-      applicationObservation.appendChild(element("div", "empty-state compact", "No canonical application observation is available."));
+      applicationObservation.appendChild(element("div", "empty-state compact", t("application.noObservation")));
       return;
     }
 
     const protocol = text(observation.protocol || "unknown").toLowerCase();
     const commonRows = [
-      ["Applicability", observation.applicability || "unknown"],
-      ["Protocol", protocol],
-      ["Request attempted", booleanText(observation.request_attempted)],
-      ["Response received", booleanText(observation.response_received)],
-      ["Transport connected", booleanText(observation.transport_connected)],
-      ["Handshake attempted", booleanText(observation.handshake_attempted)],
-      ["Handshake complete", booleanText(observation.handshake_complete)],
-      ["Result", observation.result || "unknown"],
-      ["Protocol result", observation.protocol_result || "unknown"],
-      ["Endpoint used", endpointText(observation.endpoint_used)],
-      ["Requested resource", observation.requested_resource || "not specified"],
-      ["Failure reason", observation.failure_reason || "none"],
-      ["Fault domain", observation.fault_domain || "unknown"],
-      ["Certainty", observation.certainty || "unknown"],
-      ["Limitations", listText(observation.limitations)],
+      [t("application.applicability"), enumText("applicability", observation.applicability || "unknown")],
+      [t("application.protocol"), protocolText(protocol)],
+      [t("application.requestAttempted"), booleanText(observation.request_attempted)],
+      [t("application.responseReceived"), booleanText(observation.response_received)],
+      [t("application.transportConnected"), booleanText(observation.transport_connected)],
+      [t("application.handshakeAttempted"), booleanText(observation.handshake_attempted)],
+      [t("application.handshakeComplete"), booleanText(observation.handshake_complete)],
+      [t("application.result"), enumText("result", observation.result || "unknown")],
+      [t("application.protocolResult"), enumText("protocolResult", observation.protocol_result || "unknown")],
+      [t("application.endpointUsed"), endpointText(observation.endpoint_used)],
+      [t("application.requestedResource"), observation.requested_resource || t("common.notSpecified")],
+      [t("application.failureReason"), failureText(observation.failure_reason || "none")],
+      [t("application.faultDomain"), enumText("faultDomain", observation.fault_domain || "unknown")],
+      [t("application.certainty"), enumText("certainty", observation.certainty || "unknown")],
+      [t("application.limitations"), listText(observation.limitations)],
     ];
     appendObservationRows(applicationObservation, commonRows);
 
@@ -955,63 +1220,63 @@
     } else if (protocol === "smb" || observation.smb) {
       renderSMBApplication(applicationObservation, observation.smb);
     } else if (protocol === "ssh" || observation.ssh) {
-      renderProtocolApplication(applicationObservation, "SSH handshake", observation.ssh || observation, false);
+      renderProtocolApplication(applicationObservation, t("application.sshHandshake"), observation.ssh || observation, false);
     } else if (protocol === "rdp" || observation.rdp) {
-      renderProtocolApplication(applicationObservation, "RDP negotiation", observation.rdp || observation, true);
+      renderProtocolApplication(applicationObservation, t("application.rdpNegotiation"), observation.rdp || observation, true);
     } else {
-      applicationObservation.appendChild(element("h3", "observation-subheading", "Service-specific application view"));
-      appendObservationRows(applicationObservation, [["State", "unsupported or not attempted"]]);
+      applicationObservation.appendChild(element("h3", "observation-subheading", t("application.serviceView")));
+      appendObservationRows(applicationObservation, [[t("policy.state"), t("application.unsupportedOrNotAttempted")]]);
     }
     renderApplicationReferences(applicationObservation, observation);
   }
 
   function renderHTTPApplication(container, http) {
-    container.appendChild(element("h3", "observation-subheading", "HTTP / HTTPS response"));
+    container.appendChild(element("h3", "observation-subheading", t("application.httpResponse")));
     appendObservationRows(container, [
-      ["HTTP version", http.http_version || "not observed"],
-      ["Status code", http.status_code || "not observed"],
-      ["Status", http.status || "not observed"],
-      ["URL", http.url || "not observed"],
-      ["Resource", http.requested_resource || "not specified"],
+      [t("application.httpVersion"), http.http_version || t("common.notObserved")],
+      [t("application.statusCode"), http.status_code || t("common.notObserved")],
+      [t("application.status"), http.status || t("common.notObserved")],
+      [t("application.url"), http.url || t("common.notObserved")],
+      [t("application.resource"), http.requested_resource || t("common.notSpecified")],
     ]);
     const redirects = http.redirects || [];
-    container.appendChild(element("h3", "observation-subheading", "Redirects"));
+    container.appendChild(element("h3", "observation-subheading", t("application.redirects")));
     if (!redirects.length) {
-      appendObservationRows(container, [["Redirect chain", "none observed"]]);
+      appendObservationRows(container, [[t("application.redirectChain"), t("application.noneObserved")] ]);
       return;
     }
     const table = element("table", "observation-grid");
-    appendTableHeader(table, ["Status", "From", "Location", "To"]);
+    appendTableHeader(table, [t("application.status"), t("application.from"), t("application.location"), t("application.to")]);
     const body = table.querySelector("tbody");
     for (const redirect of redirects) {
       const row = element("tr");
       row.appendChild(element("td", "", redirect.status_code || "unknown"));
-      row.appendChild(element("td", "", redirect.url || "not observed"));
-      row.appendChild(element("td", "", redirect.location || "not observed"));
-      row.appendChild(element("td", "", redirect.to_url || "not observed"));
+      row.appendChild(element("td", "", redirect.url || t("common.notObserved")));
+      row.appendChild(element("td", "", redirect.location || t("common.notObserved")));
+      row.appendChild(element("td", "", redirect.to_url || t("common.notObserved")));
       body.appendChild(row);
     }
     container.appendChild(table);
   }
 
   function renderDNSApplication(container, dns) {
-    container.appendChild(element("h3", "observation-subheading", "DNS service response"));
+    container.appendChild(element("h3", "observation-subheading", t("application.dnsResponse")));
     if (!dns) {
-      appendObservationRows(container, [["State", "not attempted"]]);
+      appendObservationRows(container, [[t("policy.state"), t("common.notAttempted")]]);
       return;
     }
     appendObservationRows(container, [
-      ["Query", `${dns.query_name || "unknown"} (${dns.query_type || "unknown"})`],
-      ["Requested endpoint", dns.requested_endpoint || "not observed"],
-      ["Result", dns.result || "unknown"],
-      ["Response received", booleanText(dns.response_received)],
-      ["Divergence", booleanText(dns.divergence)],
-      ["Failure reason", dns.failure_reason || "none"],
-      ["Certainty", dns.certainty || "unknown"],
-      ["Limitations", listText(dns.limitations)],
+      [t("application.query"), `${dns.query_name || t("common.unknown")} (${dns.query_type || t("common.unknown")})`],
+      [t("application.requestedEndpoint"), dns.requested_endpoint || t("common.notObserved")],
+      [t("application.result"), enumText("result", dns.result || "unknown")],
+      [t("application.responseReceived"), booleanText(dns.response_received)],
+      [t("application.divergence"), booleanText(dns.divergence)],
+      [t("application.failureReason"), failureText(dns.failure_reason || "none")],
+      [t("application.certainty"), enumText("certainty", dns.certainty || "unknown")],
+      [t("application.limitations"), listText(dns.limitations)],
     ]);
     const table = element("table", "observation-grid");
-    appendTableHeader(table, ["Lane", "Attempted", "Response", "Outcome", "RCODE", "Truncated", "Fallback", "Provenance", "Evidence"]);
+    appendTableHeader(table, [t("application.lane"), t("application.attempted"), t("application.response"), t("application.outcome"), t("application.rcode"), t("application.truncated"), t("application.fallback"), t("application.provenance"), t("application.evidence")]);
     const body = table.querySelector("tbody");
     const lanes = [
       dns.udp || { transport: "udp" },
@@ -1019,11 +1284,11 @@
     ];
     for (const lane of lanes) {
       const row = element("tr");
-      const fallback = lane.fallback ? `yes${lane.fallback_reason ? ` · ${lane.fallback_reason}` : ""}` : "no";
+      const fallback = lane.fallback ? `${t("common.yes")}${lane.fallback_reason ? ` · ${lane.fallback_reason}` : ""}` : t("common.no");
       row.appendChild(element("td", "", text(lane.transport || "unknown").toUpperCase()));
       row.appendChild(element("td", "", booleanText(lane.attempted)));
       row.appendChild(element("td", "", booleanText(lane.response_received)));
-      row.appendChild(element("td", "", lane.outcome || "not_attempted"));
+      row.appendChild(element("td", "", enumText("result", lane.outcome || "not_attempted")));
       row.appendChild(element("td", "", rcodeText(lane)));
       row.appendChild(element("td", "", booleanText(lane.truncated)));
       row.appendChild(element("td", "", fallback));
@@ -1038,107 +1303,107 @@
     if (lane.rcode_name) {
       return lane.rcode === undefined || lane.rcode === null ? lane.rcode_name : `${lane.rcode_name} (${lane.rcode})`;
     }
-    return lane.rcode === undefined || lane.rcode === null ? "not observed" : text(lane.rcode);
+    return lane.rcode === undefined || lane.rcode === null ? t("common.notObserved") : text(lane.rcode);
   }
 
   function renderSMBApplication(container, smb) {
-    container.appendChild(element("h3", "observation-subheading", "SMB negotiation"));
+    container.appendChild(element("h3", "observation-subheading", t("application.smbNegotiation")));
     if (!smb) {
-      appendObservationRows(container, [["State", "not attempted"]]);
+      appendObservationRows(container, [[t("policy.state"), t("common.notAttempted")]]);
       return;
     }
     appendObservationRows(container, [
-      ["Negotiation result", smb.result || "unknown"],
-      ["Negotiated", booleanText(smb.negotiated)],
-      ["Dialect", smb.dialect || "not observed"],
-      ["Dialect revision", smb.dialect_revision || "not observed"],
-      ["Capabilities", listText(smb.capabilities)],
-      ["Server GUID", smb.server_guid || "not exposed"],
-      ["Security mode", smb.security_mode || "not exposed"],
-      ["Max transact size", smb.max_transact_size || "not exposed"],
-      ["Max read size", smb.max_read_size || "not exposed"],
-      ["Max write size", smb.max_write_size || "not exposed"],
-      ["Response bytes", smb.response_bytes || "not observed"],
+      [t("application.negotiationResult"), enumText("result", smb.result || "unknown")],
+      [t("application.negotiated"), booleanText(smb.negotiated)],
+      [t("application.dialect"), smb.dialect || t("common.notObserved")],
+      [t("application.dialectRevision"), smb.dialect_revision || t("common.notObserved")],
+      [t("application.capabilities"), listText(smb.capabilities)],
+      [t("application.serverGUID"), smb.server_guid || t("application.notExposed")],
+      [t("application.securityMode"), smb.security_mode || t("application.notExposed")],
+      [t("application.maxTransact"), smb.max_transact_size || t("application.notExposed")],
+      [t("application.maxRead"), smb.max_read_size || t("application.notExposed")],
+      [t("application.maxWrite"), smb.max_write_size || t("application.notExposed")],
+      [t("application.responseBytes"), smb.response_bytes || t("common.notObserved")],
     ]);
   }
 
   function renderProtocolApplication(container, heading, protocol, rdp) {
     container.appendChild(element("h3", "observation-subheading", heading));
     appendObservationRows(container, [
-      ["Handshake attempted", booleanText(protocol.handshake_attempted)],
-      ["Handshake complete", booleanText(protocol.handshake_complete)],
-      ["Response received", booleanText(protocol.response_received)],
-      ["Transport connected", booleanText(protocol.transport_connected)],
-      ["Result", protocol.result || "unknown"],
-      ["Server identification", protocol.server_identification || "not observed"],
-      ["Negotiated security", rdp ? (protocol.negotiated_security_protocol || "not negotiated") : "not applicable"],
-      ["Requested security", rdp ? listText(protocol.requested_security_protocols) : "not applicable"],
+      [t("application.handshakeAttempted"), booleanText(protocol.handshake_attempted)],
+      [t("application.handshakeComplete"), booleanText(protocol.handshake_complete)],
+      [t("application.responseReceived"), booleanText(protocol.response_received)],
+      [t("application.transportConnected"), booleanText(protocol.transport_connected)],
+      [t("application.result"), enumText("protocolResult", protocol.result || "unknown")],
+      [t("application.serverIdentification"), protocol.server_identification || t("common.notObserved")],
+      [t("application.negotiatedSecurity"), rdp ? (protocol.negotiated_security_protocol || t("application.notNegotiated")) : t("common.notApplicable")],
+      [t("application.requestedSecurity"), rdp ? listText(protocol.requested_security_protocols) : t("common.notApplicable")],
     ]);
   }
 
   function renderApplicationReferences(container, observation) {
-    container.appendChild(element("h3", "observation-subheading", "Application provenance"));
+    container.appendChild(element("h3", "observation-subheading", t("application.applicationProvenance")));
     appendObservationRows(container, [
-      ["Provenance", listText(observation.provenance)],
-      ["Probe lanes", listText(observation.probe_names)],
-      ["Evidence", referenceValue(observation.evidence_ids)],
+      [t("application.provenance"), listText(observation.provenance)],
+      [t("application.probeLanes"), listText(observation.probe_names)],
+      [t("application.evidence"), referenceValue(observation.evidence_ids)],
     ]);
   }
 
   function renderPolicyObservation(observation) {
     policyObservation.replaceChildren();
     if (!observation || (!observation.requested_identity && !observation.state && !(observation.paths || []).length)) {
-      policyObservation.appendChild(element("div", "empty-state compact", "No canonical proxy or policy observation is available."));
+      policyObservation.appendChild(element("div", "empty-state compact", t("policy.noObservation")));
       return;
     }
     appendObservationRows(policyObservation, [
-      ["Requested identity", observation.requested_identity],
-      ["State", observation.state],
-      ["Unsupported", booleanText(observation.unsupported)],
-      ["Proxy configuration diverges", booleanText(observation.proxy_configuration_diverges)],
-      ["Divergence known", booleanText(observation.proxy_configuration_divergence_known)],
-      ["Direct vs proxy", comparisonText(observation.direct_vs_proxy)],
-      ["Firewall", observation.firewall && observation.firewall.state],
-      ["TLS policy state", observation.tls && observation.tls.state],
-      ["Possible interception", observation.tls && booleanText(observation.tls.possible_interception)],
-      ["Interception suspicion", observation.tls && observation.tls.interception_suspicion],
-      ["Certainty", observation.certainty],
-      ["Provenance", listText(observation.provenance)],
-      ["Evidence", referenceValue(observation.evidence_ids)],
+      [t("policy.requestedIdentity"), observation.requested_identity],
+      [t("policy.state"), observation.state],
+      [t("policy.unsupported"), booleanText(observation.unsupported)],
+      [t("policy.proxyDiverges"), booleanText(observation.proxy_configuration_diverges)],
+      [t("policy.divergenceKnown"), booleanText(observation.proxy_configuration_divergence_known)],
+      [t("policy.directVsProxy"), comparisonText(observation.direct_vs_proxy)],
+      [t("policy.firewall"), observation.firewall && observation.firewall.state],
+      [t("policy.tlsPolicy"), observation.tls && observation.tls.state],
+      [t("policy.possibleInterception"), observation.tls && booleanText(observation.tls.possible_interception)],
+      [t("policy.interceptionSuspicion"), observation.tls && observation.tls.interception_suspicion],
+      [t("policy.certainty"), enumText("certainty", observation.certainty, observation.certainty)],
+      [t("policy.provenance"), listText(observation.provenance)],
+      [t("policy.evidence"), referenceValue(observation.evidence_ids)],
     ]);
 
-    renderProxySource(policyObservation, "WinHTTP", observation.winhttp);
-    renderProxySource(policyObservation, "WinINET", observation.wininet);
+    renderProxySource(policyObservation, t("policy.winHTTP"), observation.winhttp);
+    renderProxySource(policyObservation, t("policy.winINET"), observation.wininet);
     if (observation.paths && observation.paths.length) {
-      policyObservation.appendChild(element("h3", "observation-subheading", "Direct, browser, and service paths"));
+      policyObservation.appendChild(element("h3", "observation-subheading", t("policy.paths")));
       const table = element("table", "observation-grid");
-      appendTableHeader(table, ["Path", "Mode", "Endpoint", "TCP", "HTTP", "TLS", "Failure", "Evidence"]);
+      appendTableHeader(table, [t("policy.path"), t("policy.mode"), t("policy.endpoint"), t("policy.tcp"), t("policy.http"), t("policy.tls"), t("policy.failure"), t("policy.evidence")]);
       const body = table.querySelector("tbody");
       for (const path of observation.paths) {
         const row = element("tr");
         row.appendChild(element("td", "", path.name));
         row.appendChild(element("td", "", path.mode));
-        row.appendChild(element("td", "", path.endpoint || "not specified"));
+        row.appendChild(element("td", "", path.endpoint || t("common.notSpecified")));
         row.appendChild(element("td", "", booleanText(path.tcp_connected)));
-        row.appendChild(element("td", "", path.http_response ? text(path.http_status_code || "received") : "no"));
+        row.appendChild(element("td", "", path.http_response ? text(path.http_status_code || t("policy.received")) : t("common.no")));
         row.appendChild(element("td", "", booleanText(path.tls_handshake)));
-        row.appendChild(element("td", "", path.failure_reason || "none"));
+        row.appendChild(element("td", "", path.failure_reason ? failureText(path.failure_reason) : t("common.none")));
         row.appendChild(referenceCell(path.evidence_ids));
         body.appendChild(row);
       }
       policyObservation.appendChild(table);
     }
     if (observation.firewall && observation.firewall.profiles && observation.firewall.profiles.length) {
-      policyObservation.appendChild(element("h3", "observation-subheading", "Firewall profiles"));
+      policyObservation.appendChild(element("h3", "observation-subheading", t("policy.firewallProfiles")));
       const table = element("table", "observation-grid");
-      appendTableHeader(table, ["Profile", "Enabled", "Policy present", "Causality", "Evidence"]);
+      appendTableHeader(table, [t("policy.profile"), t("policy.enabled"), t("policy.policyPresent"), t("policy.causality"), t("policy.evidence")]);
       const body = table.querySelector("tbody");
       for (const profile of observation.firewall.profiles) {
         const row = element("tr");
         row.appendChild(element("td", "", profile.name));
-        row.appendChild(element("td", "", profile.firewall_enabled === undefined ? "unknown" : booleanText(profile.firewall_enabled)));
+        row.appendChild(element("td", "", profile.firewall_enabled === undefined ? t("common.unknown") : booleanText(profile.firewall_enabled)));
         row.appendChild(element("td", "", booleanText(profile.policy_present)));
-        row.appendChild(element("td", "", profile.block_causality || "not established"));
+        row.appendChild(element("td", "", profile.block_causality || t("policy.notEstablished")));
         row.appendChild(referenceCell(profile.evidence_ids));
         body.appendChild(row);
       }
@@ -1152,21 +1417,21 @@
     }
     container.appendChild(element("h3", "observation-subheading", label));
     appendObservationRows(container, [
-      ["Source", source.source],
-      ["Configuration", source.configuration && source.configuration.state],
-      ["Configured proxy endpoints", source.configuration && listText(source.configuration.proxy_endpoints)],
-      ["PAC configured", source.configuration && booleanText(source.configuration.pac_configured)],
-      ["Effective mode", source.effective && source.effective.mode],
-      ["Effective endpoint", source.effective && source.effective.endpoint],
-      ["Effective resolution", source.effective && booleanText(source.effective.resolution_ok)],
-      ["PAC used", source.effective && booleanText(source.effective.pac_used)],
-      ["Evidence", referenceValue(source.evidence_ids)],
+      [t("policy.source"), source.source],
+      [t("policy.configuration"), source.configuration && source.configuration.state],
+      [t("policy.configuredEndpoints"), source.configuration && listText(source.configuration.proxy_endpoints)],
+      [t("policy.pacConfigured"), source.configuration && booleanText(source.configuration.pac_configured)],
+      [t("policy.effectiveMode"), source.effective && source.effective.mode],
+      [t("policy.effectiveEndpoint"), source.effective && source.effective.endpoint],
+      [t("policy.effectiveResolution"), source.effective && booleanText(source.effective.resolution_ok)],
+      [t("policy.pacUsed"), source.effective && booleanText(source.effective.pac_used)],
+      [t("policy.evidence"), referenceValue(source.evidence_ids)],
     ]);
   }
 
   function comparisonText(comparison) {
     if (!comparison) {
-      return "not observed";
+      return t("common.notObserved");
     }
     return comparison.state || "unknown";
   }
@@ -1174,7 +1439,7 @@
   function renderObservationOrEmpty(container, observation, fields) {
     container.replaceChildren();
     if (!observation || !observation.applicability) {
-      container.appendChild(element("div", "empty-state compact", "No canonical observation is available."));
+      container.appendChild(element("div", "empty-state compact", t("common.noObservation")));
       return;
     }
     const rows = [];
@@ -1222,39 +1487,39 @@
     if (ids && ids.length) {
       cell.appendChild(referenceGroup(ids));
     } else {
-      cell.textContent = "not available";
+      cell.textContent = t("evidence.notAvailable");
     }
     return cell;
   }
 
   function referenceValue(ids) {
     if (!ids || !ids.length) {
-      return "not available";
+      return t("evidence.notAvailable");
     }
     return referenceGroup(ids);
   }
 
   function endpointText(endpoint) {
     if (!endpoint) {
-      return "not observed";
+      return t("common.notObserved");
     }
     if (typeof endpoint === "string") {
       return endpoint;
     }
     if (!endpoint.address) {
-      return "not observed";
+      return t("common.notObserved");
     }
     const address = endpoint.address.includes(":") && endpoint.port ? `[${endpoint.address}]` : endpoint.address;
     return endpoint.port ? `${address}:${endpoint.port}` : address;
   }
 
   function booleanText(value) {
-    return value ? "yes" : "no";
+    return value ? t("common.yes") : t("common.no");
   }
 
   function redirectText(values) {
     if (!values || !values.length) {
-      return "none";
+      return t("common.none");
     }
     return values.map((value) => `${value.status_code} ${value.url}${value.to_url ? ` → ${value.to_url}` : ""}`).join("; ");
   }
@@ -1269,15 +1534,15 @@
 
     const effective = resolution.effective_path || {};
     const fields = [
-      ["Requested name", resolution.requested_name || "not observable"],
-      ["Resolution path", effective.mechanism || "not observed"],
-      ["Interface", effective.interface || "not observable"],
-      ["Resolver", effective.resolver || "not observable"],
-      ["Policy", policyText(effective)],
-      ["Answers A", listText(resolution.a)],
-      ["Answers AAAA", listText(resolution.aaaa)],
-      ["Resolver representative answer (not OS/application selection)", resolution.selected_address || "not selected"],
-      ["Certainty", effective.certainty || "not observable"],
+      [t("resolution.requestedName"), resolution.requested_name || t("resolution.notObservable")],
+      [t("resolution.path"), resolutionPathText(effective)],
+      [t("resolution.interface"), effective.interface || t("resolution.notObservable")],
+      [t("resolution.resolver"), effective.resolver || t("resolution.notObservable")],
+      [t("resolution.policy"), policyText(effective)],
+      [t("resolution.answersA"), listText(resolution.a)],
+      [t("resolution.answersAAAA"), listText(resolution.aaaa)],
+      [t("resolution.representative"), resolution.selected_address || t("resolution.notSelected")],
+      [t("resolution.certainty"), effective.certainty ? enumText("certainty", effective.certainty, effective.certainty) : t("resolution.notObservable")],
     ];
     const table = element("div", "resolution-table");
     for (const [label, value] of fields) {
@@ -1289,35 +1554,35 @@
     nameResolution.appendChild(table);
 
     if (resolution.candidate_names && resolution.candidate_names.length) {
-      nameResolution.appendChild(resolutionMetadata("Candidate names", resolution.candidate_names.join(", ")));
+      nameResolution.appendChild(resolutionMetadata(t("resolution.candidateNames"), resolution.candidate_names.join(", ")));
     }
     if (resolution.candidate_suffixes && resolution.candidate_suffixes.length) {
-      nameResolution.appendChild(resolutionMetadata("Search suffixes", resolution.candidate_suffixes.join(", ")));
+      nameResolution.appendChild(resolutionMetadata(t("resolution.suffixes"), resolution.candidate_suffixes.join(", ")));
     }
     if (resolution.candidate_namespaces && resolution.candidate_namespaces.length) {
-      nameResolution.appendChild(resolutionMetadata("Candidate namespaces", resolution.candidate_namespaces.join(", ")));
+      nameResolution.appendChild(resolutionMetadata(t("resolution.namespaces"), resolution.candidate_namespaces.join(", ")));
     }
     if (effective.provenance) {
-      nameResolution.appendChild(resolutionMetadata("Provenance", effective.provenance));
+      nameResolution.appendChild(resolutionMetadata(t("resolution.provenance"), effective.provenance));
     }
     if (resolution.limitations && resolution.limitations.length) {
-      nameResolution.appendChild(resolutionMetadata("Limitations", resolution.limitations.join(" · ")));
+      nameResolution.appendChild(resolutionMetadata(t("resolution.limitations"), resolution.limitations.map(sourceText).join(" · ")));
     }
 
     const candidates = (resolution.paths || []).filter((path) => path.state !== "effective");
     if (candidates.length) {
       const details = element("details", "resolution-candidates");
       details.open = true;
-      details.appendChild(element("summary", "", `Configured candidates · ${candidates.length}`));
+      details.appendChild(element("summary", "", quantity("resolution.configuredCandidatesOne", "resolution.configuredCandidatesMany", candidates.length)));
       const list = element("div", "resolution-candidate-list");
       for (const path of candidates) {
         const row = element("div", "resolution-candidate");
-        row.appendChild(element("span", "resolution-candidate-state", path.state || "unknown"));
+        row.appendChild(element("span", "resolution-candidate-state", enumText("resolutionState", path.state, path.state || t("common.unknown"))));
         const description = [
-          path.resolver || "resolver not observable",
-          path.interface || "interface not observable",
-          path.namespace || (path.namespaces && path.namespaces.length ? path.namespaces.join(", ") : "no namespace"),
-          path.certainty || "certainty unknown",
+          path.resolver || t("resolution.resolverNotObservable"),
+          path.interface || t("resolution.interfaceNotObservable"),
+          path.namespace || (path.namespaces && path.namespaces.length ? path.namespaces.join(", ") : t("resolution.noNamespace")),
+          path.certainty ? enumText("certainty", path.certainty, path.certainty) : t("resolution.certaintyUnknown"),
         ];
         row.appendChild(element("span", "resolution-candidate-detail", description.join(" · ")));
         if (path.evidence_ids && path.evidence_ids.length) {
@@ -1330,19 +1595,26 @@
     }
     if (resolution.evidence_ids && resolution.evidence_ids.length) {
       const refs = element("div", "card-references");
-      refs.appendChild(element("span", "reference-label", "Evidence"));
+      refs.appendChild(element("span", "reference-label", t("resolution.evidence")));
       refs.appendChild(referenceGroup(resolution.evidence_ids));
       nameResolution.appendChild(refs);
     }
   }
 
   function listText(values) {
-    return values && values.length ? values.join(", ") : "(none)";
+    return values && values.length ? values.join(", ") : t("common.none");
   }
 
   function policyText(path) {
     const values = [path.namespace, path.policy_source, path.policy_rule].filter(Boolean);
-    return values.length ? values.join(" / ") : "not observed";
+    return values.length ? values.join(" / ") : t("common.notObserved");
+  }
+
+  function resolutionPathText(path) {
+    if (!path || !path.mechanism) {
+      return t("common.notObserved");
+    }
+    return enumText("resolutionMechanism", path.mechanism, sourceText(path.label || path.mechanism));
   }
 
   function resolutionMetadata(label, value) {
@@ -1377,7 +1649,7 @@
       details.push(responder.response);
     }
     if (responder.destination_reached) {
-      details.push("destination");
+      details.push(t("path.destination"));
     }
     if (details.length) {
       chip.appendChild(element("span", "responder-details", details.join(" · ")));
@@ -1391,10 +1663,10 @@
     card.dataset.evidenceId = text(evidenceIDs[0]);
     const header = element("div", "path-heading");
     const heading = element("div");
-    heading.appendChild(element("h3", "card-title", `${index + 1}. ${text(path.protocol).toUpperCase()} observation`));
+    heading.appendChild(element("h3", "card-title", `${index + 1}. ${protocolText(path.protocol).toUpperCase()} ${t("path.observation")}`));
     heading.appendChild(element("p", "path-endpoint", `${text(path.destination)} · ${portText(path.destination_port)}`));
     header.appendChild(heading);
-    header.appendChild(element("span", toneClass("observation-status", path.observation_status), path.observation_status || "unknown"));
+    header.appendChild(element("span", toneClass("observation-status", path.observation_tone), enumText("pathStatus", path.observation_status, sourceText(path.observation_status || "unknown"))));
     card.appendChild(header);
 
     const pathNote = element("p", "path-note", observationNote(path));
@@ -1403,8 +1675,8 @@
     const destination = element("div", "path-destination");
     destination.appendChild(element("span", "destination-marker", "◆"));
     const destinationCopy = element("div");
-    destinationCopy.appendChild(element("strong", "destination-title", "Destination observation"));
-    destinationCopy.appendChild(element("span", "destination-copy", `Reached: ${booleanText(path.destination_reached)} · TCP connected: ${booleanText(path.destination_tcp_connected)}`));
+    destinationCopy.appendChild(element("strong", "destination-title", t("path.destinationObservation")));
+    destinationCopy.appendChild(element("span", "destination-copy", `${t("path.reached", { value: booleanText(path.destination_reached) })} · ${t("path.tcpConnectedDetail", { value: booleanText(path.destination_tcp_connected) })}`));
     destination.appendChild(destinationCopy);
     if (evidenceIDs.length) {
       destination.appendChild(referenceGroup(evidenceIDs));
@@ -1420,12 +1692,12 @@
       track.appendChild(destinationTrackNode(path));
       card.appendChild(track);
     } else {
-      card.appendChild(element("div", "empty-state compact", "No TTL observations were retained for this protocol."));
+      card.appendChild(element("div", "empty-state compact", t("path.noTTLOsservations")));
     }
 
     if (path.segments && path.segments.length) {
       const segmentDetails = element("details", "segment-details");
-      const summary = element("summary", "segment-summary", "Evidence segments");
+      const summary = element("summary", "segment-summary", t("path.evidenceSegments"));
       segmentDetails.appendChild(summary);
       const segmentList = element("div", "segment-list");
       for (const segment of path.segments) {
@@ -1440,8 +1712,8 @@
   function pathOrigin() {
     const node = element("div", "track-node origin-node");
     node.appendChild(element("span", "node-marker", "●"));
-    node.appendChild(element("strong", "node-title", "Probe vantage"));
-    node.appendChild(element("span", "node-detail", "local source"));
+    node.appendChild(element("strong", "node-title", t("path.probeVantage")));
+    node.appendChild(element("span", "node-detail", t("path.localSourceDetail")));
     return node;
   }
 
@@ -1449,11 +1721,11 @@
     const button = element("button", toneClass("track-node hop-node", hop.tone));
     button.type = "button";
     button.dataset.evidenceId = text(evidenceId);
-    button.title = "Focus the raw path evidence";
-    button.appendChild(element("span", "node-marker", `TTL ${text(hop.ttl)}`));
+    button.title = t("path.focusRaw");
+    button.appendChild(element("span", "node-marker", t("path.ttl", { value: hop.ttl })));
     const copy = element("span", "node-copy");
-    copy.appendChild(element("strong", "node-title", hop.label));
-    copy.appendChild(element("span", "node-detail", hop.detail));
+    copy.appendChild(element("strong", "node-title", pathHopLabel(hop)));
+    copy.appendChild(element("span", "node-detail", pathHopDetail(hop)));
     button.appendChild(copy);
     if (hop.responders && hop.responders.length) {
       const responders = element("span", "responder-list");
@@ -1469,8 +1741,8 @@
   function destinationTrackNode(path) {
     const node = element("div", "track-node destination-node");
     node.appendChild(element("span", "node-marker", "◆"));
-    node.appendChild(element("strong", "node-title", "Destination"));
-    node.appendChild(element("span", "node-detail", `Reached: ${booleanText(path.destination_reached)} · TCP connected: ${booleanText(path.destination_tcp_connected)}`));
+    node.appendChild(element("strong", "node-title", t("path.destination")));
+    node.appendChild(element("span", "node-detail", `${t("path.reached", { value: booleanText(path.destination_reached) })} · ${t("path.tcpConnectedDetail", { value: booleanText(path.destination_tcp_connected) })}`));
     return node;
   }
 
@@ -1478,11 +1750,11 @@
     const button = element("button", toneClass("segment-row", segment.tone));
     button.type = "button";
     button.dataset.evidenceId = text(evidenceId);
-    const ttl = segment.from_ttl === segment.to_ttl ? `TTL ${segment.from_ttl}` : `TTL ${segment.from_ttl}–${segment.to_ttl}`;
+    const ttl = segment.from_ttl === segment.to_ttl ? t("path.ttl", { value: segment.from_ttl }) : t("path.ttlRange", { from: segment.from_ttl, to: segment.to_ttl });
     button.appendChild(element("span", "segment-range", ttl));
     const copy = element("span", "segment-copy");
-    copy.appendChild(element("strong", "segment-title", segment.label));
-    copy.appendChild(element("span", "segment-detail", segment.detail));
+    copy.appendChild(element("strong", "segment-title", pathSegmentLabel(segment)));
+    copy.appendChild(element("span", "segment-detail", pathSegmentDetail(segment)));
     button.appendChild(copy);
     if (segment.responders && segment.responders.length) {
       const responders = element("span", "segment-responders");
@@ -1497,39 +1769,75 @@
 
   function observationNote(path) {
     if (path.observation_status === "unsupported") {
-      return "This protocol is unsupported here; no conclusion is drawn from the missing capability.";
+      return t("path.noteUnsupported");
     }
     if (path.observation_status === "error") {
-      return "The path adapter failed. This is different from a TTL that produced no response.";
+      return t("path.noteError");
     }
     if (path.port_aware) {
-      return `Port-aware TCP observation for ${portText(path.destination_port)}.`;
+      return t("path.notePortAware", { port: portText(path.destination_port) });
     }
     return path.protocol === "icmp"
-      ? "ICMP observation; it is not a destination-port connectivity test."
-      : "This path observation is not port-aware; it is not a destination-port connectivity test.";
+      ? t("path.noteICMP")
+      : t("path.noteNotPortAware");
+  }
+
+  function pathHopLabel(hop) {
+    return enumText("hopState", hop.state, sourceText(hop.label || hop.state));
+  }
+
+  function pathHopDetail(hop) {
+    if (hop.state === "observed") {
+      return t("source.hopObserved");
+    }
+    if (hop.state === "unobservable") {
+      return t("source.hopUnobservable", { ttl: hop.ttl });
+    }
+    return sourceText(hop.detail) || text(hop.detail);
+  }
+
+  function pathSegmentLabel(segment) {
+    return enumText("segment", segment.kind, sourceText(segment.label || segment.kind));
+  }
+
+  function pathSegmentDetail(segment) {
+    const keys = {
+      observed_responder: "source.segmentObserved",
+      inferred: "source.segmentInferred",
+      unobservable: "source.segmentUnobservable",
+    };
+    if (keys[segment.kind]) {
+      return t(keys[segment.kind]);
+    }
+    return sourceText(segment.detail) || text(segment.detail);
+  }
+
+  function transportText(value) {
+    const raw = text(value);
+    const keys = { tcp: "target.tcp", udp: "target.udp", "udp+tcp": "target.udpTCP" };
+    return keys[raw.toLowerCase()] ? t(keys[raw.toLowerCase()]) : raw;
   }
 
   function portText(port) {
-    return port ? `port ${text(port)}` : "port unspecified";
+    return port ? `${t("path.portWord")} ${text(port)}` : t("path.portUnspecified");
   }
 
   function renderComparison(comparison) {
     const card = element("article", "comparison-card");
     const header = element("div", "card-heading");
-    header.appendChild(element("h3", "card-title", `${comparison.destination} · ${comparison.port_label}`));
-    header.appendChild(element("span", "count-label", `${(comparison.observations || []).length} observations`));
+    header.appendChild(element("h3", "card-title", `${comparison.destination} · ${portText(comparison.destination_port)}`));
+    header.appendChild(element("span", "count-label", t("path.observationsCount", { count: (comparison.observations || []).length })));
     card.appendChild(header);
 
     const summary = element("div", "comparison-summary");
-    summary.appendChild(comparisonSignal("ICMP destination", comparison.icmp_destination_reached, "replied", "not confirmed"));
-    summary.appendChild(comparisonSignal("TCP destination", comparison.tcp_destination_connected, "connected", comparison.tcp_destination_reached ? "reached, not connected" : "not confirmed"));
+    summary.appendChild(comparisonSignal(t("comparison.icmpDestination"), comparison.icmp_destination_reached, t("comparison.replied"), t("comparison.notConfirmed")));
+    summary.appendChild(comparisonSignal(t("comparison.tcpDestination"), comparison.tcp_destination_connected, t("comparison.connected"), comparison.tcp_destination_reached ? t("comparison.reachedNotConnected") : t("comparison.notConfirmed")));
     card.appendChild(summary);
 
     const table = element("table", "comparison-table");
     const head = element("thead");
     const headerRow = element("tr");
-    for (const label of ["Protocol", "Observation", "Port aware", "Destination reached", "TCP connected", "TTL responders", "Evidence"]) {
+    for (const label of [t("comparison.protocol"), t("comparison.observation"), t("comparison.portAware"), t("comparison.destinationReached"), t("comparison.tcpConnected"), t("comparison.ttlResponders"), t("comparison.evidence")]) {
       headerRow.appendChild(element("th", "", label));
     }
     head.appendChild(headerRow);
@@ -1537,19 +1845,19 @@
     const body = element("tbody");
     for (const observation of comparison.observations || []) {
       const row = element("tr");
-      row.appendChild(element("td", "protocol-cell", text(observation.protocol).toUpperCase()));
-      row.appendChild(element("td", "", text(observation.status)));
+      row.appendChild(element("td", "protocol-cell", protocolText(observation.protocol).toUpperCase()));
+      row.appendChild(element("td", "", enumText("pathStatus", observation.status, observation.status)));
       row.appendChild(element("td", "", booleanText(observation.port_aware)));
       row.appendChild(element("td", "", booleanText(observation.destination_reached)));
       row.appendChild(element("td", "", booleanText(observation.destination_tcp_connected)));
       const hops = [];
       if (observation.responder_count) {
-        hops.push(`${observation.responder_count} responder${observation.responder_count === 1 ? "" : "s"}`);
+        hops.push(t("path.responders", { count: observation.responder_count, plural: observation.responder_count === 1 ? "" : "s" }));
       }
       if (observation.unobservable_ttls && observation.unobservable_ttls.length) {
-        hops.push(`${observation.unobservable_ttls.length} unobservable TTL${observation.unobservable_ttls.length === 1 ? "" : "s"}`);
+        hops.push(t("path.unobservableTTLs", { count: observation.unobservable_ttls.length, plural: observation.unobservable_ttls.length === 1 ? "" : "s" }));
       }
-      row.appendChild(element("td", "", hops.join(" · ") || "No hop detail"));
+      row.appendChild(element("td", "", hops.join(" · ") || t("path.noHopDetail")));
       const evidenceCell = element("td", "");
       if (observation.evidence_ids && observation.evidence_ids.length) {
         evidenceCell.appendChild(referenceGroup(observation.evidence_ids));
@@ -1575,22 +1883,22 @@
     const header = element("div", "card-heading");
     const heading = element("h3", "card-title", `${text(item.probe_name)} / ${text(item.id)}`);
     header.appendChild(heading);
-    header.appendChild(badge(item.kind, item.inspector_state === "partial" ? "warning" : "neutral"));
+    header.appendChild(badge(enumText("evidenceKind", item.kind, item.kind), item.inspector_state === "partial" ? "warning" : "neutral"));
     card.appendChild(header);
 
     const metadata = element("div", "metadata");
-    metadata.appendChild(metadataItem("source", item.source || "not specified"));
-    metadata.appendChild(metadataItem("shape", item.structured ? "structured JSON" : "raw JSON value"));
+    metadata.appendChild(metadataItem(t("evidence.source"), item.source || t("common.notSpecified")));
+    metadata.appendChild(metadataItem(t("evidence.shape"), item.structured ? t("evidence.structuredJSON") : t("evidence.rawJSON")));
     if (item.captured_at) {
-      metadata.appendChild(metadataItem("captured", item.captured_at));
+      metadata.appendChild(metadataItem(t("evidence.captured"), item.captured_at));
     }
     card.appendChild(metadata);
     if (item.inspector_note) {
-      card.appendChild(element("p", "evidence-note warning-text", item.inspector_note));
+      card.appendChild(element("p", "evidence-note warning-text", sourceText(item.inspector_note) || item.inspector_note));
     }
     const details = element("details", "raw-details");
     details.open = true;
-    details.appendChild(element("summary", "", "Raw evidence value"));
+    details.appendChild(element("summary", "", t("evidence.rawValue")));
     const raw = element("pre", "raw-evidence");
     // textContent is intentional: raw evidence is never interpreted as markup.
     raw.textContent = jsonText(item.raw);
@@ -1602,13 +1910,13 @@
   function renderView(view) {
     currentView = view;
     clearPathSelection();
-    evidenceHeading.textContent = "Structured evidence";
+    evidenceHeading.textContent = t("evidence.structured");
     const overall = view.overall || {};
     const observations = view.observations || {};
-    diagnosisLabel.textContent = text(overall.diagnosis_label);
+    diagnosisLabel.textContent = diagnosisLabelText(overall, view.findings);
     diagnosisDetail.textContent = diagnosisDetailText(overall);
     diagnosisCard.className = toneClass("overview-card panel", overall.tone);
-    overallStatus.textContent = text(overall.execution_label || overall.execution_status);
+    overallStatus.textContent = enumText("reportStatus", overall.execution_status, sourceText(overall.execution_label || overall.execution_status));
     renderTargetDetails(observations.endpoint || (view.report && view.report.target));
     renderEndpointObservation(observations.endpoint);
     renderOperationalObservations(observations, view.application);
@@ -1619,12 +1927,12 @@
 
     probes.replaceChildren();
     const probeViews = view.probes || [];
-    probeCount.textContent = `${probeViews.length} lane${probeViews.length === 1 ? "" : "s"}`;
+    probeCount.textContent = t("probe.lanes", { count: probeViews.length, plural: probeViews.length === 1 ? "" : "s" });
     for (const [index, probe] of probeViews.entries()) {
       renderProbe(probe, index);
     }
     if (!probeViews.length) {
-      probes.appendChild(element("div", "empty-state", "No probe results were returned."));
+      probes.appendChild(element("div", "empty-state", t("probe.none")));
     }
 
     findings.replaceChildren();
@@ -1633,7 +1941,7 @@
       renderFinding(finding);
     }
     if (!findingViews.length) {
-      findings.appendChild(element("div", "empty-state", "No canonical findings. This does not mean every protocol is observable."));
+      findings.appendChild(element("div", "empty-state", t("finding.none")));
     }
 
     renderPathGraph(view);
@@ -1650,25 +1958,29 @@
       renderComparison(comparison);
     }
     if (!comparisonViews.length) {
-      comparisons.appendChild(element("div", "empty-state", "No comparable protocol or port observations are available."));
+      comparisons.appendChild(element("div", "empty-state", t("comparison.none")));
     }
 
     evidence.replaceChildren();
     const evidenceViews = view.evidence || [];
-    evidenceHeading.textContent = `Structured evidence · ${evidenceViews.length} item${evidenceViews.length === 1 ? "" : "s"}`;
+    evidenceHeading.textContent = quantity("evidence.itemOne", "evidence.itemMany", evidenceViews.length);
     for (const item of evidenceViews) {
       renderEvidenceItem(item);
     }
     if (!evidenceViews.length) {
-      evidence.appendChild(element("div", "empty-state", "No evidence was retained."));
+      evidence.appendChild(element("div", "empty-state", t("evidence.none")));
     }
     canonicalJSON.textContent = view.canonical_json || jsonText(view.report);
-    renderExportLinks(activeSessionID);
+    renderExportLinks(activeSessionID || renderedSessionID);
     reportSection.hidden = false;
   }
 
   function renderExportLinks(sessionID) {
-    const hasSession = Boolean(sessionID);
+    if (sessionID) {
+      renderedSessionID = sessionID;
+    }
+    const reportSessionID = sessionID || renderedSessionID;
+    const hasSession = Boolean(reportSessionID);
     htmlReportLink.hidden = !hasSession;
     jsonReportLink.hidden = !hasSession;
     if (!hasSession) {
@@ -1676,7 +1988,7 @@
       jsonReportLink.removeAttribute("href");
       return;
     }
-    const encodedID = encodeURIComponent(sessionID);
+    const encodedID = encodeURIComponent(reportSessionID);
     htmlReportLink.href = `/api/diagnoses/${encodedID}/report.html`;
     jsonReportLink.href = `/api/diagnoses/${encodedID}/report.json`;
   }
@@ -1689,25 +2001,25 @@
       return;
     }
     const fields = [
-      ["Network scope", context.network_scope_label || context.network_scope],
-      ["Requested identity", context.requested_identity],
-      ["Selected destination", context.selected_destination_address],
-      ["Source interface", context.selected_source_interface],
-      ["Source address", context.selected_source_address],
-      ["Route", context.effective_route_label || context.effective_route],
-      ["Route prefix", context.route_prefix],
-      ["Next hop", context.next_hop],
-      ["Gateway", context.gateway || "Not applicable"],
-      ["Route metric", context.route_metric],
-      ["Certainty", context.certainty],
-      ["Provenance", listText(context.provenance)],
-      ["Evidence", referenceValue(context.evidence_ids)],
+      [t("network.scope"), enumText("scope", context.network_scope, sourceText(context.network_scope_label || context.network_scope))],
+      [t("network.requestedIdentity"), context.requested_identity],
+      [t("network.selectedDestination"), context.selected_destination_address],
+      [t("network.sourceInterface"), context.selected_source_interface],
+      [t("network.sourceAddress"), context.selected_source_address],
+      [t("network.route"), enumText("route", context.effective_route, sourceText(context.effective_route_label || context.effective_route))],
+      [t("network.routePrefix"), context.route_prefix],
+      [t("network.nextHop"), context.next_hop],
+      [t("network.gateway"), context.gateway || t("network.gatewayNA")],
+      [t("network.routeMetric"), context.route_metric],
+      [t("network.certainty"), enumText("certainty", context.certainty, context.certainty)],
+      [t("network.provenance"), listText(context.provenance)],
+      [t("network.evidence"), referenceValue(context.evidence_ids)],
     ];
-    fields.push(["VPN / tunnel involvement", booleanText(context.vpn_or_tunnel_involvement)]);
-    fields.push(["Virtual adapter involvement", booleanText(context.virtual_adapter_involvement)]);
-    fields.push(["Route selection ambiguous", booleanText(context.route_selection_ambiguous)]);
+    fields.push([t("network.vpn"), booleanText(context.vpn_or_tunnel_involvement)]);
+    fields.push([t("network.virtualAdapter"), booleanText(context.virtual_adapter_involvement)]);
+    fields.push([t("network.ambiguous"), booleanText(context.route_selection_ambiguous)]);
     if (context.neighbor) {
-      fields.push(["Neighbor cache", context.neighbor.observation]);
+      fields.push([t("network.neighbor"), enumText("neighbor", context.neighbor.observation, context.neighbor.observation)]);
     }
     for (const [label, value] of fields) {
       if (value === undefined || value === null || value === "") {
@@ -1723,31 +2035,57 @@
       networkContext.appendChild(item);
     }
     if (context.competing_routes && context.competing_routes.length) {
-      const note = element("p", "section-note context-note", `${context.competing_routes.length} competing route${context.competing_routes.length === 1 ? "" : "s"} retained in canonical context.`);
+      const note = element("p", "section-note context-note", quantity("network.competingOne", "network.competingMany", context.competing_routes.length));
       networkContext.appendChild(note);
     }
   }
 
   function diagnosisDetailText(overall) {
-    const destination = overall.destination && overall.destination.label ? ` Destination: ${overall.destination.label}.` : "";
-    return `${text(overall.diagnosis_state)}.${destination}`;
+    const stateKeys = {
+      clear: "diagnosis.clear",
+      finding: "diagnosis.findingState",
+      incomplete: "diagnosis.incomplete",
+      unknown: "diagnosis.unavailable",
+    };
+    const state = stateKeys[overall.diagnosis_state] ? t(stateKeys[overall.diagnosis_state]) : text(overall.diagnosis_state);
+    const destination = overall.destination && overall.destination.status
+      ? t("diagnosis.destination", { value: destinationStateText(overall.destination.status, overall.destination.label) })
+      : "";
+    return t("diagnosis.detail", { state, destination });
+  }
+
+  function diagnosisLabelText(overall, findings) {
+    if (overall.diagnosis_state === "clear") {
+      return t("diagnosis.clear");
+    }
+    if (overall.diagnosis_state === "finding") {
+      const count = Array.isArray(findings) ? findings.length : 0;
+      return quantity("diagnosis.findingsOne", "diagnosis.findingsMany", count);
+    }
+    if (overall.diagnosis_state === "incomplete") {
+      return t("diagnosis.incomplete");
+    }
+    if (overall.diagnosis_state === "unknown") {
+      return t("diagnosis.unavailable");
+    }
+    return sourceText(overall.diagnosis_label) || text(overall.diagnosis_label || overall.diagnosis_state);
   }
 
   function renderTargetDetails(target) {
     reportTarget.replaceChildren();
     if (!target) {
-      reportTarget.appendChild(element("div", "target-detail", "Target unavailable"));
+      reportTarget.appendChild(element("div", "target-detail", t("common.targetUnavailable")));
       return;
     }
     const service = target.service || {};
     const fields = [
-      ["Target", target.requested_identity || "identity unavailable"],
-      ["Service", service.label || target.application_protocol || "not specified"],
-      ["Transport", target.transport_protocol || "not specified"],
-      ["Port", target.port || "not specified"],
+      [t("target.label"), target.requested_identity || t("common.identityUnavailable")],
+      [t("target.service"), serviceText(service.id || service.label) || protocolText(target.application_protocol) || t("common.notSpecified")],
+      [t("target.transport"), transportText(target.transport_protocol) || t("common.notSpecified")],
+      [t("target.port"), target.port || t("common.notSpecified")],
     ];
     if (target.resource) {
-      fields.push(["Resource", target.resource]);
+      fields.push([t("target.resource"), target.resource]);
     }
     for (const [label, value] of fields) {
       const row = element("div", "target-detail");
@@ -1773,7 +2111,7 @@
     }
     match.classList.add("is-focused");
     match.scrollIntoView({ behavior: "smooth", block: "center" });
-    evidenceHeading.textContent = `Evidence inspector · ${text(id)}`;
+    evidenceHeading.textContent = `${t("evidence.inspector")} · ${text(id)}`;
   }
 
   function clearPathSelection() {
@@ -1788,13 +2126,14 @@
     activeSessionID = "";
     reportSection.hidden = true;
     clearPathSelection();
-    pathGraphCount.textContent = "Awaiting report";
-    pathGraphDescription.textContent = "Waiting for canonical path observations.";
+    pathGraphCount.textContent = t("path.awaitingReport");
+    pathGraphDescription.textContent = t("path.waiting");
     setPathGraphState("loading");
     button.disabled = true;
-    button.textContent = "Starting…";
+    currentSessionState = "starting";
+    button.textContent = t("target.starting");
     cancelButton.hidden = true;
-    setProgress([{ state: "started" }, { state: "running" }], "Starting diagnostic session", "starting", "neutral");
+    setProgress([{ state: "started" }, { state: "running" }], "session.starting", "starting", "neutral");
 
     try {
       const response = await fetch("/api/diagnoses", {
@@ -1805,13 +2144,14 @@
       const snapshot = await readResponse(response);
       activeSessionID = text(snapshot.id);
       setSessionState(snapshot.state || "running");
-      button.textContent = "Running…";
+      button.textContent = t("target.running");
       openEvents(activeSessionID);
     } catch (err) {
-      setProgress([{ state: "error" }], "Diagnostic request failed", "error", "negative");
-      showError(err instanceof Error ? err.message : "diagnosis request failed");
+      currentSessionState = "error";
+      setProgress([{ state: "error" }], "session.requestFailed", "error", "negative");
+      showError(err instanceof Error ? err.message : t("session.requestError"));
       button.disabled = false;
-      button.textContent = "Diagnose →";
+      button.textContent = t("target.diagnoseArrow");
     }
   });
 
@@ -1819,7 +2159,8 @@
     clearBrowserCaptureError();
     clearBrowserCapturePoll();
     browserCaptureStart.disabled = true;
-    browserCaptureState.textContent = "starting";
+    activeCaptureSnapshot = { state: "starting", unique_destination_count: 0, unique_address_count: 0, observation_count: 0, failure_count: 0, destinations: [] };
+    renderBrowserCapture(activeCaptureSnapshot);
     browserCaptureState.className = toneClass("badge", "neutral");
     try {
       const response = await fetch("/api/browser-captures", {
@@ -1834,9 +2175,9 @@
     } catch (err) {
       browserCaptureStart.disabled = false;
       browserCaptureBrowser.disabled = false;
-      browserCaptureState.textContent = "error";
-      browserCaptureState.className = toneClass("badge", "negative");
-      showBrowserCaptureError(err instanceof Error ? err.message : "browser capture request failed");
+      activeCaptureSnapshot = { ...(activeCaptureSnapshot || {}), state: "error" };
+      renderBrowserCapture(activeCaptureSnapshot);
+      showBrowserCaptureError(err instanceof Error ? err.message : t("browser.requestError"));
     }
   });
 
@@ -1853,7 +2194,7 @@
       void pollBrowserCapture();
     } catch (err) {
       browserCaptureStop.disabled = false;
-      showBrowserCaptureError(err instanceof Error ? err.message : "could not stop browser capture");
+      showBrowserCaptureError(err instanceof Error ? err.message : t("browser.stopError"));
     }
   });
 
@@ -1866,16 +2207,16 @@
       const response = await fetch(`/api/browser-captures/${encodeURIComponent(activeCaptureID)}/fqdns.txt`, { cache: "no-store" });
       const fqdnList = await response.text();
       if (!response.ok) {
-        throw new Error("could not load observed FQDNs");
+        throw new Error(t("browser.loadFQDNError"));
       }
       if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
-        throw new Error("clipboard access is unavailable; use Export FQDNs");
+        throw new Error(t("browser.clipboardUnavailable"));
       }
       await navigator.clipboard.writeText(fqdnList);
-      browserCaptureCopy.textContent = "Copied FQDNs";
-      setTimeout(() => { browserCaptureCopy.textContent = "Copy FQDNs"; }, 1500);
+      browserCaptureCopy.textContent = t("browser.copiedFQDNs");
+      setTimeout(() => { browserCaptureCopy.textContent = t("browser.copyFQDNs"); }, 1500);
     } catch (err) {
-      showBrowserCaptureError(err instanceof Error ? err.message : "could not copy observed FQDNs");
+      showBrowserCaptureError(err instanceof Error ? err.message : t("browser.copyError"));
     }
   });
 
@@ -1890,7 +2231,7 @@
       const snapshot = await readResponse(response);
       setSessionState(snapshot.state || "cancelling");
     } catch (err) {
-      showError(err instanceof Error ? err.message : "cancel request failed");
+      showError(err instanceof Error ? err.message : t("session.cancelError"));
       cancelButton.disabled = false;
     }
   });

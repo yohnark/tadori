@@ -87,6 +87,13 @@ pre,
   gap: 20px;
 }
 
+.header-tools {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -120,6 +127,47 @@ pre,
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
+}
+
+.locale-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-subtle);
+}
+
+.locale-label {
+  padding: 0 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.locale-button {
+  min-width: 30px;
+  height: 25px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.locale-button:hover,
+.locale-button:focus-visible {
+  border-color: var(--line-strong);
+  outline: none;
+}
+
+.locale-button.is-active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
 }
 
 .runtime-dot {
@@ -2446,6 +2494,14 @@ button.track-node:focus-visible {
 
   .brand-context,
   .runtime-note {
+    display: none;
+  }
+
+  .header-tools {
+    gap: 0;
+  }
+
+  .locale-label {
     display: none;
   }
 
