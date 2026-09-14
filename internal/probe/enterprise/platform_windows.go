@@ -56,28 +56,13 @@ const (
 type platformSnapshotProvider struct{}
 
 func (platformSnapshotProvider) Snapshot(ctx context.Context, target model.Target) (Snapshot, error) {
-	if err := ctx.Err(); err != nil {
-		return Snapshot{}, err
-	}
-	discovery, err := proxy.Discover(ctx)
+	local, err := (platformSnapshotProvider{}).SnapshotEnvironment(ctx)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	snapshot := Snapshot{Proxy: discovery, TrustStore: collectTrustStore()}
-
-	if firewall, firewallErr := collectFirewallProfiles(); firewallErr != nil {
-		snapshot.Firewall = firewall
-		snapshot.Issues = append(snapshot.Issues, issueFromError("firewall", firewallErr))
-	} else {
-		snapshot.Firewall = firewall
-	}
-	if adapters, adapterErr := collectAdapters(); adapterErr != nil {
-		snapshot.Issues = append(snapshot.Issues, issueFromError("adapter", adapterErr))
-	} else {
-		snapshot.Adapters = adapters
-	}
-	if snapshot.TrustStore.Error != "" {
-		snapshot.Issues = append(snapshot.Issues, ObservationIssue{Subsystem: "trust_store", Kind: "collection", Error: snapshot.TrustStore.Error, Insufficient: snapshot.TrustStore.Insufficient})
+	snapshot := Snapshot{
+		Proxy: local.Proxy, TrustStore: local.TrustStore, Firewall: local.Firewall,
+		Adapters: local.Adapters, Issues: local.Issues,
 	}
 
 	targetURL, targetErr := targetURLForSnapshot(target)
@@ -120,6 +105,35 @@ func (platformSnapshotProvider) Snapshot(ctx context.Context, target model.Targe
 		snapshot.Issues = append(snapshot.Issues, routeIssues...)
 	} else {
 		snapshot.Issues = append(snapshot.Issues, routeIssues...)
+	}
+	return snapshot, nil
+}
+
+// SnapshotEnvironment collects only local enterprise state. Keeping this
+// boundary separate lets the target-independent environment workflow reuse
+// the same native collectors without resolving PAC or opening any path.
+func (platformSnapshotProvider) SnapshotEnvironment(ctx context.Context) (EnvironmentSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return EnvironmentSnapshot{}, err
+	}
+	discovery, err := proxy.Discover(ctx)
+	if err != nil {
+		return EnvironmentSnapshot{}, err
+	}
+	snapshot := EnvironmentSnapshot{Proxy: discovery, TrustStore: collectTrustStore()}
+	if firewall, firewallErr := collectFirewallProfiles(); firewallErr != nil {
+		snapshot.Firewall = firewall
+		snapshot.Issues = append(snapshot.Issues, issueFromError("firewall", firewallErr))
+	} else {
+		snapshot.Firewall = firewall
+	}
+	if adapters, adapterErr := collectAdapters(); adapterErr != nil {
+		snapshot.Issues = append(snapshot.Issues, issueFromError("adapter", adapterErr))
+	} else {
+		snapshot.Adapters = adapters
+	}
+	if snapshot.TrustStore.Error != "" {
+		snapshot.Issues = append(snapshot.Issues, ObservationIssue{Subsystem: "trust_store", Kind: "collection", Error: snapshot.TrustStore.Error, Insufficient: snapshot.TrustStore.Insufficient})
 	}
 	return snapshot, nil
 }

@@ -60,6 +60,13 @@
         <button class="primary-button" type="submit" data-i18n="target.diagnose">Diagnose</button>
       </form>
       <p id="error" class="error" role="alert" hidden></p>
+      <div class="environment-action-row">
+        <div>
+          <p class="eyebrow">Local context</p>
+          <p class="section-note">Capture this PC's networking environment without selecting a destination.</p>
+        </div>
+        <button id="environment-button" class="secondary-button" type="button">Inspect this PC</button>
+      </div>
     </section>
 
     <section id="browser-capture-panel" class="browser-capture-panel panel" aria-labelledby="browser-capture-title">
@@ -149,6 +156,26 @@
       <ol id="progress-list" class="progress-list">
         <li class="progress-item neutral"><span class="progress-marker"></span><span data-i18n="target.enterToBegin">Enter a target to begin.</span></li>
       </ol>
+    </section>
+
+    <section id="environment-report" class="panel section-panel environment-panel" hidden aria-labelledby="environment-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Environment</p>
+          <h2 id="environment-title">This PC's networking context</h2>
+        </div>
+        <div class="environment-actions">
+          <span id="environment-state" class="badge neutral">not collected</span>
+          <a id="environment-json-link" class="secondary-button" href="/api/environment.json" download="tadori-environment.json">Export JSON</a>
+        </div>
+      </div>
+      <p id="environment-note" class="section-note">Configuration and observed local context are shown separately from target-specific diagnosis.</p>
+      <div id="environment-summary" class="environment-summary"></div>
+      <div id="environment-details" class="environment-details"></div>
+      <details class="canonical-panel environment-canonical">
+        <summary>Canonical environment JSON</summary>
+        <pre id="environment-json"></pre>
+      </details>
     </section>
 
     <section id="report" hidden>

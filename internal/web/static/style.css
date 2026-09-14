@@ -2745,3 +2745,112 @@ button.track-node:focus-visible {
     display: block;
   }
 }
+/* Target-independent local environment inspection */
+.environment-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.environment-action-row p {
+  margin: 0;
+}
+
+.environment-action-row .section-note {
+  margin-top: 2px;
+}
+
+.environment-action-row .secondary-button {
+  flex: 0 0 auto;
+}
+
+.environment-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.environment-panel {
+  margin-top: 16px;
+}
+
+.environment-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.environment-summary-card {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.environment-summary-card strong,
+.environment-summary-card span {
+  display: block;
+}
+
+.environment-summary-card strong {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.environment-summary-card span {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+}
+
+.environment-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.environment-detail-card {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.environment-detail-card h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.environment-detail-card .observation-grid {
+  margin-top: 0;
+}
+
+.environment-canonical {
+  margin-top: 12px;
+}
+
+#environment-json {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+@media (max-width: 720px) {
+  .environment-action-row,
+  .environment-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .environment-action-row .secondary-button {
+    width: 100%;
+  }
+}

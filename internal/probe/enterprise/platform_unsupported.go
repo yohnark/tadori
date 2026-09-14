@@ -13,3 +13,7 @@ type platformSnapshotProvider struct{}
 func (platformSnapshotProvider) Snapshot(context.Context, model.Target) (Snapshot, error) {
 	return Snapshot{}, ErrUnsupportedPlatform
 }
+
+func (platformSnapshotProvider) SnapshotEnvironment(context.Context) (EnvironmentSnapshot, error) {
+	return EnvironmentSnapshot{}, ErrUnsupportedPlatform
+}
