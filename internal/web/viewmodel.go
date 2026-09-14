@@ -253,6 +253,9 @@ type PathView struct {
 	DestinationTCPConnected bool                        `json:"destination_tcp_connected"`
 	Hops                    []PathHopView               `json:"hops"`
 	Segments                []PathSegmentView           `json:"segments"`
+	Graph                   PathGraphView               `json:"graph"`
+	Certainty               model.ObservationCertainty  `json:"certainty"`
+	Limitations             []string                    `json:"limitations,omitempty"`
 	Error                   string                      `json:"error,omitempty"`
 }
 
@@ -659,9 +662,11 @@ func hasNetworkContext(context model.NetworkContext) bool {
 func buildPathView(input pathInput) PathView {
 	observation := input.observation
 	evidenceIDs := append([]string(nil), input.provenance.EvidenceIDs...)
+	provenance := observationProvenanceLabels(input.provenance)
+	limitations := pathObservationLimitations(observation)
 	pathView := PathView{
 		EvidenceIDs:             evidenceIDs,
-		Provenance:              observationProvenanceLabels(input.provenance),
+		Provenance:              provenance,
 		ProbeName:               input.provenance.ProbeName,
 		Protocol:                observation.Protocol,
 		ProtocolLabel:           labelForProtocol(observation.Protocol),
@@ -675,12 +680,14 @@ func buildPathView(input pathInput) PathView {
 		DestinationTCPConnected: observation.DestinationTCPConnected,
 		Hops:                    make([]PathHopView, 0, len(observation.Hops)),
 		Segments:                make([]PathSegmentView, 0, len(observation.Segments)),
+		Certainty:               pathObservationCertainty(observation),
+		Limitations:             limitations,
 		Error:                   observation.Error,
 	}
 	if len(evidenceIDs) > 0 {
 		pathView.EvidenceID = evidenceIDs[0]
 	}
-	for _, hop := range observation.Hops {
+	for _, hop := range orderedPathHops(observation.Hops) {
 		hopView := PathHopView{
 			TTL:         hop.TTL,
 			State:       hop.State,
@@ -693,7 +700,7 @@ func buildPathView(input pathInput) PathView {
 		}
 		pathView.Hops = append(pathView.Hops, hopView)
 	}
-	for _, segment := range observation.Segments {
+	for _, segment := range orderedPathSegments(observation.Segments) {
 		pathView.Segments = append(pathView.Segments, PathSegmentView{
 			Kind:        segment.Kind,
 			FromTTL:     segment.FromTTL,
@@ -705,6 +712,7 @@ func buildPathView(input pathInput) PathView {
 			EvidenceIDs: append([]string(nil), evidenceIDs...),
 		})
 	}
+	pathView.Graph = buildPathGraphView(observation, evidenceIDs, provenance, limitations)
 	return pathView
 }
 
@@ -770,8 +778,9 @@ func completedProgress(probes []ProbeView) []ProgressEvent {
 }
 
 func responderViews(responders []model.PathResponder) []ResponderView {
-	result := make([]ResponderView, 0, len(responders))
-	for _, responder := range responders {
+	ordered := orderedPathResponders(responders)
+	result := make([]ResponderView, 0, len(ordered))
+	for _, responder := range ordered {
 		result = append(result, ResponderView{
 			Address:            responder.Address,
 			RTTMS:              responder.RTTMS,

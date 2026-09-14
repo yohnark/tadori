@@ -48,12 +48,16 @@
   const pathGraphReserved = document.querySelector("#path-graph-reserved");
   const pathGraphDescription = document.querySelector("#path-graph-description");
   const pathGraphCount = document.querySelector("#path-graph-count");
+  const pathGraphContent = document.querySelector("#path-graph-content");
+  const pathGraphScaffold = document.querySelector("#path-graph-scaffold");
+  const pathGraphReservation = document.querySelector("#path-graph-reservation");
   const pathViewStatus = document.querySelector("#path-view-status");
   const pathViewTabs = document.querySelectorAll(".path-view-tab");
   const pathViewControls = document.querySelectorAll("[data-path-view]");
   const comparisons = document.querySelector("#comparisons");
   const evidence = document.querySelector("#evidence");
   const evidenceHeading = document.querySelector("#evidence-heading");
+  const pathSelection = document.querySelector("#path-selection");
   const canonicalJSON = document.querySelector("#canonical-json");
   const htmlReportLink = document.querySelector("#html-report-link");
   const jsonReportLink = document.querySelector("#json-report-link");
@@ -133,7 +137,7 @@
     }
     pathGraphView.hidden = selectedView !== "graph";
     pathTableView.hidden = selectedView !== "table";
-    pathViewStatus.textContent = selectedView === "graph" ? "Graph layout shell" : "Canonical table";
+    pathViewStatus.textContent = selectedView === "graph" ? "Graph" : "Canonical table";
   }
 
   function setPathGraphState(state) {
@@ -146,9 +150,12 @@
   }
 
   function renderPathGraph(view) {
+    pathGraphContent.replaceChildren();
+    pathGraphScaffold.hidden = true;
+    pathGraphReservation.hidden = true;
     if (!view) {
       pathGraphCount.textContent = "Awaiting report";
-      pathGraphDescription.textContent = "A horizontal layout is reserved for canonical path data.";
+      pathGraphDescription.textContent = "Waiting for canonical path observations.";
       setPathGraphState("loading");
       return;
     }
@@ -162,15 +169,167 @@
       return;
     }
 
-    const onlyUnsupported = pathViews.every((path) => path && path.observation_status === "unsupported");
-    if (onlyUnsupported) {
-      pathGraphDescription.textContent = "The report retained the supported Table projection for this path lane.";
+    const graphs = pathViews
+      .map((path) => path && path.graph)
+      .filter((graph) => graph && graph.supported && Array.isArray(graph.nodes) && Array.isArray(graph.groups));
+    const onlyUnsupported = pathViews.every((path) => path && path.graph && !path.graph.supported);
+    if (!graphs.length) {
+      pathGraphDescription.textContent = onlyUnsupported
+        ? "The report retained the supported Table projection for this path lane."
+        : "No graph-compatible canonical path projection is available.";
       setPathGraphState("unsupported");
       return;
     }
 
-    pathGraphDescription.textContent = "Canonical graph data will populate ordered responders and unobservable ranges here.";
+    pathGraphDescription.textContent = "Canonical nodes preserve TTL order, responder visibility, and destination confirmation.";
+    for (const [index, graph] of graphs.entries()) {
+      pathGraphContent.appendChild(renderGraphLane(graph, index));
+    }
     setPathGraphState("reserved");
+  }
+
+  function renderGraphLane(graph, index) {
+    const lane = element("section", "path-graph-lane");
+    lane.setAttribute("aria-label", `${text(graph.protocol_label || graph.protocol)} observed path ${index + 1}`);
+
+    const heading = element("div", "path-graph-lane-heading");
+    const copy = element("div");
+    copy.appendChild(element("strong", "path-graph-lane-title", `${text(graph.protocol_label || graph.protocol).toUpperCase()} observation`));
+    copy.appendChild(element("span", "path-graph-lane-endpoint", `${text(graph.destination)} · ${portText(graph.destination_port)}`));
+    heading.appendChild(copy);
+    const laneMetadata = element("div", "path-graph-lane-meta");
+    laneMetadata.appendChild(badge(graph.observation_label || graph.observation_status, graph.observation_tone));
+    laneMetadata.appendChild(element("span", "path-graph-context", graph.port_aware ? "port-aware" : graph.protocol === "icmp" ? "ICMP endpoint context" : "not port-aware"));
+    if (graph.destination_tcp_connected) {
+      laneMetadata.appendChild(badge("TCP connected", "positive"));
+    } else if (graph.destination_reached) {
+      laneMetadata.appendChild(badge("destination reached", "positive"));
+    }
+    heading.appendChild(laneMetadata);
+    lane.appendChild(heading);
+
+    const track = element("div", "path-graph-lane-track");
+    const nodeByID = new Map((graph.nodes || []).map((node) => [node.id, node]));
+    const groups = graph.groups || [];
+    for (const [groupIndex, group] of groups.entries()) {
+      if (groupIndex) {
+        track.appendChild(renderGraphConnector(graph, groups[groupIndex - 1], group));
+      }
+      const groupTone = group.kind === "ttl_hop" || (group.kind === "destination_confirmation" && graph.destination_reached) ? "positive" : "neutral";
+      const column = element("div", toneClass("path-graph-group", groupTone));
+      column.appendChild(element("span", "path-graph-group-label", graphGroupRangeLabel(group)));
+      column.appendChild(element("span", "path-graph-group-detail", group.detail || group.label));
+      const nodeList = element("div", "path-graph-node-list");
+      for (const nodeID of group.node_ids || []) {
+        const node = nodeByID.get(nodeID);
+        if (node) {
+          nodeList.appendChild(renderGraphNode(node));
+        }
+      }
+      column.appendChild(nodeList);
+      track.appendChild(column);
+    }
+    lane.appendChild(track);
+    if (graph.limitations && graph.limitations.length) {
+      lane.appendChild(element("p", "path-graph-limitation", graph.limitations.join(" · ")));
+    }
+    return lane;
+  }
+
+  function renderGraphConnector(graph, previous, current) {
+    const connector = element("div", "path-graph-connector");
+    const previousIDs = previous.node_ids || [];
+    const currentIDs = current.node_ids || [];
+    const edge = (graph.edges || []).find((candidate) => previousIDs.includes(candidate.from) && currentIDs.includes(candidate.to));
+    connector.classList.add(edgeTone(edge && edge.kind));
+    connector.title = edge ? text(edge.detail) : "Canonical observation order";
+    connector.appendChild(element("span", "path-graph-connector-line"));
+    connector.appendChild(element("span", "path-graph-connector-label", edge ? edge.label : "observed order"));
+    return connector;
+  }
+
+  function edgeTone(kind) {
+    if (kind === "unobservable_visibility") {
+      return "is-unobservable";
+    }
+    if (kind === "bounded_inference") {
+      return "is-inferred";
+    }
+    if (kind === "destination_confirmation") {
+      return "is-destination";
+    }
+    return "is-observed";
+  }
+
+  function graphGroupRangeLabel(group) {
+    if (!group.from_ttl && !group.to_ttl) {
+      return group.kind === "destination_confirmation" ? "DESTINATION" : "START";
+    }
+    return group.from_ttl === group.to_ttl ? `TTL ${text(group.from_ttl)}` : `TTL ${text(group.from_ttl)}–${text(group.to_ttl)}`;
+  }
+
+  function renderGraphNode(node) {
+    const button = element("button", toneClass("path-graph-node", node.tone));
+    button.type = "button";
+    button.dataset.graphNodeId = text(node.id);
+    button.dataset.evidenceId = text((node.evidence_ids || [])[0]);
+    button.title = text(node.detail);
+    const heading = element("span", "path-graph-node-heading");
+    heading.appendChild(element("strong", "path-graph-node-title", node.label));
+    if (node.destination_confirmed) {
+      heading.appendChild(badge("destination confirmed", "positive"));
+    }
+    button.appendChild(heading);
+    button.appendChild(element("span", "path-graph-node-detail", node.detail));
+    if (node.address) {
+      button.appendChild(element("code", "path-graph-node-address", node.address));
+    }
+    const metadata = [];
+    if (node.rtt_ms) {
+      metadata.push(`${node.rtt_ms} ms RTT`);
+    }
+    if (node.response) {
+      metadata.push(node.response);
+    }
+    if (node.attempts) {
+      metadata.push(`${node.attempts} attempt${node.attempts === 1 ? "" : "s"}`);
+    }
+    if (node.certainty) {
+      metadata.push(`certainty: ${node.certainty}`);
+    }
+    if (metadata.length) {
+      button.appendChild(element("span", "path-graph-node-meta", metadata.join(" · ")));
+    }
+    button.addEventListener("click", () => selectGraphNode(node));
+    return button;
+  }
+
+  function selectGraphNode(node) {
+    pathSelection.hidden = false;
+    pathSelection.replaceChildren();
+    const range = node.ttl_from === node.ttl_to ? `TTL ${text(node.ttl_from)}` : `TTL ${text(node.ttl_from)}–${text(node.ttl_to)}`;
+    appendObservationRows(pathSelection, [
+      ["Role", node.role],
+      ["TTL / hop", node.kind === "probe_vantage" || node.kind === "destination_confirmation" ? node.label : range],
+      ["Observed address", node.address || "not applicable for this graph element"],
+      ["RTT", node.rtt_ms ? `${node.rtt_ms} ms` : "not observed"],
+      ["Response", node.response || "not specified"],
+      ["Attempts", node.attempts || "not specified"],
+      ["Protocol", node.protocol],
+      ["Destination port", portText(node.destination_port)],
+      ["Port-aware", booleanText(node.port_aware)],
+      ["Certainty", node.certainty || "unknown"],
+      ["Destination confirmed", booleanText(node.destination_confirmed)],
+      ["TCP connected", booleanText(node.destination_tcp_connected)],
+      ["Provenance", listText(node.provenance)],
+      ["Evidence", referenceValue(node.evidence_ids)],
+      ["Limitations", listText(node.limitations)],
+    ]);
+    evidenceHeading.textContent = `Evidence inspector · ${text(node.label)}`;
+    const evidenceID = (node.evidence_ids || [])[0];
+    if (evidenceID) {
+      focusEvidence(evidenceID);
+    }
   }
 
   function badge(label, tone) {
@@ -1148,7 +1307,9 @@
     if (path.port_aware) {
       return `Port-aware TCP observation for ${portText(path.destination_port)}.`;
     }
-    return "ICMP observation; it is not a destination-port connectivity test.";
+    return path.protocol === "icmp"
+      ? "ICMP observation; it is not a destination-port connectivity test."
+      : "This path observation is not port-aware; it is not a destination-port connectivity test.";
   }
 
   function portText(port) {
@@ -1242,6 +1403,8 @@
 
   function renderView(view) {
     currentView = view;
+    clearPathSelection();
+    evidenceHeading.textContent = "Structured evidence";
     const overall = view.overall || {};
     const observations = view.observations || {};
     diagnosisLabel.textContent = text(overall.diagnosis_label);
@@ -1415,14 +1578,20 @@
     evidenceHeading.textContent = `Evidence inspector · ${text(id)}`;
   }
 
+  function clearPathSelection() {
+    pathSelection.replaceChildren();
+    pathSelection.hidden = true;
+  }
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     clearError();
     closeEvents();
     activeSessionID = "";
     reportSection.hidden = true;
+    clearPathSelection();
     pathGraphCount.textContent = "Awaiting report";
-    pathGraphDescription.textContent = "A horizontal layout is reserved for canonical path data.";
+    pathGraphDescription.textContent = "Waiting for canonical path observations.";
     setPathGraphState("loading");
     button.disabled = true;
     button.textContent = "Starting…";
