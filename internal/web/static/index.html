@@ -197,7 +197,7 @@
               <div class="path-graph-header">
                 <div>
                   <h3>Observed responder sequence</h3>
-                  <p id="path-graph-description">A horizontal layout is reserved for canonical path data.</p>
+                  <p id="path-graph-description">Waiting for canonical path observations.</p>
                 </div>
                 <span id="path-graph-count" class="count-label">Awaiting report</span>
               </div>
@@ -224,7 +224,8 @@
                   </div>
                 </div>
                 <div id="path-graph-reserved" class="path-graph-reserved">
-                  <div class="path-graph-scaffold" aria-hidden="true">
+                  <div id="path-graph-content" class="path-graph-content"></div>
+                  <div id="path-graph-scaffold" class="path-graph-scaffold" aria-hidden="true">
                     <div class="graph-scaffold-guide graph-guide-top">
                       <span>sequence</span>
                       <span>responder visibility</span>
@@ -261,11 +262,11 @@
                       <span>selection target reserved</span>
                     </div>
                   </div>
-                  <div class="path-graph-reservation">
+                  <div id="path-graph-reservation" class="path-graph-reservation">
                     <span class="reservation-mark" aria-hidden="true">↳</span>
                     <div>
                       <strong>Node selection → Evidence inspector</strong>
-                      <p>Future canonical graph nodes will focus their retained evidence here. This shell intentionally contains no reconstructed or illustrative path data.</p>
+                      <p>Canonical graph elements focus retained evidence and semantic details here. The graph does not reconstruct physical topology.</p>
                     </div>
                   </div>
                 </div>
@@ -332,7 +333,8 @@
                 <h2 id="evidence-heading">Structured evidence</h2>
               </div>
             </div>
-            <p class="section-note">Select a path row or finding to focus its evidence. Future graph-node selection will use this same inspector; Raw evidence remains available here.</p>
+            <p class="section-note">Select a path row, graph element, or finding to focus its evidence and semantic details. Raw evidence remains available here.</p>
+            <div id="path-selection" class="path-selection" hidden></div>
             <div id="evidence" class="evidence-list"></div>
           </section>
 

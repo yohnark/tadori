@@ -74,6 +74,21 @@ test("graph renderer does not define a second path-data projection", () => {
   assert.doesNotMatch(renderer, /\.responders/);
 });
 
+test("graph renderer consumes the backend graph projection and supports semantic selection", () => {
+  assert.equal(includesAll(app, [
+    "pathGraphContent",
+    "renderGraphLane",
+    "renderGraphNode",
+    "selectGraphNode",
+    "graph.groups",
+    "graph.nodes",
+    "graph.edges",
+    "pathSelection",
+    "Destination confirmed",
+    "Limitations",
+  ]), true);
+});
+
 test("narrow screens expose the table fallback affordance", () => {
   assert.match(index, /Narrow-screen fallback:/);
   assert.match(index, /Open Table view/);
@@ -84,5 +99,5 @@ test("narrow screens expose the table fallback affordance", () => {
 test("copy keeps observed visibility distinct from physical topology", () => {
   assert.match(index, /responder\/path visibility, not physical topology/);
   assert.match(index, /not physical topology or inferred device identity/);
-  assert.match(index, /Future canonical graph nodes will focus their retained evidence here/);
+  assert.match(index, /Canonical graph elements focus retained evidence and semantic details here/);
 });

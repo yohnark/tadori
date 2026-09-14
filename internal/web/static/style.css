@@ -1668,6 +1668,235 @@ button.track-node:focus-visible {
   min-width: 0;
 }
 
+.path-graph-content {
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+  gap: 1px;
+  background: var(--line);
+}
+
+.path-graph-lane {
+  min-width: max-content;
+  background: var(--surface);
+}
+
+.path-graph-lane-heading {
+  display: flex;
+  min-height: 46px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.path-graph-lane-title,
+.path-graph-lane-endpoint {
+  display: block;
+}
+
+.path-graph-lane-title {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.path-graph-lane-endpoint {
+  margin-top: 2px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.path-graph-lane-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.path-graph-context {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.path-graph-lane-track {
+  display: flex;
+  min-width: max-content;
+  align-items: stretch;
+  gap: 0;
+  padding: 18px 20px;
+  background:
+    linear-gradient(to right, rgba(216, 221, 227, 0.42) 1px, transparent 1px) 20px 0 / 80px 100%,
+    var(--surface-subtle);
+}
+
+.path-graph-group {
+  display: grid;
+  width: 194px;
+  min-height: 166px;
+  flex: 0 0 194px;
+  align-content: start;
+  gap: 5px;
+  padding: 9px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.path-graph-group.neutral {
+  border-style: dashed;
+  background: var(--surface-subtle);
+}
+
+.path-graph-group-label {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.path-graph-group-detail {
+  min-height: 29px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.path-graph-node-list {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  margin-top: 3px;
+}
+
+.path-graph-node {
+  display: grid;
+  width: 100%;
+  gap: 3px;
+  padding: 7px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  text-align: left;
+}
+
+.path-graph-node:hover,
+.path-graph-node:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.path-graph-node.neutral {
+  color: var(--muted);
+}
+
+.path-graph-node-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 5px;
+}
+
+.path-graph-node-title {
+  min-width: 0;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.path-graph-node-detail,
+.path-graph-node-meta {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.path-graph-node-detail {
+  overflow-wrap: anywhere;
+}
+
+.path-graph-node-address {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.path-graph-connector {
+  display: grid;
+  width: 94px;
+  min-height: 166px;
+  flex: 0 0 94px;
+  align-content: center;
+  justify-items: center;
+  gap: 7px;
+  color: var(--faint);
+}
+
+.path-graph-connector-line {
+  position: relative;
+  width: 62px;
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.path-graph-connector-line::after {
+  position: absolute;
+  top: -3px;
+  right: 0;
+  width: 6px;
+  height: 6px;
+  border-top: 1px solid var(--line-strong);
+  border-right: 1px solid var(--line-strong);
+  content: "";
+  transform: rotate(45deg);
+}
+
+.path-graph-connector.is-unobservable .path-graph-connector-line {
+  background: repeating-linear-gradient(to right, var(--line-strong) 0 4px, transparent 4px 8px);
+}
+
+.path-graph-connector.is-unobservable .path-graph-connector-line::after,
+.path-graph-connector.is-inferred .path-graph-connector-line::after {
+  display: none;
+}
+
+.path-graph-connector.is-inferred .path-graph-connector-line {
+  background: repeating-linear-gradient(to right, var(--accent) 0 4px, transparent 4px 8px);
+}
+
+.path-graph-connector-label {
+  max-width: 88px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.path-graph-connector.is-destination .path-graph-connector-line {
+  background: var(--green);
+}
+
+.path-graph-limitation {
+  margin: 0;
+  padding: 7px 12px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.path-selection {
+  border-bottom: 1px solid var(--line);
+  background: var(--accent-soft);
+}
+
+.path-selection[hidden] {
+  display: none;
+}
+
 .path-graph-reserved[hidden] {
   display: none;
 }
