@@ -88,6 +88,7 @@ type Observations struct {
 	Transport            TransportObservation        `json:"transport"`
 	Security             SecurityObservation         `json:"security"`
 	Application          ApplicationObservation      `json:"application"`
+	BrowserCapture       *BrowserCaptureObservation  `json:"browser_capture,omitempty"`
 	Paths                []PathObservation           `json:"paths,omitempty"`
 	PacketFlows          []PacketFlowEvidence        `json:"packet_flows,omitempty"`
 	PathProvenance       []ObservationProvenance     `json:"path_provenance,omitempty"`
@@ -133,6 +134,13 @@ func NormalizeObservations(observations Observations) Observations {
 	pathCorrelations := clonePathCorrelations(observations.PathCorrelations)
 	conflicts := cloneObservationConflicts(observations.Conflicts)
 	divergences := cloneObservationDivergences(observations.Divergences)
+	var browserCapture *BrowserCaptureObservation
+	if observations.BrowserCapture != nil {
+		value := *observations.BrowserCapture
+		value.Destinations = cloneBrowserCaptureDestinations(value.Destinations)
+		value.Limitations = append([]string(nil), value.Limitations...)
+		browserCapture = &value
+	}
 	return Observations{
 		Endpoint:             endpoint,
 		NameResolution:       name,
@@ -141,6 +149,7 @@ func NormalizeObservations(observations Observations) Observations {
 		Transport:            NormalizeTransportObservation(observations.Transport),
 		Security:             NormalizeSecurityObservation(observations.Security),
 		Application:          NormalizeApplicationObservation(observations.Application),
+		BrowserCapture:       browserCapture,
 		Paths:                paths,
 		PacketFlows:          packetFlows,
 		PathProvenance:       pathProvenance,
@@ -149,6 +158,21 @@ func NormalizeObservations(observations Observations) Observations {
 		Conflicts:            conflicts,
 		Divergences:          divergences,
 	}
+}
+
+func cloneBrowserCaptureDestinations(values []BrowserCaptureDestination) []BrowserCaptureDestination {
+	if values == nil {
+		return nil
+	}
+	result := make([]BrowserCaptureDestination, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].Mechanisms = append([]BrowserCaptureMechanism(nil), value.Mechanisms...)
+		result[index].ResolvedAddressCandidates = append([]string(nil), value.ResolvedAddressCandidates...)
+		result[index].ConnectedEndpoints = append([]string(nil), value.ConnectedEndpoints...)
+		result[index].FailureReasons = append([]string(nil), value.FailureReasons...)
+	}
+	return result
 }
 
 func cloneObservationProvenance(values []ObservationProvenance) []ObservationProvenance {

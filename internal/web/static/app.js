@@ -8,6 +8,21 @@
   const button = form.querySelector("button[type=submit]");
   const cancelButton = document.querySelector("#cancel-button");
   const error = document.querySelector("#error");
+  const browserCaptureStart = document.querySelector("#browser-capture-start");
+  const browserCaptureStop = document.querySelector("#browser-capture-stop");
+  const browserCaptureBrowser = document.querySelector("#browser-capture-browser");
+  const browserCaptureState = document.querySelector("#browser-capture-state");
+  const browserCaptureError = document.querySelector("#browser-capture-error");
+  const browserCaptureElapsed = document.querySelector("#browser-capture-elapsed");
+  const browserCaptureDestinations = document.querySelector("#browser-capture-destinations");
+  const browserCaptureAddresses = document.querySelector("#browser-capture-addresses");
+  const browserCaptureObservations = document.querySelector("#browser-capture-observations");
+  const browserCaptureFailures = document.querySelector("#browser-capture-failures");
+  const browserCaptureDestinationsBody = document.querySelector("#browser-capture-destinations-body");
+  const browserCaptureEmpty = document.querySelector("#browser-capture-empty");
+  const browserCaptureJSON = document.querySelector("#browser-capture-json");
+  const browserCaptureFQDNs = document.querySelector("#browser-capture-fqdns");
+  const browserCaptureCopy = document.querySelector("#browser-capture-copy");
   const reportSection = document.querySelector("#report");
   const runStateLabel = document.querySelector("#run-state-label");
   const runStateBadge = document.querySelector("#run-state-badge");
@@ -66,6 +81,8 @@
   let currentView = null;
   let activeSessionID = "";
   let eventSource = null;
+  let activeCaptureID = "";
+  let capturePollTimer = null;
   let activePathView = "graph";
   const progressItems = new Map();
   let composerState = composer.createState({ service: serviceInput.value });
@@ -406,6 +423,106 @@
   function showError(message) {
     error.textContent = text(message);
     error.hidden = false;
+  }
+
+  function showBrowserCaptureError(message) {
+    browserCaptureError.textContent = text(message);
+    browserCaptureError.hidden = false;
+  }
+
+  function clearBrowserCaptureError() {
+    browserCaptureError.textContent = "";
+    browserCaptureError.hidden = true;
+  }
+
+  function browserCaptureTone(state) {
+    if (state === "completed") {
+      return "positive";
+    }
+    if (state === "failed") {
+      return "negative";
+    }
+    if (state === "stopping" || state === "cancelled") {
+      return "warning";
+    }
+    return "neutral";
+  }
+
+  function browserCaptureOutcomeTone(outcome) {
+    if (outcome === "connected") {
+      return "positive";
+    }
+    if (outcome === "failed" || outcome === "dns_failed" || outcome === "proxy_rejected") {
+      return "negative";
+    }
+    if (outcome === "mixed") {
+      return "warning";
+    }
+    return "neutral";
+  }
+
+  function renderBrowserCapture(snapshot) {
+    const state = text(snapshot.state || "unknown");
+    browserCaptureState.textContent = state;
+    browserCaptureState.className = toneClass("badge", browserCaptureTone(state));
+    browserCaptureStart.disabled = state === "starting" || state === "running" || state === "stopping";
+    browserCaptureStop.hidden = state !== "starting" && state !== "running";
+    browserCaptureBrowser.disabled = browserCaptureStart.disabled;
+    browserCaptureDestinations.textContent = text(snapshot.unique_destination_count || 0);
+    browserCaptureAddresses.textContent = text(snapshot.unique_address_count || 0);
+    browserCaptureObservations.textContent = text(snapshot.observation_count || 0);
+    browserCaptureFailures.textContent = text(snapshot.failure_count || 0);
+    const started = snapshot.started_at ? Date.parse(snapshot.started_at) : NaN;
+    const finished = snapshot.stopped_at ? Date.parse(snapshot.stopped_at) : Date.now();
+    browserCaptureElapsed.textContent = Number.isFinite(started) ? `${Math.max(0, Math.floor((finished - started) / 1000))}s` : "0s";
+
+    browserCaptureDestinationsBody.replaceChildren();
+    const destinations = Array.isArray(snapshot.destinations) ? snapshot.destinations : [];
+    browserCaptureEmpty.hidden = destinations.length !== 0;
+    for (const destination of destinations) {
+      const row = element("tr");
+      row.appendChild(element("td", "", destination.requested_hostname || "unknown"));
+      row.appendChild(element("td", "", destination.port || "—"));
+      const outcome = text(destination.outcome || "unknown");
+      row.appendChild(element("td", `capture-outcome-${browserCaptureOutcomeTone(outcome)}`, outcome));
+      row.appendChild(element("td", "", destination.connection_count || 0));
+      row.appendChild(element("td", "", (destination.connected_endpoints || []).join(", ") || destination.connected_endpoint || "not observed"));
+      row.appendChild(element("td", "", destination.failure_reason || "none"));
+      browserCaptureDestinationsBody.appendChild(row);
+    }
+    if (snapshot.id) {
+      browserCaptureJSON.hidden = false;
+      browserCaptureJSON.href = `/api/browser-captures/${encodeURIComponent(snapshot.id)}/report.json`;
+      browserCaptureFQDNs.hidden = false;
+      browserCaptureFQDNs.href = `/api/browser-captures/${encodeURIComponent(snapshot.id)}/fqdns.txt`;
+      browserCaptureCopy.hidden = false;
+    }
+  }
+
+  function clearBrowserCapturePoll() {
+    if (capturePollTimer !== null) {
+      clearTimeout(capturePollTimer);
+      capturePollTimer = null;
+    }
+  }
+
+  async function pollBrowserCapture() {
+    if (!activeCaptureID) {
+      return;
+    }
+    try {
+      const response = await fetch(`/api/browser-captures/${encodeURIComponent(activeCaptureID)}`, { cache: "no-store" });
+      const snapshot = await readResponse(response);
+      renderBrowserCapture(snapshot);
+      if (snapshot.state === "running" || snapshot.state === "starting" || snapshot.state === "stopping") {
+        capturePollTimer = setTimeout(() => void pollBrowserCapture(), 750);
+      } else {
+        clearBrowserCapturePoll();
+      }
+    } catch (err) {
+      showBrowserCaptureError(err instanceof Error ? err.message : "could not load browser capture state");
+      capturePollTimer = setTimeout(() => void pollBrowserCapture(), 1500);
+    }
   }
 
   function setSessionState(state) {
@@ -1614,6 +1731,70 @@
       showError(err instanceof Error ? err.message : "diagnosis request failed");
       button.disabled = false;
       button.textContent = "Diagnose →";
+    }
+  });
+
+  browserCaptureStart.addEventListener("click", async () => {
+    clearBrowserCaptureError();
+    clearBrowserCapturePoll();
+    browserCaptureStart.disabled = true;
+    browserCaptureState.textContent = "starting";
+    browserCaptureState.className = toneClass("badge", "neutral");
+    try {
+      const response = await fetch("/api/browser-captures", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ browser: browserCaptureBrowser.value }),
+      });
+      const snapshot = await readResponse(response);
+      activeCaptureID = text(snapshot.id);
+      renderBrowserCapture(snapshot);
+      void pollBrowserCapture();
+    } catch (err) {
+      browserCaptureStart.disabled = false;
+      browserCaptureBrowser.disabled = false;
+      browserCaptureState.textContent = "error";
+      browserCaptureState.className = toneClass("badge", "negative");
+      showBrowserCaptureError(err instanceof Error ? err.message : "browser capture request failed");
+    }
+  });
+
+  browserCaptureStop.addEventListener("click", async () => {
+    if (!activeCaptureID) {
+      return;
+    }
+    clearBrowserCaptureError();
+    browserCaptureStop.disabled = true;
+    try {
+      const response = await fetch(`/api/browser-captures/${encodeURIComponent(activeCaptureID)}`, { method: "DELETE" });
+      const snapshot = await readResponse(response);
+      renderBrowserCapture(snapshot);
+      void pollBrowserCapture();
+    } catch (err) {
+      browserCaptureStop.disabled = false;
+      showBrowserCaptureError(err instanceof Error ? err.message : "could not stop browser capture");
+    }
+  });
+
+  browserCaptureCopy.addEventListener("click", async () => {
+    if (!activeCaptureID) {
+      return;
+    }
+    clearBrowserCaptureError();
+    try {
+      const response = await fetch(`/api/browser-captures/${encodeURIComponent(activeCaptureID)}/fqdns.txt`, { cache: "no-store" });
+      const fqdnList = await response.text();
+      if (!response.ok) {
+        throw new Error("could not load observed FQDNs");
+      }
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+        throw new Error("clipboard access is unavailable; use Export FQDNs");
+      }
+      await navigator.clipboard.writeText(fqdnList);
+      browserCaptureCopy.textContent = "Copied FQDNs";
+      setTimeout(() => { browserCaptureCopy.textContent = "Copy FQDNs"; }, 1500);
+    } catch (err) {
+      showBrowserCaptureError(err instanceof Error ? err.message : "could not copy observed FQDNs");
     }
   });
 
