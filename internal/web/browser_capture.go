@@ -6,12 +6,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 
 	"github.com/yohnark/tadori/internal/batch"
 	"github.com/yohnark/tadori/internal/capture"
 	"github.com/yohnark/tadori/internal/model"
+	reportpkg "github.com/yohnark/tadori/internal/report"
 )
 
 const maxBrowserCaptureRequestBytes = 2 << 10
@@ -25,6 +25,7 @@ type browserCapturePathAction string
 const (
 	browserCaptureSession              browserCapturePathAction = "session"
 	browserCaptureReport               browserCapturePathAction = "report"
+	browserCapturePrivacy              browserCapturePathAction = "privacy"
 	browserCaptureFQDN                 browserCapturePathAction = "fqdns"
 	browserCaptureValidationCollection browserCapturePathAction = "validation-batches"
 )
@@ -132,7 +133,7 @@ func (h *Handler) browserCaptureResource(w http.ResponseWriter, r *http.Request)
 			writeCaptureError(w, err)
 			return
 		}
-		encoded, err := json.Marshal(report)
+		encoded, err := reportpkg.MarshalBrowserCaptureJSON(report)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "encode browser capture report: "+err.Error())
 			return
@@ -141,6 +142,17 @@ func (h *Handler) browserCaptureResource(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="tadori-browser-capture.json"`)
 		_, _ = w.Write(encoded)
+	case browserCapturePrivacy:
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		if _, err := h.captures.Get(id); err != nil {
+			writeCaptureError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, reportpkg.DefaultPrivacyMetadata())
 	case browserCaptureFQDN:
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, http.MethodGet)
@@ -151,13 +163,10 @@ func (h *Handler) browserCaptureResource(w http.ResponseWriter, r *http.Request)
 			writeCaptureError(w, err)
 			return
 		}
-		sort.Strings(values)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="tadori-browser-destinations.txt"`)
-		if len(values) > 0 {
-			_, _ = w.Write([]byte(strings.Join(values, "\n") + "\n"))
-		}
+		_, _ = w.Write(reportpkg.RenderFQDNExport(values))
 	}
 }
 
@@ -172,6 +181,9 @@ func parseBrowserCapturePath(path string) (string, browserCapturePathAction, boo
 	}
 	if len(parts) == 2 && parts[1] == "report.json" && validSessionID(parts[0]) {
 		return parts[0], browserCaptureReport, true
+	}
+	if len(parts) == 2 && parts[1] == "privacy.json" && validSessionID(parts[0]) {
+		return parts[0], browserCapturePrivacy, true
 	}
 	if len(parts) == 2 && parts[1] == "fqdns.txt" && validSessionID(parts[0]) {
 		return parts[0], browserCaptureFQDN, true

@@ -65,7 +65,9 @@ func (report DiagnosticReport) MarshalJSON() ([]byte, error) {
 		StartedAt     *time.Time          `json:"started_at,omitempty"`
 		CompletedAt   *time.Time          `json:"completed_at,omitempty"`
 		Probes        []ProbeResult       `json:"probes"`
+		Observations  Observations        `json:"observations"`
 		Findings      []DiagnosticFinding `json:"findings,omitempty"`
+		Privacy       PrivacyMetadata     `json:"privacy"`
 	}
 
 	return json.Marshal(canonicalReport{
@@ -76,6 +78,8 @@ func (report DiagnosticReport) MarshalJSON() ([]byte, error) {
 		StartedAt:     canonicalTime(report.StartedAt),
 		CompletedAt:   canonicalTime(report.CompletedAt),
 		Probes:        report.Probes,
+		Observations:  report.Observations,
 		Findings:      report.Findings,
+		Privacy:       DefaultPrivacyMetadata(),
 	})
 }

@@ -157,6 +157,23 @@
         <a id="html-report-link" class="secondary-button" href="#" target="_blank" rel="noopener" data-i18n="export.html" hidden>HTML Report</a>
         <a id="json-report-link" class="secondary-button" href="#" download data-i18n="export.json" hidden>JSON</a>
       </div>
+      <dialog id="privacy-preview" class="privacy-preview-dialog" aria-labelledby="privacy-preview-title">
+        <div class="privacy-preview-heading">
+          <p class="eyebrow">Export privacy preview</p>
+          <h2 id="privacy-preview-title">Review data boundary</h2>
+        </div>
+        <p id="privacy-preview-policy" class="section-note"></p>
+        <div class="privacy-preview-grid">
+          <section><h3>Included</h3><ul id="privacy-preview-included"></ul></section>
+          <section><h3>Redacted</h3><ul id="privacy-preview-redacted"></ul></section>
+          <section><h3>Excluded</h3><ul id="privacy-preview-excluded"></ul></section>
+        </div>
+        <p id="privacy-preview-error" class="error" role="alert" hidden></p>
+        <div class="privacy-preview-actions">
+          <button id="privacy-preview-cancel" class="secondary-button" type="button">Cancel</button>
+          <button id="privacy-preview-confirm" class="primary-button" type="button">Continue to export</button>
+        </div>
+      </dialog>
       <section id="destination-status-strip" class="destination-status-strip neutral" aria-labelledby="destination-status-label">
         <span class="destination-status-marker" aria-hidden="true">●</span>
         <div class="destination-status-copy">

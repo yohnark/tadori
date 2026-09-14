@@ -521,8 +521,9 @@ func (h *Handler) diagnosisResource(w http.ResponseWriter, r *http.Request) {
 type diagnosisExportFormat string
 
 const (
-	diagnosisExportHTML diagnosisExportFormat = "html"
-	diagnosisExportJSON diagnosisExportFormat = "json"
+	diagnosisExportHTML    diagnosisExportFormat = "html"
+	diagnosisExportJSON    diagnosisExportFormat = "json"
+	diagnosisExportPrivacy diagnosisExportFormat = "privacy"
 )
 
 // diagnosisExport serves only the canonical final report held by the session.
@@ -541,6 +542,16 @@ func (h *Handler) diagnosisExport(w http.ResponseWriter, r *http.Request, id str
 	if snapshot.Report == nil {
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusAccepted, snapshot)
+		return
+	}
+	if format == diagnosisExportPrivacy {
+		metadata, err := report.PrivacyPreview(*snapshot.Report)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "encode privacy preview: "+err.Error())
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, metadata)
 		return
 	}
 
@@ -666,7 +677,7 @@ func (h *Handler) legacyDiagnose(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), h.legacyTimeout)
 	defer cancel()
 	diagnosticReport := h.legacyRun(ctx, target)
-	encoded, err := report.MarshalJSON(diagnosticReport)
+	encoded, err := report.MarshalRedactedJSON(diagnosticReport)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "encode diagnostic report: "+err.Error())
 		return
@@ -753,6 +764,8 @@ func parseDiagnosisExportPath(path string) (id string, format diagnosisExportFor
 		return parts[0], diagnosisExportHTML, true
 	case "report.json":
 		return parts[0], diagnosisExportJSON, true
+	case "privacy.json":
+		return parts[0], diagnosisExportPrivacy, true
 	default:
 		return "", "", false
 	}
