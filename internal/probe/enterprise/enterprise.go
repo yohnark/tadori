@@ -93,14 +93,17 @@ type Snapshot struct {
 // resolution. Endpoint is expected to be host:port and is sanitized again
 // before evidence is emitted.
 type EffectiveProxy struct {
-	Source       string   `json:"source"`
-	Mode         string   `json:"mode"`
-	Endpoint     string   `json:"endpoint,omitempty"`
-	Bypass       []string `json:"bypass,omitempty"`
-	PACUsed      bool     `json:"pac_used"`
-	AutoDetect   bool     `json:"auto_detect"`
-	ResolutionOK bool     `json:"resolution_ok"`
-	Error        string   `json:"error,omitempty"`
+	Source              string   `json:"source"`
+	Decision            string   `json:"decision"`
+	Mode                string   `json:"mode"`
+	Endpoint            string   `json:"endpoint,omitempty"`
+	Bypass              []string `json:"bypass,omitempty"`
+	BypassMatched       bool     `json:"bypass_matched"`
+	PACUsed             bool     `json:"pac_used"`
+	AutoDetect          bool     `json:"auto_detect"`
+	ResolutionAttempted bool     `json:"resolution_attempted"`
+	ResolutionOK        bool     `json:"resolution_ok"`
+	Error               string   `json:"error,omitempty"`
 }
 
 // PathObservation records the result of one direct, WinINET, or WinHTTP path.
@@ -638,6 +641,10 @@ func safeEffectiveProxies(values []EffectiveProxy) []EffectiveProxy {
 	result := make([]EffectiveProxy, 0, len(values))
 	for _, value := range values {
 		copyValue := value
+		copyValue.Decision = normalizeEffectiveDecision(copyValue)
+		if copyValue.ResolutionOK {
+			copyValue.ResolutionAttempted = true
+		}
 		if endpoints, err := proxy.ProxyEndpoints(value.Endpoint); err == nil && len(endpoints) > 0 {
 			copyValue.Endpoint = endpoints[0]
 		} else if strings.TrimSpace(value.Endpoint) != "" {
@@ -654,6 +661,28 @@ func safeEffectiveProxies(values []EffectiveProxy) []EffectiveProxy {
 		return result[i].Endpoint < result[j].Endpoint
 	})
 	return result
+}
+
+func normalizeEffectiveDecision(value EffectiveProxy) string {
+	if decision := strings.TrimSpace(value.Decision); decision != "" {
+		return decision
+	}
+	if value.BypassMatched {
+		return model.EnterpriseProxyDecisionBypassMatch
+	}
+	if !value.ResolutionOK && (value.PACUsed || value.AutoDetect) {
+		return model.EnterpriseProxyDecisionPACResultUnavailable
+	}
+	switch value.Mode {
+	case PathModeDirect:
+		return model.EnterpriseProxyDecisionDirect
+	case PathModeProxy:
+		return model.EnterpriseProxyDecisionStaticProxy
+	case PathModePAC:
+		return model.EnterpriseProxyDecisionPACSelectedProxy
+	default:
+		return model.EnterpriseProxyDecisionUnknown
+	}
 }
 
 func safePaths(values []PathObservation) []PathObservation {

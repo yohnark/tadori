@@ -463,6 +463,34 @@ func TestRenderHumanPlacesNetworkContextBeforeRawRouteEvidence(t *testing.T) {
 	}
 }
 
+func TestRenderHumanExposesCanonicalEffectiveProxyDecision(t *testing.T) {
+	report := model.DiagnosticReport{
+		Status: model.ReportStatusComplete,
+		Observations: model.Observations{EnterprisePolicy: model.EnterprisePolicyObservation{
+			RequestedIdentity:      "api.vendor.example",
+			State:                  model.EnterpriseObservationStateObserved,
+			EffectiveDecisionKnown: true,
+			WinINET: model.EnterpriseProxySourceObservation{
+				Source:        "wininet",
+				Configuration: model.EnterpriseProxyConfigurationObservation{State: "pac_configured", PACURL: "https://pac.example/proxy.pac"},
+				Effective: model.EnterpriseProxyEffectiveObservation{
+					Observed: true, Decision: model.EnterpriseProxyDecisionPACSelectedProxy, Mode: model.EnterpriseProxyModePAC,
+					Endpoint: "proxy.example:8080", ResolutionAttempted: true, ResolutionOK: true,
+				},
+			},
+		}},
+	}
+	got := RenderHuman(report)
+	for _, want := range []string{"Enterprise Proxy Decisions:", "effective decision: pac_selected_proxy", "effective endpoint: proxy.example:8080", "PAC URL: https://pac.example/proxy.pac"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("human report missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Index(got, "Enterprise Proxy Decisions:") >= strings.Index(got, "Evidence:") {
+		t.Fatalf("effective proxy section was not rendered before raw evidence:\n%s", got)
+	}
+}
+
 func TestRenderHumanIncludesStructuredPathObservation(t *testing.T) {
 	raw, err := json.Marshal(model.PathObservation{
 		Status:             model.PathObservationStatusObserved,

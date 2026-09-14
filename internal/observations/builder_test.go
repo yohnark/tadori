@@ -455,11 +455,42 @@ func TestBuildEnterpriseProjectsWinHTTPRuntimeAndReachability(t *testing.T) {
 	if !proxy.Effective.Observed || proxy.Effective.Mode != enterpriseprobe.PathModeProxy || proxy.Effective.Endpoint != endpoint || proxy.Effective.Certainty != model.ObservationCertaintyObserved {
 		t.Fatalf("effective WinHTTP result = %#v", proxy.Effective)
 	}
+	if proxy.Effective.Decision != model.EnterpriseProxyDecisionStaticProxy || !proxy.Effective.ResolutionAttempted {
+		t.Fatalf("effective WinHTTP decision = %#v", proxy.Effective)
+	}
 	if len(proxy.EndpointReachability) != 1 || proxy.EndpointReachability[0].Reachability != model.EnterpriseEndpointReachable || !proxy.EndpointReachability[0].TCPConnected {
 		t.Fatalf("endpoint reachability = %#v", proxy.EndpointReachability)
 	}
 	if len(got.EnterprisePolicy.Paths) != 1 || got.EnterprisePolicy.Paths[0].Certainty != model.ObservationCertaintyObserved {
 		t.Fatalf("path observation = %#v", got.EnterprisePolicy.Paths)
+	}
+}
+
+func TestBuildEnterpriseProjectsDistinctEffectiveProxyDecisions(t *testing.T) {
+	tests := []struct {
+		name      string
+		effective enterpriseprobe.EffectiveProxy
+		want      string
+	}{
+		{name: "direct", effective: enterpriseprobe.EffectiveProxy{Source: "winhttp", Mode: enterpriseprobe.PathModeDirect, ResolutionOK: true}, want: model.EnterpriseProxyDecisionDirect},
+		{name: "static proxy", effective: enterpriseprobe.EffectiveProxy{Source: "winhttp", Mode: enterpriseprobe.PathModeProxy, Endpoint: "proxy.corp.example:8080", ResolutionOK: true}, want: model.EnterpriseProxyDecisionStaticProxy},
+		{name: "PAC-selected proxy", effective: enterpriseprobe.EffectiveProxy{Source: "winhttp", Mode: enterpriseprobe.PathModePAC, Endpoint: "pac.corp.example:8080", PACUsed: true, ResolutionOK: true}, want: model.EnterpriseProxyDecisionPACSelectedProxy},
+		{name: "bypass", effective: enterpriseprobe.EffectiveProxy{Source: "winhttp", Mode: enterpriseprobe.PathModeDirect, BypassMatched: true, ResolutionOK: true}, want: model.EnterpriseProxyDecisionBypassMatch},
+		{name: "PAC unavailable", effective: enterpriseprobe.EffectiveProxy{Source: "winhttp", Mode: enterpriseprobe.PathModeUnknown, PACUsed: true, ResolutionAttempted: true, ResolutionOK: false, Error: "PAC result unavailable"}, want: model.EnterpriseProxyDecisionPACResultUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t,
+				enterpriseConnectivityFixture(t, "enterprise-effective", []enterpriseprobe.EffectiveProxy{test.effective}, nil),
+			)})
+			value := got.EnterprisePolicy.WinHTTP.Effective
+			if value.Decision != test.want || !value.Observed {
+				t.Fatalf("effective decision = %#v, want %q", value, test.want)
+			}
+			if test.name == "PAC unavailable" && (value.ResolutionOK || value.Endpoint != "") {
+				t.Fatalf("PAC failure claimed a selected endpoint = %#v", value)
+			}
+		})
 	}
 }
 
@@ -495,6 +526,24 @@ func TestBuildEnterprisePACConfigurationStaysUnknownUntilEffectiveResult(t *test
 	}
 }
 
+func TestBuildEnterprisePACConfiguredButEffectiveResultUnavailable(t *testing.T) {
+	config := proxyprobe.ConfigurationObservation{State: proxyprobe.StatePACConfigured, PACConfigured: true, PACURL: "https://pac.corp.example/proxy.pac"}
+	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t,
+		enterpriseConfigEvidence(t, "enterprise-pac-config", "wininet", config),
+		enterpriseConnectivityFixture(t, "enterprise-pac-failure", []enterpriseprobe.EffectiveProxy{{
+			Source: "wininet", Mode: enterpriseprobe.PathModeUnknown, PACUsed: true, ResolutionAttempted: true,
+			ResolutionOK: false, Error: "PAC result unavailable",
+		}}, nil),
+	)})
+	value := got.EnterprisePolicy.WinINET
+	if value.Effective.Decision != model.EnterpriseProxyDecisionPACResultUnavailable || !value.Effective.Observed || value.Effective.ResolutionOK {
+		t.Fatalf("PAC unavailable effective result = %#v", value.Effective)
+	}
+	if !value.PAC.Configured || !value.PAC.ResolutionObserved || value.PAC.ResolutionOK || value.PAC.Decision != model.EnterpriseProxyDecisionPACResultUnavailable {
+		t.Fatalf("PAC unavailable configuration/result = %#v", value.PAC)
+	}
+}
+
 func TestBuildEnterpriseDistinguishesReachableProxyFromCONNECT407(t *testing.T) {
 	endpoint := "proxy.corp.example:8080"
 	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t,
@@ -511,6 +560,24 @@ func TestBuildEnterpriseDistinguishesReachableProxyFromCONNECT407(t *testing.T) 
 	}
 	if endpointObservation.Reachability != model.EnterpriseEndpointReachable || endpointObservation.ConnectOutcome != enterpriseprobe.ConnectAuthRequired {
 		t.Fatalf("407 was confused with endpoint unreachability = %#v", endpointObservation)
+	}
+	if got.EnterprisePolicy.WinINET.Effective.Decision != model.EnterpriseProxyDecisionAuthenticationRequired {
+		t.Fatalf("effective decision did not retain 407 = %#v", got.EnterprisePolicy.WinINET.Effective)
+	}
+}
+
+func TestBuildEnterpriseProjectsEffectiveWinHTTPWinINETDivergence(t *testing.T) {
+	got := Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t,
+		enterpriseConnectivityFixture(t, "enterprise-effective-divergence", []enterpriseprobe.EffectiveProxy{
+			{Source: "winhttp", Mode: enterpriseprobe.PathModeDirect, ResolutionOK: true},
+			{Source: "wininet", Mode: enterpriseprobe.PathModeProxy, Endpoint: "proxy.browser.example:8080", ResolutionOK: true},
+		}, nil),
+	)})
+	if !got.EnterprisePolicy.EffectiveDecisionKnown || !got.EnterprisePolicy.EffectiveDecisionDiverges {
+		t.Fatalf("effective source divergence = %#v", got.EnterprisePolicy)
+	}
+	if got.EnterprisePolicy.WinHTTP.Effective.Decision != model.EnterpriseProxyDecisionDirect || got.EnterprisePolicy.WinINET.Effective.Decision != model.EnterpriseProxyDecisionStaticProxy {
+		t.Fatalf("source decisions collapsed = %#v", got.EnterprisePolicy)
 	}
 }
 

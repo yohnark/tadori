@@ -84,17 +84,7 @@ func resolveProxyForURL(ctx context.Context, targetURL string, config SourceConf
 	// endpoint list only long enough to select a safe endpoint; it is never
 	// returned verbatim.
 	if strings.TrimSpace(config.PACURL) == "" && !config.AutoDetect {
-		if ProxyBypasses(targetURL, config.Bypass) {
-			return URLProxyResolution{Direct: true, Bypass: append([]string(nil), config.Bypass...), Configuration: string(StateDirect)}, nil
-		}
-		endpoint, direct, endpointErr := ProxyEndpointForURL(config.Proxy, targetURL)
-		if endpointErr != nil {
-			return URLProxyResolution{}, endpointErr
-		}
-		if direct || endpoint == "" {
-			return URLProxyResolution{Direct: true, Bypass: append([]string(nil), config.Bypass...), Configuration: string(StateDirect)}, nil
-		}
-		return URLProxyResolution{Proxy: endpoint, Bypass: append([]string(nil), config.Bypass...), Configuration: string(StateStaticProxyConfigured)}, nil
+		return resolveStaticProxyForURL(targetURL, config)
 	}
 
 	urlPointer, err := syscall.UTF16PtrFromString(targetURL)
@@ -157,9 +147,11 @@ func resolveProxyForURL(ctx context.Context, targetURL string, config SourceConf
 		return URLProxyResolution{}, err
 	}
 	if info.dwAccessType == winHTTPAccessTypeNoProxy {
+		bypass := splitBypass(readUTF16(info.lpszProxyBypass))
 		return URLProxyResolution{
 			Direct:        true,
-			Bypass:        splitBypass(readUTF16(info.lpszProxyBypass)),
+			Bypass:        bypass,
+			BypassMatched: ProxyBypasses(targetURL, bypass),
 			UsedPAC:       true,
 			AutoDetect:    config.AutoDetect,
 			Configuration: string(StateDirect),
@@ -170,17 +162,21 @@ func resolveProxyForURL(ctx context.Context, targetURL string, config SourceConf
 		return URLProxyResolution{}, errors.New("WinHTTP returned a malformed proxy endpoint")
 	}
 	if direct || endpoint == "" {
+		bypass := splitBypass(readUTF16(info.lpszProxyBypass))
 		return URLProxyResolution{
 			Direct:        true,
-			Bypass:        splitBypass(readUTF16(info.lpszProxyBypass)),
+			Bypass:        bypass,
+			BypassMatched: ProxyBypasses(targetURL, bypass),
 			UsedPAC:       true,
 			AutoDetect:    config.AutoDetect,
 			Configuration: string(StateDirect),
 		}, nil
 	}
+	bypass := splitBypass(readUTF16(info.lpszProxyBypass))
 	return URLProxyResolution{
 		Proxy:         endpoint,
-		Bypass:        splitBypass(readUTF16(info.lpszProxyBypass)),
+		Bypass:        bypass,
+		BypassMatched: false,
 		UsedPAC:       true,
 		AutoDetect:    config.AutoDetect,
 		Configuration: string(StatePACConfigured),

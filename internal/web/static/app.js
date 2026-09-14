@@ -1097,6 +1097,8 @@
       ["Unsupported", booleanText(observation.unsupported)],
       ["Proxy configuration diverges", booleanText(observation.proxy_configuration_diverges)],
       ["Divergence known", booleanText(observation.proxy_configuration_divergence_known)],
+      ["Effective decision diverges", booleanText(observation.effective_decision_diverges)],
+      ["Effective decision divergence known", booleanText(observation.effective_decision_divergence_known)],
       ["Direct vs proxy", comparisonText(observation.direct_vs_proxy)],
       ["Firewall", observation.firewall && observation.firewall.state],
       ["TLS policy state", observation.tls && observation.tls.state],
@@ -1112,7 +1114,7 @@
     if (observation.paths && observation.paths.length) {
       policyObservation.appendChild(element("h3", "observation-subheading", "Direct, browser, and service paths"));
       const table = element("table", "observation-grid");
-      appendTableHeader(table, ["Path", "Mode", "Endpoint", "TCP", "HTTP", "TLS", "Failure", "Evidence"]);
+      appendTableHeader(table, ["Path", "Mode", "Endpoint", "TCP", "CONNECT", "HTTP", "TLS", "Failure", "Evidence"]);
       const body = table.querySelector("tbody");
       for (const path of observation.paths) {
         const row = element("tr");
@@ -1120,6 +1122,7 @@
         row.appendChild(element("td", "", path.mode));
         row.appendChild(element("td", "", path.endpoint || "not specified"));
         row.appendChild(element("td", "", booleanText(path.tcp_connected)));
+        row.appendChild(element("td", "", path.connect_outcome || "not tested"));
         row.appendChild(element("td", "", path.http_response ? text(path.http_status_code || "received") : "no"));
         row.appendChild(element("td", "", booleanText(path.tls_handshake)));
         row.appendChild(element("td", "", path.failure_reason || "none"));
@@ -1155,13 +1158,36 @@
       ["Source", source.source],
       ["Configuration", source.configuration && source.configuration.state],
       ["Configured proxy endpoints", source.configuration && listText(source.configuration.proxy_endpoints)],
+      ["PAC URL", source.configuration && source.configuration.pac_url],
+      ["Bypass patterns", source.configuration && listText(source.configuration.proxy_bypass)],
       ["PAC configured", source.configuration && booleanText(source.configuration.pac_configured)],
+      ["Effective decision", source.effective && source.effective.decision],
+      ["Effective result observed", source.effective && booleanText(source.effective.observed)],
+      ["Resolution attempted", source.effective && booleanText(source.effective.resolution_attempted)],
+      ["Bypass matched", source.effective && booleanText(source.effective.bypass_matched)],
       ["Effective mode", source.effective && source.effective.mode],
       ["Effective endpoint", source.effective && source.effective.endpoint],
       ["Effective resolution", source.effective && booleanText(source.effective.resolution_ok)],
       ["PAC used", source.effective && booleanText(source.effective.pac_used)],
+      ["PAC decision", source.pac && source.pac.decision],
       ["Evidence", referenceValue(source.evidence_ids)],
     ]);
+
+    if (source.endpoint_reachability && source.endpoint_reachability.length) {
+      const table = element("table", "observation-grid");
+      appendTableHeader(table, ["Proxy endpoint", "Reachability", "CONNECT", "Status", "Evidence"]);
+      const body = table.querySelector("tbody");
+      for (const endpoint of source.endpoint_reachability) {
+        const row = element("tr");
+        row.appendChild(element("td", "", endpoint.endpoint || "not observed"));
+        row.appendChild(element("td", "", endpoint.reachability || "unknown"));
+        row.appendChild(element("td", "", endpoint.connect_outcome || "not tested"));
+        row.appendChild(element("td", "", endpoint.status_code || "not observed"));
+        row.appendChild(referenceCell(endpoint.evidence_ids));
+        body.appendChild(row);
+      }
+      container.appendChild(table);
+    }
   }
 
   function comparisonText(comparison) {

@@ -90,6 +90,7 @@ type URLProxyResolution struct {
 	Direct        bool     `json:"direct"`
 	Proxy         string   `json:"proxy,omitempty"`
 	Bypass        []string `json:"bypass,omitempty"`
+	BypassMatched bool     `json:"bypass_matched"`
 	UsedPAC       bool     `json:"used_pac"`
 	AutoDetect    bool     `json:"auto_detect"`
 	Configuration string   `json:"configuration"`
@@ -105,6 +106,37 @@ func Discover(ctx context.Context) (Discovery, error) { return discoverPlatform(
 // auto-detect settings are resolved by the platform adapter.
 func ResolveProxyForURL(ctx context.Context, targetURL string, config SourceConfiguration) (URLProxyResolution, error) {
 	return resolveProxyForURL(ctx, targetURL, config)
+}
+
+// resolveStaticProxyForURL evaluates the target-dependent part of a static
+// proxy configuration without consulting host state. Keeping this logic
+// platform-neutral makes deterministic tests possible and lets the Windows
+// adapter reserve native APIs for PAC and auto-detect resolution.
+func resolveStaticProxyForURL(targetURL string, config SourceConfiguration) (URLProxyResolution, error) {
+	if !config.Available {
+		return URLProxyResolution{}, errors.New("proxy configuration unavailable")
+	}
+	bypass := sanitizeBypass(config.Bypass)
+	endpoints, _, parseErr := parseProxyEndpoints(config.Proxy)
+	if parseErr != "" {
+		return URLProxyResolution{}, errors.New(parseErr)
+	}
+	if len(endpoints) > 0 && ProxyBypasses(targetURL, bypass) {
+		return URLProxyResolution{
+			Direct:        true,
+			Bypass:        bypass,
+			BypassMatched: true,
+			Configuration: string(StateDirect),
+		}, nil
+	}
+	endpoint, direct, err := ProxyEndpointForURL(config.Proxy, targetURL)
+	if err != nil {
+		return URLProxyResolution{}, err
+	}
+	if direct || endpoint == "" {
+		return URLProxyResolution{Direct: true, Bypass: bypass, Configuration: string(StateDirect)}, nil
+	}
+	return URLProxyResolution{Proxy: endpoint, Bypass: bypass, Configuration: string(StateStaticProxyConfigured)}, nil
 }
 
 // NormalizeConfiguration returns a safe canonical view of config. Callers

@@ -95,8 +95,8 @@ func (platformSnapshotProvider) Snapshot(ctx context.Context, target model.Targe
 		{name: "winhttp", config: discovery.WinHTTP, path: PathServiceWinHTTP},
 	} {
 		effective := resolveEffectiveProxy(ctx, targetURL, source.name, source.config)
-		snapshot.EffectiveProxy = append(snapshot.EffectiveProxy, effective)
 		if effective.Error != "" {
+			snapshot.EffectiveProxy = append(snapshot.EffectiveProxy, effective)
 			snapshot.Issues = append(snapshot.Issues, ObservationIssue{Subsystem: "proxy", Kind: "url_resolution", Error: effective.Error})
 			continue
 		}
@@ -105,7 +105,11 @@ func (platformSnapshotProvider) Snapshot(ctx context.Context, target model.Targe
 			mode = PathModeDirect
 		}
 		path := observePath(ctx, target, source.path, source.name, mode, effective.Endpoint)
+		if path.ProxyAuthenticationHint || path.ConnectOutcome == ConnectAuthRequired {
+			effective.Decision = model.EnterpriseProxyDecisionAuthenticationRequired
+		}
 		snapshot.Paths = append(snapshot.Paths, path)
+		snapshot.EffectiveProxy = append(snapshot.EffectiveProxy, effective)
 	}
 
 	application := observePath(ctx, target, PathApplicationDirect, "direct", PathModeDirect, "")
@@ -126,7 +130,10 @@ func targetURLForSnapshot(target model.Target) (string, error) {
 
 func resolveEffectiveProxy(ctx context.Context, targetURL, source string, config proxy.SourceConfiguration) EffectiveProxy {
 	observed := proxy.NormalizeConfiguration(config)
-	effective := EffectiveProxy{Source: source, Mode: PathModeUnknown, PACUsed: observed.PACConfigured, AutoDetect: observed.AutoDetect}
+	effective := EffectiveProxy{
+		Source: source, Decision: model.EnterpriseProxyDecisionUnknown, Mode: PathModeUnknown,
+		PACUsed: observed.PACConfigured, AutoDetect: observed.AutoDetect,
+	}
 	if !config.Available {
 		effective.Error = observed.Error
 		if effective.Error == "" {
@@ -134,16 +141,27 @@ func resolveEffectiveProxy(ctx context.Context, targetURL, source string, config
 		}
 		return effective
 	}
+	effective.ResolutionAttempted = true
 	resolution, err := proxy.ResolveProxyForURL(ctx, targetURL, config)
 	if err != nil {
 		effective.Error = err.Error()
+		if observed.PACConfigured {
+			effective.Decision = model.EnterpriseProxyDecisionPACResultUnavailable
+		}
 		return effective
 	}
 	effective.ResolutionOK = true
 	effective.Bypass = resolution.Bypass
+	effective.BypassMatched = resolution.BypassMatched
 	effective.PACUsed = effective.PACUsed || resolution.UsedPAC
 	effective.AutoDetect = effective.AutoDetect || resolution.AutoDetect
+	if resolution.BypassMatched {
+		effective.Decision = model.EnterpriseProxyDecisionBypassMatch
+		effective.Mode = PathModeDirect
+		return effective
+	}
 	if resolution.Direct || resolution.Proxy == "" {
+		effective.Decision = model.EnterpriseProxyDecisionDirect
 		effective.Mode = PathModeDirect
 		return effective
 	}
@@ -154,8 +172,10 @@ func resolveEffectiveProxy(ctx context.Context, targetURL, source string, config
 	}
 	effective.Endpoint = endpoints[0]
 	if effective.PACUsed {
+		effective.Decision = model.EnterpriseProxyDecisionPACSelectedProxy
 		effective.Mode = PathModePAC
 	} else {
+		effective.Decision = model.EnterpriseProxyDecisionStaticProxy
 		effective.Mode = PathModeProxy
 	}
 	return effective

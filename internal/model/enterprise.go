@@ -23,6 +23,29 @@ const (
 	EnterpriseProxyModeUnknown = "unknown"
 )
 
+// EnterpriseProxyDecision is the target-specific outcome of evaluating one
+// proxy source. It is deliberately separate from EnterpriseProxyMode: mode
+// describes the selected transport mechanism, while decision also records
+// bypass, authentication, unavailable PAC, and conflicting evidence states.
+const (
+	EnterpriseProxyDecisionDirect                 = "direct"
+	EnterpriseProxyDecisionStaticProxy            = "static_proxy"
+	EnterpriseProxyDecisionPACSelectedProxy       = "pac_selected_proxy"
+	EnterpriseProxyDecisionBypassMatch            = "bypass_match"
+	EnterpriseProxyDecisionAuthenticationRequired = "authentication_required"
+	EnterpriseProxyDecisionPACResultUnavailable   = "pac_result_unavailable"
+	EnterpriseProxyDecisionUnsupported            = "unsupported"
+	EnterpriseProxyDecisionUnknown                = "unknown"
+	EnterpriseProxyDecisionConflicting            = "conflicting"
+)
+
+// Short aliases keep callers from having to encode the distinction between a
+// PAC-selected proxy and a bypass match themselves.
+const (
+	EnterpriseProxyDecisionPACProxy = EnterpriseProxyDecisionPACSelectedProxy
+	EnterpriseProxyDecisionBypass   = EnterpriseProxyDecisionBypassMatch
+)
+
 const (
 	EnterpriseEndpointReachable   = "reachable"
 	EnterpriseEndpointUnavailable = "unavailable"
@@ -64,18 +87,21 @@ type EnterpriseProxyConfigurationObservation struct {
 // EnterpriseProxyEffectiveObservation is the URL-specific result returned
 // by native proxy/PAC resolution. It is runtime evidence, not configuration.
 type EnterpriseProxyEffectiveObservation struct {
-	Observed     bool                 `json:"observed"`
-	Mode         string               `json:"mode"`
-	Endpoint     string               `json:"endpoint,omitempty"`
-	Bypass       []string             `json:"bypass,omitempty"`
-	PACUsed      bool                 `json:"pac_used"`
-	AutoDetect   bool                 `json:"auto_detect"`
-	ResolutionOK bool                 `json:"resolution_ok"`
-	Error        string               `json:"error,omitempty"`
-	Certainty    ObservationCertainty `json:"certainty"`
-	Provenance   []string             `json:"provenance,omitempty"`
-	EvidenceIDs  []string             `json:"evidence_ids,omitempty"`
-	Limitations  []string             `json:"limitations,omitempty"`
+	Observed            bool                 `json:"observed"`
+	Decision            string               `json:"decision"`
+	Mode                string               `json:"mode"`
+	Endpoint            string               `json:"endpoint,omitempty"`
+	Bypass              []string             `json:"bypass,omitempty"`
+	BypassMatched       bool                 `json:"bypass_matched"`
+	PACUsed             bool                 `json:"pac_used"`
+	AutoDetect          bool                 `json:"auto_detect"`
+	ResolutionAttempted bool                 `json:"resolution_attempted"`
+	ResolutionOK        bool                 `json:"resolution_ok"`
+	Error               string               `json:"error,omitempty"`
+	Certainty           ObservationCertainty `json:"certainty"`
+	Provenance          []string             `json:"provenance,omitempty"`
+	EvidenceIDs         []string             `json:"evidence_ids,omitempty"`
+	Limitations         []string             `json:"limitations,omitempty"`
 }
 
 // EnterprisePACObservation keeps PAC configuration and the URL-specific
@@ -89,8 +115,10 @@ type EnterprisePACObservation struct {
 	ResolutionOK       bool                 `json:"resolution_ok"`
 	Used               bool                 `json:"used"`
 	Mode               string               `json:"mode"`
+	Decision           string               `json:"decision"`
 	Endpoint           string               `json:"endpoint,omitempty"`
 	Bypass             []string             `json:"bypass,omitempty"`
+	BypassMatched      bool                 `json:"bypass_matched"`
 	Certainty          ObservationCertainty `json:"certainty"`
 	Provenance         []string             `json:"provenance,omitempty"`
 	EvidenceIDs        []string             `json:"evidence_ids,omitempty"`
@@ -278,6 +306,8 @@ type EnterprisePolicyObservation struct {
 	WinINET                    EnterpriseProxySourceObservation        `json:"wininet"`
 	ProxyConfigurationDiverges bool                                    `json:"proxy_configuration_diverges"`
 	ProxyConfigurationKnown    bool                                    `json:"proxy_configuration_divergence_known"`
+	EffectiveDecisionDiverges  bool                                    `json:"effective_decision_diverges"`
+	EffectiveDecisionKnown     bool                                    `json:"effective_decision_divergence_known"`
 	Paths                      []EnterprisePathObservation             `json:"paths,omitempty"`
 	DirectVsProxy              EnterprisePathComparisonObservation     `json:"direct_vs_proxy"`
 	Firewall                   EnterpriseFirewallObservation           `json:"firewall"`
@@ -335,6 +365,10 @@ func normalizeEnterpriseProxyConfiguration(value EnterpriseProxyConfigurationObs
 }
 
 func normalizeEnterpriseProxyEffective(value EnterpriseProxyEffectiveObservation) EnterpriseProxyEffectiveObservation {
+	value.Decision = strings.TrimSpace(value.Decision)
+	if value.Decision == "" {
+		value.Decision = EnterpriseProxyDecisionUnknown
+	}
 	value.Mode = strings.TrimSpace(value.Mode)
 	value.Endpoint = strings.TrimSpace(value.Endpoint)
 	value.Bypass = uniqueStringValues(value.Bypass)
@@ -348,6 +382,10 @@ func normalizeEnterpriseProxyEffective(value EnterpriseProxyEffectiveObservation
 func normalizeEnterprisePAC(value EnterprisePACObservation) EnterprisePACObservation {
 	value.URL = strings.TrimSpace(value.URL)
 	value.Mode = strings.TrimSpace(value.Mode)
+	value.Decision = strings.TrimSpace(value.Decision)
+	if value.Decision == "" {
+		value.Decision = EnterpriseProxyDecisionUnknown
+	}
 	value.Endpoint = strings.TrimSpace(value.Endpoint)
 	value.Bypass = uniqueStringValues(value.Bypass)
 	value.Provenance = uniqueStringValues(value.Provenance)

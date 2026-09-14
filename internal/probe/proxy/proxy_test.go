@@ -340,6 +340,38 @@ func TestProxyEndpointForURLHonorsSchemeSpecificDIRECT(t *testing.T) {
 	}
 }
 
+func TestResolveProxyForURLDistinguishesStaticProxyAndBypass(t *testing.T) {
+	config := SourceConfiguration{
+		Available: true,
+		Proxy:     "proxy.corp.example:8080",
+		Bypass:    []string{"*.internal.example"},
+	}
+
+	resolution, err := ResolveProxyForURL(context.Background(), "https://api.external.example/health", config)
+	if err != nil {
+		t.Fatalf("external resolution: %v", err)
+	}
+	if resolution.Direct || resolution.Proxy != "proxy.corp.example:8080" || resolution.BypassMatched {
+		t.Fatalf("external resolution = %#v, want selected static proxy", resolution)
+	}
+
+	resolution, err = ResolveProxyForURL(context.Background(), "https://api.internal.example/health", config)
+	if err != nil {
+		t.Fatalf("bypass resolution: %v", err)
+	}
+	if !resolution.Direct || resolution.Proxy != "" || !resolution.BypassMatched {
+		t.Fatalf("bypass resolution = %#v, want direct bypass match", resolution)
+	}
+
+	resolution, err = ResolveProxyForURL(context.Background(), "https://api.external.example/health", SourceConfiguration{Available: true})
+	if err != nil {
+		t.Fatalf("direct resolution: %v", err)
+	}
+	if !resolution.Direct || resolution.BypassMatched || resolution.Configuration != string(StateDirect) {
+		t.Fatalf("direct resolution = %#v, want configured direct", resolution)
+	}
+}
+
 func TestProxyBypassesSupportsWindowsLocalAndWildcardPatterns(t *testing.T) {
 	tests := []struct {
 		name   string
