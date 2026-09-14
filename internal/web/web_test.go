@@ -85,6 +85,10 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	if !strings.Contains(composer, "TadoriTargetComposer") || !strings.Contains(composer, "PROVENANCE") {
 		t.Errorf("composer.js does not expose the deterministic composer model")
 	}
+	display := getBody(t, client, server.URL+"/display.js")
+	if !strings.Contains(display, "TadoriWorkbenchDisplay") || !strings.Contains(display, "OPAQUE_VALUE_LIMIT") {
+		t.Errorf("display.js does not expose the deterministic workbench display policy")
+	}
 
 	targetURL := "https://example.com:8443/diagnose"
 	body := `{"target":"` + targetURL + `"}`

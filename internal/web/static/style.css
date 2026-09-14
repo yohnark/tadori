@@ -69,6 +69,7 @@ pre,
 
 .shell {
   width: min(1480px, calc(100% - 32px));
+  min-width: 0;
   margin: 0 auto;
 }
 
@@ -494,7 +495,8 @@ pre,
 }
 
 .destination-status-copy {
-  min-width: 190px;
+  min-width: 0;
+  flex: 1 1 240px;
 }
 
 .destination-status-copy .eyebrow {
@@ -514,6 +516,8 @@ pre,
 
 .destination-status-meta {
   display: flex;
+  min-width: 0;
+  flex: 1 1 400px;
   flex-wrap: wrap;
   gap: 0;
   margin-left: auto;
@@ -522,6 +526,7 @@ pre,
 }
 
 .destination-status-meta span {
+  min-width: 0;
   padding: 0 10px;
   border-left: 1px solid var(--line);
   overflow-wrap: anywhere;
@@ -654,6 +659,12 @@ h3 {
   color: var(--muted);
 }
 
+.path-note,
+.evidence-note,
+.reference-line {
+  overflow-wrap: anywhere;
+}
+
 .overview-card .muted {
   margin-top: 3px;
   font-size: 12px;
@@ -674,26 +685,28 @@ h3 {
 
 .target-detail {
   display: flex;
+  align-items: baseline;
   justify-content: space-between;
   gap: 12px;
   font-size: 12px;
 }
 
 .target-detail-label {
+  flex: 0 0 auto;
   color: var(--muted);
 }
 
 .resolution-table {
   display: grid;
   gap: 0;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 4px;
-  overflow: hidden;
 }
 
 .resolution-row {
   display: grid;
-  grid-template-columns: minmax(9rem, 13rem) 1fr;
+  grid-template-columns: minmax(7rem, 0.8fr) minmax(0, 1.2fr);
   gap: 1rem;
   padding: 9px 12px;
   border-bottom: 1px solid var(--line);
@@ -704,6 +717,7 @@ h3 {
 }
 
 .resolution-label {
+  min-width: 0;
   color: var(--muted);
   font-size: 11px;
   letter-spacing: .05em;
@@ -712,7 +726,7 @@ h3 {
 
 .resolution-metadata {
   display: grid;
-  grid-template-columns: minmax(9rem, 13rem) 1fr;
+  grid-template-columns: minmax(7rem, 0.8fr) minmax(0, 1.2fr);
   gap: 1rem;
   margin: 9px 0 0;
 }
@@ -732,19 +746,81 @@ h3 {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
   padding: 7px 9px;
   border: 1px solid var(--line);
 }
 
+.resolution-candidate-detail {
+  min-width: 0;
+}
+
 .target-detail-value {
+  min-width: 0;
   color: var(--ink);
   text-align: right;
   overflow-wrap: anywhere;
 }
 
+.resolution-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.semantic-value {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.semantic-value-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.semantic-value.semantic-opaque {
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
+  gap: 6px;
+}
+
+.semantic-opaque .semantic-value-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.semantic-value.semantic-url,
+.semantic-value.semantic-endpoint,
+.semantic-value.semantic-certificate,
+.semantic-value.semantic-prose {
+  display: block;
+}
+
+.copy-value {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.copy-value:hover,
+.copy-value:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
 .observation-table {
   min-width: 0;
-  overflow-x: auto;
+  overflow: visible;
 }
 
 .observation-rows {
@@ -754,7 +830,7 @@ h3 {
 
 .observation-row {
   display: grid;
-  grid-template-columns: minmax(9rem, 13rem) minmax(0, 1fr);
+  grid-template-columns: minmax(8rem, 0.85fr) minmax(0, 1.15fr);
   gap: 1rem;
   align-items: baseline;
   padding: 8px 12px;
@@ -766,6 +842,7 @@ h3 {
 }
 
 .observation-label {
+  min-width: 0;
   color: var(--muted);
   font-size: 11px;
   letter-spacing: .04em;
@@ -773,11 +850,17 @@ h3 {
 }
 
 .observation-value {
+  display: block;
   min-width: 0;
   overflow-wrap: anywhere;
+  word-break: break-word;
   color: var(--ink);
   font-family: var(--mono);
   font-size: 11px;
+}
+
+.observation-value.semantic-opaque {
+  display: inline-flex;
 }
 
 .observation-subheading {
@@ -789,6 +872,8 @@ h3 {
 }
 
 .observation-grid {
+  max-width: 100%;
+  table-layout: fixed;
   width: calc(100% - 24px);
   margin: 0 12px 12px;
   border-collapse: collapse;
@@ -797,10 +882,13 @@ h3 {
 
 .observation-grid th,
 .observation-grid td {
+  min-width: 0;
   padding: 6px 7px;
   border: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .observation-grid th {
@@ -808,12 +896,25 @@ h3 {
   color: var(--muted);
   font-size: 10px;
   font-weight: 650;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .observation-grid td {
   overflow-wrap: anywhere;
 }
+
+.certificate-table th:nth-child(1),
+.certificate-table td:nth-child(1) { width: 7%; }
+.certificate-table th:nth-child(2),
+.certificate-table td:nth-child(2),
+.certificate-table th:nth-child(3),
+.certificate-table td:nth-child(3) { width: 25%; }
+.certificate-table th:nth-child(4),
+.certificate-table td:nth-child(4) { width: 18%; }
+.certificate-table th:nth-child(5),
+.certificate-table td:nth-child(5) { width: 12%; }
+.certificate-table th:nth-child(6),
+.certificate-table td:nth-child(6) { width: 13%; }
 
 .operational-grid {
   display: grid;
@@ -861,7 +962,7 @@ h3 {
 
 .workbench-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
   align-items: start;
   gap: 10px;
   margin-top: 10px;
@@ -877,8 +978,7 @@ h3 {
 .workbench-inspector {
   position: sticky;
   top: 10px;
-  max-height: calc(100vh - 20px);
-  overflow: auto;
+  align-self: start;
 }
 
 .section-panel,
@@ -897,8 +997,20 @@ h3 {
   border-bottom: 1px solid var(--line);
 }
 
+.section-heading > div,
+.path-graph-header > div,
+.path-graph-lane-heading > div,
+.path-heading > div {
+  min-width: 0;
+}
+
 .section-heading .eyebrow {
   margin-bottom: 2px;
+}
+
+.section-heading h2,
+.section-note {
+  overflow-wrap: anywhere;
 }
 
 .section-note {
@@ -994,12 +1106,23 @@ h3 {
 
 .reference-group {
   display: inline-flex;
+  min-width: 0;
   flex-wrap: wrap;
   gap: 4px;
   margin-left: 5px;
 }
 
+.evidence-reference {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
 .evidence-link {
+  min-width: 0;
+  max-width: min(22rem, 100%);
+  overflow: hidden;
   padding: 1px 5px;
   border: 1px solid var(--line);
   border-radius: 3px;
@@ -1007,6 +1130,8 @@ h3 {
   color: var(--accent);
   font-family: var(--mono);
   font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .evidence-link:hover,
@@ -1134,6 +1259,7 @@ details.probe-card .card-title {
 }
 
 .metadata-value {
+  min-width: 0;
   overflow-wrap: anywhere;
   color: var(--ink);
 }
@@ -1166,6 +1292,7 @@ details.probe-card .card-title {
 }
 
 .context-value {
+  min-width: 0;
   overflow-wrap: anywhere;
   color: var(--ink);
 }
@@ -1472,6 +1599,8 @@ button.track-node:focus-visible {
 }
 
 .comparison-table {
+  max-width: 100%;
+  table-layout: fixed;
   width: 100%;
   border-collapse: collapse;
   font-size: 11px;
@@ -1479,10 +1608,13 @@ button.track-node:focus-visible {
 
 .comparison-table th,
 .comparison-table td {
+  min-width: 0;
   padding: 6px 7px;
   border: 1px solid var(--line);
   text-align: left;
   vertical-align: middle;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .comparison-table th {
@@ -1525,6 +1657,7 @@ button.track-node:focus-visible {
 }
 
 .raw-details {
+  min-width: 0;
   margin-top: 8px;
 }
 
@@ -1536,8 +1669,12 @@ button.track-node:focus-visible {
 
 .raw-evidence,
 #canonical-json {
+  display: block;
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: visible;
   margin: 6px 0 0;
   padding: 8px;
   border: 1px solid var(--line);
@@ -1545,7 +1682,9 @@ button.track-node:focus-visible {
   color: #27313c;
   font-size: 10px;
   line-height: 1.45;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .canonical-panel {
@@ -1565,6 +1704,7 @@ button.track-node:focus-visible {
 }
 
 .canonical-panel #canonical-json {
+  width: calc(100% - 20px);
   margin: 0 10px 10px;
 }
 
@@ -2267,7 +2407,7 @@ button.track-node:focus-visible {
   }
 }
 
-@media (max-width: 1080px) {
+@media (max-width: 1200px) {
   .workbench-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -2278,7 +2418,6 @@ button.track-node:focus-visible {
 
   .workbench-inspector {
     position: static;
-    max-height: none;
     overflow: visible;
   }
 
@@ -2396,7 +2535,7 @@ button.track-node:focus-visible {
 
   .observation-row,
   .observation-pane .observation-row {
-    grid-template-columns: minmax(7rem, 0.9fr) minmax(0, 1.1fr);
+    grid-template-columns: minmax(6rem, 0.8fr) minmax(0, 1.2fr);
   }
 
   .path-view-toolbar,
