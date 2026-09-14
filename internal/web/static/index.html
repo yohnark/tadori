@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Local, evidence-first network diagnosis">
-  <title>tadori · diagnostic workbench</title>
+  <meta name="description" content="Local, evidence-first network diagnosis" data-i18n-content="meta.description">
+  <title data-i18n="page.title">tadori · diagnostic workbench</title>
   <link rel="stylesheet" href="/style.css">
   <script defer src="/composer.js"></script>
   <script defer src="/display.js"></script>
+  <script defer src="/locale.js"></script>
   <script defer src="/app.js"></script>
 </head>
 <body>
@@ -16,40 +17,47 @@
       <div class="brand">
         <span class="brand-mark" aria-hidden="true"></span>
         <strong>tadori</strong>
-        <span class="brand-context">diagnostic workbench</span>
+        <span class="brand-context" data-i18n="brand.context">diagnostic workbench</span>
       </div>
-      <div class="runtime-note">
+      <div class="header-tools">
+        <div class="locale-switch" role="group" data-i18n-aria-label="language.label" aria-label="Language">
+          <span class="locale-label" data-i18n="language.label">Language</span>
+          <button type="button" class="locale-button" data-locale="ja" aria-pressed="false" data-i18n-title="language.japanese" title="Japanese">JA</button>
+          <button type="button" class="locale-button is-active" data-locale="en" aria-pressed="true" data-i18n-title="language.english" title="English">EN</button>
+        </div>
+        <div class="runtime-note">
         <span class="runtime-dot" aria-hidden="true"></span>
-        Local process · loopback only
+        <span data-i18n="runtime.local">Local process · loopback only</span>
+        </div>
       </div>
     </div>
   </header>
 
   <main class="shell app-shell">
-    <section class="command-bar" aria-label="Diagnostic target">
+    <section class="command-bar" data-i18n-aria-label="target.section" aria-label="Diagnostic target">
       <form id="diagnose-form">
         <div class="target-field">
-          <label for="target">Target</label>
-          <input id="target" name="target" type="text" placeholder="hostname, IP, URL, or \\server\\share" required autocomplete="url" spellcheck="false">
+          <label for="target" data-i18n="target.label">Target</label>
+          <input id="target" name="target" type="text" data-i18n-placeholder="target.placeholder" placeholder="hostname, IP, URL, or \\server\\share" required autocomplete="url" spellcheck="false">
         </div>
         <div class="service-field">
-          <label for="service">Service</label>
-          <select id="service" name="service" aria-label="Service profile">
-            <option value="http" data-default-port="80">HTTP</option>
-            <option value="https" data-default-port="443">HTTPS</option>
-            <option value="smb" data-default-port="445">File sharing (SMB)</option>
-            <option value="rdp" data-default-port="3389">RDP</option>
-            <option value="ssh" data-default-port="22">SSH</option>
-            <option value="dns" data-default-port="53">DNS</option>
-            <option value="custom_tcp">Custom TCP</option>
-            <option value="custom_tls">Custom TLS</option>
+          <label for="service" data-i18n="target.service">Service</label>
+          <select id="service" name="service" data-i18n-aria-label="target.serviceProfile" aria-label="Service profile">
+            <option value="http" data-default-port="80" data-i18n="service.http">HTTP</option>
+            <option value="https" data-default-port="443" data-i18n="service.https">HTTPS</option>
+            <option value="smb" data-default-port="445" data-i18n="service.smb">File sharing (SMB)</option>
+            <option value="rdp" data-default-port="3389" data-i18n="service.rdp">RDP</option>
+            <option value="ssh" data-default-port="22" data-i18n="service.ssh">SSH</option>
+            <option value="dns" data-default-port="53" data-i18n="service.dns">DNS</option>
+            <option value="custom_tcp" data-i18n="service.customTCP">Custom TCP</option>
+            <option value="custom_tls" data-i18n="service.customTLS">Custom TLS</option>
           </select>
         </div>
         <div class="port-field">
-          <label for="port">Port</label>
-          <input id="port" name="port" type="number" min="1" max="65535" inputmode="numeric" aria-label="Port">
+          <label for="port" data-i18n="target.port">Port</label>
+          <input id="port" name="port" type="number" min="1" max="65535" inputmode="numeric" data-i18n-aria-label="target.port" aria-label="Port">
         </div>
-        <button class="primary-button" type="submit">Diagnose</button>
+        <button class="primary-button" type="submit" data-i18n="target.diagnose">Diagnose</button>
       </form>
       <p id="error" class="error" role="alert" hidden></p>
     </section>
@@ -57,85 +65,85 @@
     <section id="browser-capture-panel" class="browser-capture-panel panel" aria-labelledby="browser-capture-title">
       <div class="browser-capture-heading">
         <div>
-          <p class="eyebrow">Browser workflow</p>
-          <h2 id="browser-capture-title">Browser Capture</h2>
-          <p class="section-note">Launch a dedicated browser profile through a loopback-only proxy to discover workflow destinations. HTTPS is recorded from CONNECT authority; TLS payloads are never decrypted.</p>
+          <p class="eyebrow" data-i18n="browser.workflow">Browser workflow</p>
+          <h2 id="browser-capture-title" data-i18n="browser.title">Browser Capture</h2>
+          <p class="section-note" data-i18n="browser.description">Launch a dedicated browser profile through a loopback-only proxy to discover workflow destinations. HTTPS is recorded from CONNECT authority; TLS payloads are never decrypted.</p>
         </div>
-        <span id="browser-capture-state" class="badge neutral">idle</span>
+        <span id="browser-capture-state" class="badge neutral" data-i18n="browser.state.idle">idle</span>
       </div>
       <div class="browser-capture-controls">
-        <label for="browser-capture-browser">Browser</label>
+        <label for="browser-capture-browser" data-i18n="browser.browser">Browser</label>
         <select id="browser-capture-browser">
-          <option value="edge">Microsoft Edge</option>
-          <option value="chrome">Google Chrome</option>
+          <option value="edge" data-i18n="browser.edge">Microsoft Edge</option>
+          <option value="chrome" data-i18n="browser.chrome">Google Chrome</option>
         </select>
-        <button id="browser-capture-start" class="primary-button" type="button">Start Browser Capture</button>
-        <button id="browser-capture-stop" class="secondary-button" type="button" hidden>Stop Capture</button>
-        <a id="browser-capture-json" class="secondary-button" href="#" download hidden>Export JSON</a>
-        <a id="browser-capture-fqdns" class="secondary-button" href="#" download hidden>Export FQDNs</a>
-        <button id="browser-capture-copy" class="secondary-button" type="button" hidden>Copy FQDNs</button>
+        <button id="browser-capture-start" class="primary-button" type="button" data-i18n="browser.start">Start Browser Capture</button>
+        <button id="browser-capture-stop" class="secondary-button" type="button" data-i18n="browser.stop" hidden>Stop Capture</button>
+        <a id="browser-capture-json" class="secondary-button" href="#" download data-i18n="browser.exportJSON" hidden>Export JSON</a>
+        <a id="browser-capture-fqdns" class="secondary-button" href="#" download data-i18n="browser.exportFQDNs" hidden>Export FQDNs</a>
+        <button id="browser-capture-copy" class="secondary-button" type="button" data-i18n="browser.copyFQDNs" hidden>Copy FQDNs</button>
       </div>
       <p id="browser-capture-error" class="error" role="alert" hidden></p>
       <div class="browser-capture-stats" aria-live="polite">
-        <span><strong id="browser-capture-elapsed">0s</strong> elapsed</span>
-        <span><strong id="browser-capture-destinations">0</strong> destinations</span>
-        <span><strong id="browser-capture-addresses">0</strong> addresses</span>
-        <span><strong id="browser-capture-observations">0</strong> observations</span>
-        <span><strong id="browser-capture-failures">0</strong> failures</span>
+        <span><strong id="browser-capture-elapsed">0s</strong> <span data-i18n="browser.elapsed">elapsed</span></span>
+        <span><strong id="browser-capture-destinations">0</strong> <span data-i18n="browser.destinations">destinations</span></span>
+        <span><strong id="browser-capture-addresses">0</strong> <span data-i18n="browser.addresses">addresses</span></span>
+        <span><strong id="browser-capture-observations">0</strong> <span data-i18n="browser.observations">observations</span></span>
+        <span><strong id="browser-capture-failures">0</strong> <span data-i18n="browser.failures">failures</span></span>
       </div>
       <div class="browser-capture-table-wrap">
         <table class="browser-capture-table">
-          <thead><tr><th>Destination</th><th>Port</th><th>Outcome</th><th>Connections</th><th>Connected endpoint</th><th>Failure</th></tr></thead>
+          <thead><tr><th data-i18n="browser.destination">Destination</th><th data-i18n="browser.port">Port</th><th data-i18n="browser.outcome">Outcome</th><th data-i18n="browser.connections">Connections</th><th data-i18n="browser.connectedEndpoint">Connected endpoint</th><th data-i18n="browser.failure">Failure</th></tr></thead>
           <tbody id="browser-capture-destinations-body"></tbody>
         </table>
       </div>
-      <p id="browser-capture-empty" class="empty-state compact">No browser destinations observed yet.</p>
+      <p id="browser-capture-empty" class="empty-state compact" data-i18n="browser.empty">No browser destinations observed yet.</p>
     </section>
 
     <section id="run-state" class="run-state" aria-live="polite">
       <div class="state-heading">
         <div class="state-copy">
-          <span class="section-kicker">Run state</span>
-          <strong id="run-state-label">Ready for a diagnosis</strong>
+          <span class="section-kicker" data-i18n="session.kicker">Run state</span>
+          <strong id="run-state-label" data-i18n="target.ready">Ready for a diagnosis</strong>
         </div>
         <div class="state-actions">
-          <button id="cancel-button" class="secondary-button" type="button" hidden>Cancel</button>
-          <span id="run-state-badge" class="badge neutral">idle</span>
+          <button id="cancel-button" class="secondary-button" type="button" data-i18n="session.cancel" hidden>Cancel</button>
+          <span id="run-state-badge" class="badge neutral" data-i18n="session.state.idle">idle</span>
         </div>
       </div>
       <ol id="progress-list" class="progress-list">
-        <li class="progress-item neutral"><span class="progress-marker"></span><span>Enter a target to begin.</span></li>
+        <li class="progress-item neutral"><span class="progress-marker"></span><span data-i18n="target.enterToBegin">Enter a target to begin.</span></li>
       </ol>
     </section>
 
     <section id="report" hidden>
-      <div class="report-export-actions" aria-label="Export completed diagnosis">
-        <span class="section-note">Export</span>
-        <a id="html-report-link" class="secondary-button" href="#" target="_blank" rel="noopener" hidden>HTML Report</a>
-        <a id="json-report-link" class="secondary-button" href="#" download hidden>JSON</a>
+      <div class="report-export-actions" data-i18n-aria-label="export.completed" aria-label="Export completed diagnosis">
+        <span class="section-note" data-i18n="export.label">Export</span>
+        <a id="html-report-link" class="secondary-button" href="#" target="_blank" rel="noopener" data-i18n="export.html" hidden>HTML Report</a>
+        <a id="json-report-link" class="secondary-button" href="#" download data-i18n="export.json" hidden>JSON</a>
       </div>
       <section id="destination-status-strip" class="destination-status-strip neutral" aria-labelledby="destination-status-label">
         <span class="destination-status-marker" aria-hidden="true">●</span>
         <div class="destination-status-copy">
-          <p class="eyebrow">Destination Status</p>
+          <p class="eyebrow" data-i18n="destination.status">Destination Status</p>
           <h2 id="destination-status-label">—</h2>
           <p id="destination-status-detail" class="muted">—</p>
         </div>
-        <div class="destination-status-meta" aria-label="Destination details">
+        <div class="destination-status-meta" data-i18n-aria-label="destination.details" aria-label="Destination details">
           <span id="destination-status-service">—</span>
           <span id="destination-status-identity">—</span>
           <span id="destination-status-endpoint">—</span>
           <span id="destination-status-reason" hidden></span>
         </div>
       </section>
-      <section class="overview-grid" aria-label="Diagnostic summary">
+      <section class="overview-grid" data-i18n-aria-label="page.summary" aria-label="Diagnostic summary">
         <article class="overview-card panel" id="diagnosis-card">
-          <p class="eyebrow">Diagnosis</p>
+          <p class="eyebrow" data-i18n="diagnosis.label">Diagnosis</p>
           <h2 id="diagnosis-label">—</h2>
           <p id="diagnosis-detail" class="muted">—</p>
         </article>
         <article class="overview-card panel">
-          <p class="eyebrow">Execution</p>
+          <p class="eyebrow" data-i18n="diagnosis.execution">Execution</p>
           <h2 id="overall-status">—</h2>
           <div id="report-target" class="target-details">—</div>
         </article>
@@ -144,10 +152,10 @@
       <section id="network-context-panel" class="panel section-panel network-context-panel" hidden>
         <div class="section-heading">
           <div>
-            <p class="eyebrow">Network context</p>
-            <h2>Selected route and scope</h2>
+            <p class="eyebrow" data-i18n="network.eyebrow">Network context</p>
+            <h2 data-i18n="network.title">Selected route and scope</h2>
           </div>
-          <span class="not-topology">Observed forwarding state, not physical topology</span>
+          <span class="not-topology" data-i18n="network.disclaimer">Observed forwarding state, not physical topology</span>
         </div>
         <div id="network-context" class="context-grid"></div>
       </section>
@@ -157,8 +165,8 @@
           <section class="panel section-panel endpoint-panel">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">Endpoint</p>
-                <h2>Identity and candidate selection</h2>
+                <p class="eyebrow" data-i18n="endpoint.eyebrow">Endpoint</p>
+                <h2 data-i18n="endpoint.title">Identity and candidate selection</h2>
               </div>
             </div>
             <div id="endpoint-observation" class="observation-table"></div>
@@ -168,22 +176,22 @@
           <section class="panel section-panel operational-panel">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">Operational state</p>
-                <h2>Transport, security, and application</h2>
+                <p class="eyebrow" data-i18n="operations.eyebrow">Operational state</p>
+                <h2 data-i18n="operations.title">Transport, security, and application</h2>
               </div>
-              <span class="not-topology">Canonical observations</span>
+              <span class="not-topology" data-i18n="operations.canonical">Canonical observations</span>
             </div>
             <div class="operational-grid">
               <section class="observation-pane">
-                <h3>Transport</h3>
+                <h3 data-i18n="operations.transport">Transport</h3>
                 <div id="transport-observation" class="observation-table"></div>
               </section>
               <section class="observation-pane">
-                <h3>Security / TLS</h3>
+                <h3 data-i18n="operations.security">Security / TLS</h3>
                 <div id="security-observation" class="observation-table"></div>
               </section>
               <section class="observation-pane">
-                <h3>Application / service</h3>
+                <h3 data-i18n="operations.application">Application / service</h3>
                 <div id="application-observation" class="observation-table"></div>
               </section>
             </div>
@@ -192,10 +200,10 @@
           <section class="panel section-panel policy-panel">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">Proxy / policy</p>
-                <h2>Enterprise path observations</h2>
+                <p class="eyebrow" data-i18n="policy.eyebrow">Proxy / policy</p>
+                <h2 data-i18n="policy.title">Enterprise path observations</h2>
               </div>
-              <span class="not-topology">Configuration and runtime evidence</span>
+              <span class="not-topology" data-i18n="policy.runtime">Configuration and runtime evidence</span>
             </div>
             <div id="policy-observation" class="observation-table"></div>
           </section>
@@ -203,150 +211,150 @@
           <section class="panel section-panel resolution-panel">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">Name resolution</p>
-                <h2>Effective resolution path</h2>
+                <p class="eyebrow" data-i18n="resolution.eyebrow">Name resolution</p>
+                <h2 data-i18n="resolution.title">Effective resolution path</h2>
               </div>
             </div>
-            <p class="section-note">Configured servers and policy paths are candidates unless the host API provides stronger evidence. Empty resolver or interface values mean Windows did not expose that selection.</p>
+            <p class="section-note" data-i18n="resolution.note">Configured servers and policy paths are candidates unless the host API provides stronger evidence. Empty resolver or interface values mean Windows did not expose that selection.</p>
             <div id="name-resolution" class="resolution-content"></div>
-            <div id="name-resolution-empty" class="empty-state" hidden>No normalized name-resolution observation is available.</div>
+            <div id="name-resolution-empty" class="empty-state" data-i18n="resolution.unavailable" hidden>No normalized name-resolution observation is available.</div>
           </section>
 
           <section id="observed-path-panel" class="panel section-panel path-panel">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">Observed path</p>
-                <h2>Responder path visibility</h2>
+                <p class="eyebrow" data-i18n="path.eyebrow">Observed path</p>
+                <h2 data-i18n="path.title">Responder path visibility</h2>
               </div>
-              <span class="not-topology">Observed responders, not physical topology</span>
+              <span class="not-topology" data-i18n="path.disclaimer">Observed responders, not physical topology</span>
             </div>
-            <p class="section-note observed-path-explanation">This workbench shows responders and unobservable ranges observed from the diagnostic vantage. It describes responder/path visibility, not physical topology or inferred device identity.</p>
+            <p class="section-note observed-path-explanation" data-i18n="path.explanation">This workbench shows responders and unobservable ranges observed from the diagnostic vantage. It describes responder/path visibility, not physical topology or inferred device identity.</p>
             <div class="path-view-toolbar">
               <div class="path-view-context">
-                <span class="eyebrow">Projection</span>
-                <span id="path-view-status" class="path-view-status">Graph layout shell</span>
+                <span class="eyebrow" data-i18n="path.projection">Projection</span>
+                <span id="path-view-status" class="path-view-status" data-i18n="path.graph">Graph</span>
               </div>
-              <div class="path-view-switch" role="tablist" aria-label="Observed Path projection">
-                <button id="path-graph-tab" class="path-view-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="path-graph-view" data-path-view="graph">Graph</button>
-                <button id="path-table-tab" class="path-view-tab" type="button" role="tab" aria-selected="false" aria-controls="path-table-view" data-path-view="table">Table</button>
+              <div class="path-view-switch" role="tablist" data-i18n-aria-label="path.projection" aria-label="Observed Path projection">
+                <button id="path-graph-tab" class="path-view-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="path-graph-view" data-path-view="graph" data-i18n="path.graph">Graph</button>
+                <button id="path-table-tab" class="path-view-tab" type="button" role="tab" aria-selected="false" aria-controls="path-table-view" data-path-view="table" data-i18n="path.table">Table</button>
               </div>
             </div>
 
             <div id="path-graph-view" class="path-view path-graph-view" role="tabpanel" aria-labelledby="path-graph-tab">
               <div class="path-graph-header">
                 <div>
-                  <h3>Observed responder sequence</h3>
-                  <p id="path-graph-description">Waiting for canonical path observations.</p>
+                  <h3 data-i18n="path.observedSequence">Observed responder sequence</h3>
+                  <p id="path-graph-description" data-i18n="path.waiting">Waiting for canonical path observations.</p>
                 </div>
-                <span id="path-graph-count" class="count-label">Awaiting report</span>
+                <span id="path-graph-count" class="count-label" data-i18n="path.awaitingReport">Awaiting report</span>
               </div>
-              <div id="path-graph-viewport" class="path-graph-viewport" tabindex="0" aria-label="Observed Path graph viewport">
+              <div id="path-graph-viewport" class="path-graph-viewport" tabindex="0" data-i18n-aria-label="path.graphViewport" aria-label="Observed Path graph viewport">
                 <div id="path-graph-loading" class="path-graph-state" hidden>
                   <span class="path-state-mark" aria-hidden="true">…</span>
                   <div>
-                    <strong>Loading observed path</strong>
-                    <p>Waiting for the diagnostic report to provide canonical path observations.</p>
+                    <strong data-i18n="path.loading">Loading observed path</strong>
+                    <p data-i18n="path.loadingDetail">Waiting for the diagnostic report to provide canonical path observations.</p>
                   </div>
                 </div>
                 <div id="path-graph-empty" class="path-graph-state" hidden>
                   <span class="path-state-mark" aria-hidden="true">—</span>
                   <div>
-                    <strong>No observed path in this report</strong>
-                    <p>The graph stays available for a run that exposes responder/path visibility. Review the other evidence lanes for retained observations.</p>
+                    <strong data-i18n="path.empty">No observed path in this report</strong>
+                    <p data-i18n="path.emptyDetail">The graph stays available for a run that exposes responder/path visibility. Review the other evidence lanes for retained observations.</p>
                   </div>
                 </div>
                 <div id="path-graph-unsupported" class="path-graph-state" hidden>
                   <span class="path-state-mark" aria-hidden="true">!</span>
                   <div>
-                    <strong>Graph projection unavailable</strong>
-                    <p>This report does not expose a graph-compatible path observation. The canonical Table projection remains the supported view.</p>
+                    <strong data-i18n="path.unsupported">Graph projection unavailable</strong>
+                    <p data-i18n="path.unsupportedDetail">This report does not expose a graph-compatible path observation. The canonical Table projection remains the supported view.</p>
                   </div>
                 </div>
                 <div id="path-graph-reserved" class="path-graph-reserved">
                   <div id="path-graph-content" class="path-graph-content"></div>
                   <div id="path-graph-scaffold" class="path-graph-scaffold" aria-hidden="true">
                     <div class="graph-scaffold-guide graph-guide-top">
-                      <span>sequence</span>
-                      <span>responder visibility</span>
-                      <span>destination check</span>
+                      <span data-i18n="path.sequence">sequence</span>
+                      <span data-i18n="path.responderVisibility">responder visibility</span>
+                      <span data-i18n="path.destinationCheck">destination check</span>
                     </div>
                     <div class="graph-scaffold-track">
                       <div class="graph-scaffold-column graph-scaffold-origin">
-                        <span class="graph-column-label">START</span>
-                        <span class="graph-scaffold-slot">Probe vantage</span>
-                        <span class="graph-scaffold-caption">local source</span>
+                        <span class="graph-column-label" data-i18n="path.start">START</span>
+                        <span class="graph-scaffold-slot" data-i18n="path.probeVantage">Probe vantage</span>
+                        <span class="graph-scaffold-caption" data-i18n="path.localSource">local source</span>
                       </div>
                       <div class="graph-scaffold-connector"></div>
                       <div class="graph-scaffold-column graph-scaffold-hop">
-                        <span class="graph-column-label">ORDERED HOPS</span>
-                        <span class="graph-scaffold-slot">TTL responder slots</span>
-                        <span class="graph-scaffold-caption">one or more responders at a TTL</span>
+                        <span class="graph-column-label" data-i18n="path.orderedHops">ORDERED HOPS</span>
+                        <span class="graph-scaffold-slot" data-i18n="path.ttlResponderSlots">TTL responder slots</span>
+                        <span class="graph-scaffold-caption" data-i18n="path.respondersAtTTL">one or more responders at a TTL</span>
                       </div>
                       <div class="graph-scaffold-connector graph-scaffold-gap"></div>
                       <div class="graph-scaffold-column graph-scaffold-range">
-                        <span class="graph-column-label">UNOBSERVABLE RANGE</span>
-                        <span class="graph-scaffold-slot">No response interval</span>
-                        <span class="graph-scaffold-caption">not a packet-loss claim</span>
+                        <span class="graph-column-label" data-i18n="path.unobservableRange">UNOBSERVABLE RANGE</span>
+                        <span class="graph-scaffold-slot" data-i18n="path.noResponseInterval">No response interval</span>
+                        <span class="graph-scaffold-caption" data-i18n="path.notPacketLoss">not a packet-loss claim</span>
                       </div>
                       <div class="graph-scaffold-connector"></div>
                       <div class="graph-scaffold-column graph-scaffold-destination">
-                        <span class="graph-column-label">DESTINATION</span>
-                        <span class="graph-scaffold-slot">Confirmation slot</span>
-                        <span class="graph-scaffold-caption">reachability and port state</span>
+                        <span class="graph-column-label" data-i18n="path.destination">DESTINATION</span>
+                        <span class="graph-scaffold-slot" data-i18n="path.confirmationSlot">Confirmation slot</span>
+                        <span class="graph-scaffold-caption" data-i18n="path.reachabilityPort">reachability and port state</span>
                       </div>
                     </div>
                     <div class="graph-scaffold-guide graph-guide-bottom">
-                      <span>canonical ordering</span>
-                      <span>multiple responders remain distinct</span>
-                      <span>selection target reserved</span>
+                      <span data-i18n="path.canonicalOrdering">canonical ordering</span>
+                      <span data-i18n="path.multipleResponders">multiple responders remain distinct</span>
+                      <span data-i18n="path.selectionReserved">selection target reserved</span>
                     </div>
                   </div>
                   <div id="path-graph-reservation" class="path-graph-reservation">
                     <span class="reservation-mark" aria-hidden="true">↳</span>
                     <div>
-                      <strong>Node selection → Evidence inspector</strong>
-                      <p>Canonical graph elements focus retained evidence and semantic details here. The graph does not reconstruct physical topology.</p>
+                      <strong data-i18n="path.selection">Node selection → Evidence inspector</strong>
+                      <p data-i18n="path.selectionDetail">Canonical graph elements focus retained evidence and semantic details here. The graph does not reconstruct physical topology.</p>
                     </div>
                   </div>
                 </div>
               </div>
               <div class="path-graph-footer">
-                <div class="path-legend" aria-label="Path legend">
-                  <span><i class="legend-dot observed"></i>Observed responder</span>
-                  <span><i class="legend-dot inferred"></i>Unobservable range</span>
-                  <span><i class="legend-dot failed"></i>Failed observation</span>
+                <div class="path-legend" data-i18n-aria-label="path.legend" aria-label="Path legend">
+                  <span><i class="legend-dot observed"></i><span data-i18n="path.observedResponder">Observed responder</span></span>
+                  <span><i class="legend-dot inferred"></i><span data-i18n="path.inferredRange">Unobservable range</span></span>
+                  <span><i class="legend-dot failed"></i><span data-i18n="path.failedObservation">Failed observation</span></span>
                 </div>
-                <span class="path-overflow-hint">Wide paths scroll horizontally</span>
+                <span class="path-overflow-hint" data-i18n="path.wideScroll">Wide paths scroll horizontally</span>
               </div>
               <div class="path-mobile-fallback">
-                <strong>Narrow-screen fallback:</strong> Table view keeps the full path details readable on small screens.
-                <button class="inline-path-action" type="button" data-path-view="table">Open Table view</button>
+                <strong data-i18n="path.narrowFallback">Narrow-screen fallback:</strong> <span data-i18n="path.readableTable">Table view keeps the full path details readable on small screens.</span>
+                <button class="inline-path-action" type="button" data-path-view="table" data-i18n="path.openTable">Open Table view</button>
               </div>
             </div>
 
             <div id="path-table-view" class="path-view path-table-view" role="tabpanel" aria-labelledby="path-table-tab" hidden>
-              <p class="section-note path-table-note">Canonical path observations remain available as rows. A missing TTL response is unobservable evidence, not a packet-loss claim.</p>
+              <p class="section-note path-table-note" data-i18n="path.tableNote">Canonical path observations remain available as rows. A missing TTL response is unobservable evidence, not a packet-loss claim.</p>
               <div id="paths" class="path-list"></div>
-              <div id="path-empty" class="empty-state" hidden>No structured path observation is available in this report.</div>
+              <div id="path-empty" class="empty-state" data-i18n="path.noStructured" hidden>No structured path observation is available in this report.</div>
             </div>
           </section>
 
           <section class="panel section-panel">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">Protocol / port</p>
-                <h2>Endpoint comparison</h2>
+                <p class="eyebrow" data-i18n="path.protocolPort">Protocol / port</p>
+                <h2 data-i18n="path.comparison">Endpoint comparison</h2>
               </div>
             </div>
-            <p class="section-note">ICMP reachability and TCP destination-port connectivity are separate observations.</p>
+            <p class="section-note" data-i18n="path.comparisonNote">ICMP reachability and TCP destination-port connectivity are separate observations.</p>
             <div id="comparisons" class="comparison-list"></div>
           </section>
 
           <section class="panel section-panel">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">Checks</p>
-                <h2>Probe results</h2>
+                <p class="eyebrow" data-i18n="path.checks">Checks</p>
+                <h2 data-i18n="path.probeResults">Probe results</h2>
               </div>
               <span id="probe-count" class="count-label"></span>
             </div>
@@ -356,30 +364,30 @@
           <section class="panel section-panel">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">Interpretation</p>
-                <h2>Findings</h2>
+                <p class="eyebrow" data-i18n="path.interpretation">Interpretation</p>
+                <h2 data-i18n="path.findings">Findings</h2>
               </div>
             </div>
             <div id="findings" class="finding-list"></div>
           </section>
         </div>
 
-        <aside class="workbench-inspector" aria-label="Evidence inspector">
+        <aside class="workbench-inspector" data-i18n-aria-label="evidence.inspector" aria-label="Evidence inspector">
           <section class="panel section-panel evidence-panel">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">Evidence</p>
-                <h2 id="evidence-heading">Structured evidence</h2>
+                <p class="eyebrow" data-i18n="evidence.structured">Evidence</p>
+                <h2 id="evidence-heading" data-i18n="evidence.structured">Structured evidence</h2>
               </div>
             </div>
-            <p class="section-note">Select a path row, graph element, or finding to focus its evidence and semantic details. Raw evidence remains available here.</p>
+            <p class="section-note" data-i18n="path.inspectorNote">Select a path row, graph element, or finding to focus its evidence and semantic details. Raw evidence remains available here.</p>
             <div id="path-selection" class="path-selection" hidden></div>
             <div id="evidence" class="evidence-list"></div>
           </section>
 
           <details class="panel canonical-panel">
-            <summary>Canonical JSON</summary>
-            <p class="section-note">Canonical diagnostic report. Displayed as text only.</p>
+            <summary data-i18n="path.canonicalJSON">Canonical JSON</summary>
+            <p class="section-note" data-i18n="path.canonicalJSONNote">Canonical diagnostic report. Displayed as text only.</p>
             <pre id="canonical-json"></pre>
           </details>
         </aside>

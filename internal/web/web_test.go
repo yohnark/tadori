@@ -89,6 +89,10 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	if !strings.Contains(display, "TadoriWorkbenchDisplay") || !strings.Contains(display, "OPAQUE_VALUE_LIMIT") {
 		t.Errorf("display.js does not expose the deterministic workbench display policy")
 	}
+	locale := getBody(t, client, server.URL+"/locale.js")
+	if !strings.Contains(locale, "TadoriLocale") || !strings.Contains(locale, "SUPPORTED_LOCALES") {
+		t.Errorf("locale.js was not embedded and served")
+	}
 
 	targetURL := "https://example.com:8443/diagnose"
 	body := `{"target":"` + targetURL + `"}`
