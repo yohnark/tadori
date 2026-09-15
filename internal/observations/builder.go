@@ -10,7 +10,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/yohnark/tadori/internal/environment"
 	"github.com/yohnark/tadori/internal/model"
 	"github.com/yohnark/tadori/internal/probe/dns"
 	enterpriseprobe "github.com/yohnark/tadori/internal/probe/enterprise"
@@ -44,12 +46,14 @@ func Build(target model.Target, probes []model.ProbeResult) model.Observations {
 	networkContext := buildNetworkObservation(runtimeTarget, ordered)
 	enterprisePolicy := buildEnterprisePolicyObservation(runtimeTarget, ordered, networkContext)
 	security.TLSInspection = assessTLSInspection(target, security, enterprisePolicy)
+	environmentSnapshot := environment.BuildFromProbeResults(ordered, time.Time{})
 
 	return model.NormalizeObservations(model.Observations{
 		Endpoint:             endpoint,
 		NameResolution:       nameResolution,
 		NetworkContext:       networkContext,
 		EnterprisePolicy:     enterprisePolicy,
+		Environment:          environmentSnapshot,
 		Transport:            transport,
 		Security:             security,
 		Application:          application,

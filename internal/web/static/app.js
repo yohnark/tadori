@@ -9,6 +9,7 @@
   const serviceInput = document.querySelector("#service");
   const portInput = document.querySelector("#port");
   const button = form.querySelector("button[type=submit]");
+  const environmentButton = document.querySelector("#environment-button");
   const cancelButton = document.querySelector("#cancel-button");
   const error = document.querySelector("#error");
   const browserCaptureStart = document.querySelector("#browser-capture-start");
@@ -104,6 +105,12 @@
   const privacyPreviewError = document.querySelector("#privacy-preview-error");
   const privacyPreviewCancel = document.querySelector("#privacy-preview-cancel");
   const privacyPreviewConfirm = document.querySelector("#privacy-preview-confirm");
+  const environmentReport = document.querySelector("#environment-report");
+  const environmentState = document.querySelector("#environment-state");
+  const environmentNote = document.querySelector("#environment-note");
+  const environmentSummary = document.querySelector("#environment-summary");
+  const environmentDetails = document.querySelector("#environment-details");
+  const environmentJSON = document.querySelector("#environment-json");
   const composer = globalThis.TadoriTargetComposer;
   const display = globalThis.TadoriWorkbenchDisplay;
   const locale = globalThis.TadoriLocale;
@@ -699,6 +706,138 @@
   function clearError() {
     error.textContent = "";
     error.hidden = true;
+  }
+
+  function environmentTone(state) {
+    switch (state) {
+      case "observed":
+      case "configured":
+        return "positive";
+      case "partial":
+      case "conflicting":
+        return "warning";
+      default:
+        return "neutral";
+    }
+  }
+
+  function environmentSummaryCard(label, value, state) {
+    const card = element("div", toneClass("environment-summary-card", environmentTone(state)));
+    card.appendChild(element("strong", "", label));
+    card.appendChild(element("span", "", value));
+    return card;
+  }
+
+  function environmentDetailCard(title, rows) {
+    const card = element("section", "environment-detail-card");
+    card.appendChild(element("h3", "", title));
+    appendObservationRows(card, rows);
+    return card;
+  }
+
+  function renderEnvironment(snapshot) {
+    if (!snapshot) {
+      environmentReport.hidden = true;
+      return;
+    }
+    const value = snapshot || {};
+    const state = text(value.state || "unknown");
+    environmentState.textContent = state;
+    environmentState.className = toneClass("badge", environmentTone(state));
+    environmentReport.hidden = false;
+    environmentNote.textContent = "Configuration and observed local context are shown separately from target-specific diagnosis.";
+    environmentSummary.replaceChildren();
+    const interfaces = Array.isArray(value.interfaces) ? value.interfaces : [];
+    const activeInterfaces = interfaces.filter((item) => item && item.up && !item.loopback).length;
+    const dns = value.dns || {};
+    const routing = value.routing || {};
+    const proxy = value.proxy || {};
+    const vpn = value.vpn || {};
+    environmentSummary.appendChild(environmentSummaryCard("Interfaces", `${activeInterfaces} active / ${interfaces.length} observed`, interfaces.length ? "observed" : "unknown"));
+    environmentSummary.appendChild(environmentSummaryCard("DNS", `${(dns.servers || []).length} server${(dns.servers || []).length === 1 ? "" : "s"}`, dns.state));
+    environmentSummary.appendChild(environmentSummaryCard("Default routes", `${routing.default_ipv4 ? 1 : 0} IPv4 · ${routing.default_ipv6 ? 1 : 0} IPv6`, routing.state));
+    environmentSummary.appendChild(environmentSummaryCard("VPN / tunnel", vpn.present_known ? (vpn.present ? "present" : "not observed") : "unknown", vpn.state));
+    environmentSummary.appendChild(environmentSummaryCard("Proxy sources", `${proxy.configuration_known ? 2 : 0} configured views`, proxy.state));
+
+    environmentDetails.replaceChildren();
+    const interfaceTable = element("table", "observation-grid");
+    appendTableHeader(interfaceTable, ["Interface", "State", "Type", "VPN", "Addresses"]);
+    const interfaceBody = interfaceTable.querySelector("tbody");
+    for (const item of interfaces) {
+      const row = element("tr");
+      row.appendChild(element("td", "", item.name || "unknown"));
+      row.appendChild(element("td", "", item.up ? "up" : "down"));
+      row.appendChild(element("td", "", item.type || "unknown"));
+      row.appendChild(element("td", "", item.vpn ? "yes" : "no"));
+      row.appendChild(element("td", "", (item.addresses || []).map((address) => `${address.ip}/${address.prefix}`).join(", ") || "none observed"));
+      interfaceBody.appendChild(row);
+    }
+    const interfaceCard = element("section", "environment-detail-card");
+    interfaceCard.appendChild(element("h3", "", "Network interfaces"));
+    if (interfaces.length) {
+      interfaceCard.appendChild(interfaceTable);
+    } else {
+      interfaceCard.appendChild(element("p", "empty-state compact", "No interface evidence was available."));
+    }
+    environmentDetails.appendChild(interfaceCard);
+
+    environmentDetails.appendChild(environmentDetailCard("Resolver configuration", [
+      ["State", dns.state], ["Servers", listText(dns.servers)], ["Suffixes", listText(dns.suffixes)],
+      ["Search list", listText(dns.search_list)], ["NRPT rules", (dns.nrpt || []).length],
+      ["Hosts-file candidates", (dns.hosts_file_entries || []).length], ["Certainty", dns.certainty],
+      ["Limitations", listText([dns.resolver_error, dns.nrpt_error, dns.hosts_file_error].filter(Boolean))],
+    ]));
+    environmentDetails.appendChild(environmentDetailCard("Routing context", [
+      ["State", routing.state], ["Routes observed", (routing.routes || []).length],
+      ["IPv4 default", routeSummary(routing.default_ipv4)], ["IPv6 default", routeSummary(routing.default_ipv6)],
+      ["Certainty", routing.certainty], ["Limitations", listText(routing.limitations)],
+    ]));
+    environmentDetails.appendChild(environmentDetailCard("Proxy / PAC configuration", [
+      ["State", proxy.state], ["WinHTTP", proxySourceSummary(proxy.winhttp)], ["WinINET", proxySourceSummary(proxy.wininet)],
+      ["Configuration divergence", booleanText(proxy.configuration_diverges)], ["PAC use", "target-specific; not observed here"],
+      ["Certainty", proxy.certainty], ["Limitations", listText(proxy.limitations)],
+    ]));
+    environmentDetails.appendChild(environmentDetailCard("VPN / virtual adapters", [
+      ["State", vpn.state], ["Present", vpn.present_known ? booleanText(vpn.present) : "unknown"],
+      ["Active VPN adapters", listText(vpn.active_adapters)], ["Virtual adapters", listText(vpn.virtual_adapters)],
+      ["Route participation", vpn.route_participation_known ? listText(vpn.route_participation) : "unknown"],
+      ["Limitations", listText(vpn.limitations)],
+    ]));
+    environmentDetails.appendChild(environmentDetailCard("Firewall / trust", [
+      ["Firewall state", value.firewall && value.firewall.state], ["Firewall profiles", value.firewall && (value.firewall.profiles || []).length],
+      ["Firewall causality", value.firewall && (value.firewall.block_causality || "not established")],
+      ["Trust state", value.trust && value.trust.state], ["Trust roots", value.trust && (value.trust.root_count || "not observed")],
+      ["Trust limitation", value.trust && (value.trust.error || "none")],
+    ]));
+    const runtime = value.runtime || {};
+    environmentDetails.appendChild(environmentDetailCard("Runtime / capabilities", [
+      ["Runtime", `${runtime.os || "unknown"}/${runtime.arch || "unknown"} ${runtime.runtime_version || ""}`],
+      ["Tadori", runtime.tadori_version || "unknown"], ["Privilege", runtime.privilege || "unknown"],
+      ["Capabilities", (runtime.capabilities || []).map((item) => `${item.name}: ${item.state}`).join(", ") || "none reported"],
+    ]));
+    environmentJSON.textContent = jsonText(value);
+  }
+
+  function routeSummary(route) {
+    if (!route) {
+      return "not observed";
+    }
+    return [route.interface || "interface unknown", route.next_hop || "on-link", route.metric === undefined ? "" : `metric ${route.metric}`].filter(Boolean).join(" · ");
+  }
+
+  function proxySourceSummary(source) {
+    if (!source) {
+      return "unknown";
+    }
+    const values = [source.state || "unknown"];
+    if (source.proxy_endpoints && source.proxy_endpoints.length) {
+      values.push(source.proxy_endpoints.join(", "));
+    } else if (source.pac_configured) {
+      values.push("PAC configured");
+    } else if (source.direct) {
+      values.push("direct");
+    }
+    return values.join(" · ");
   }
 
   function showError(message) {
@@ -2276,6 +2415,7 @@
     renderEndpointObservation(observations.endpoint);
     renderOperationalObservations(observations, view.application);
     renderPolicyObservation(observations.enterprise_policy);
+    renderEnvironment(view.environment || observations.environment);
     renderNetworkContext(observations.network_context || view.network_context);
     renderDestinationStatus(overall.destination || {});
     renderNameResolution(observations.name_resolution || view.name_resolution);
@@ -2509,6 +2649,31 @@
       showError(err instanceof Error ? err.message : t("session.requestError"));
       button.disabled = false;
       button.textContent = t("target.diagnoseArrow");
+    }
+  });
+
+  environmentButton.addEventListener("click", async () => {
+    clearError();
+    environmentButton.disabled = true;
+    environmentButton.textContent = "Inspecting…";
+    environmentState.textContent = "collecting";
+    environmentState.className = toneClass("badge", "neutral");
+    try {
+      const response = await fetch("/api/environment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+        cache: "no-store",
+      });
+      const snapshot = await readResponse(response);
+      renderEnvironment(snapshot);
+    } catch (err) {
+      showError(err instanceof Error ? err.message : "environment inspection failed");
+      environmentState.textContent = "error";
+      environmentState.className = toneClass("badge", "negative");
+    } finally {
+      environmentButton.disabled = false;
+      environmentButton.textContent = "Inspect this PC";
     }
   });
 

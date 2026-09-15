@@ -21,6 +21,7 @@ import (
 
 	"github.com/yohnark/tadori/internal/batch"
 	"github.com/yohnark/tadori/internal/capture"
+	"github.com/yohnark/tadori/internal/environment"
 	"github.com/yohnark/tadori/internal/model"
 	"github.com/yohnark/tadori/internal/orchestrate"
 	"github.com/yohnark/tadori/internal/report"
@@ -54,6 +55,11 @@ type Runner func(context.Context, model.Target) model.DiagnosticReport
 // diagnosis sessions. It must return the canonical final DiagnosticReport.
 type SessionRunner = session.Runner
 
+// EnvironmentRunner collects target-independent local context. It has no
+// target argument by design; callers cannot accidentally turn an environment
+// inspection into a destination diagnosis.
+type EnvironmentRunner func(context.Context) (model.EnvironmentSnapshot, error)
+
 // HandlerOptions controls the HTTP adapter. Zero values select the production
 // orchestration runner and bounded local defaults.
 type HandlerOptions struct {
@@ -80,6 +86,7 @@ type HandlerOptions struct {
 	// Progress is the optional UI projection adapter for the legacy synchronous
 	// view endpoint. Session/SSE consumers use SessionRun instead.
 	Progress              ProgressRunner
+	EnvironmentRun        EnvironmentRunner
 	OverallTimeout        time.Duration
 	MaxConcurrentSessions int
 }
@@ -92,6 +99,7 @@ type Handler struct {
 	sessions       *session.Manager
 	captures       *capture.Manager
 	validations    *batch.Manager
+	environmentRun EnvironmentRunner
 	legacyRun      Runner
 	legacyTimeout  time.Duration
 	legacyCapacity chan struct{}
@@ -148,6 +156,12 @@ func NewHandler(opts HandlerOptions) *Handler {
 	if validationManager == nil {
 		validationManager = batch.NewManager(opts.ValidationOptions)
 	}
+	environmentRun := opts.EnvironmentRun
+	if environmentRun == nil {
+		environmentRun = func(ctx context.Context) (model.EnvironmentSnapshot, error) {
+			return environment.Collect(ctx)
+		}
+	}
 
 	h := &Handler{
 		sessions:       manager,
@@ -156,6 +170,7 @@ func NewHandler(opts HandlerOptions) *Handler {
 		legacyRun:      legacyRun,
 		legacyTimeout:  overallTimeout,
 		legacyCapacity: make(chan struct{}, legacyMaxConcurrent),
+		environmentRun: environmentRun,
 	}
 
 	mux := http.NewServeMux()
@@ -166,6 +181,8 @@ func NewHandler(opts HandlerOptions) *Handler {
 	mux.HandleFunc("/locale.js", staticHandler("locale.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/app.js", staticHandler("app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/api/diagnose", h.legacyDiagnose)
+	mux.HandleFunc("/api/environment", h.environmentSnapshot)
+	mux.HandleFunc("/api/environment.json", h.environmentExport)
 	mux.HandleFunc("/api/diagnose/view", diagnoseViewHandler(legacyRun, opts.Progress, overallTimeout))
 	mux.HandleFunc("/api/diagnoses", h.diagnosisCollection)
 	mux.HandleFunc("/api/diagnoses/", h.diagnosisResource)
@@ -246,7 +263,8 @@ func admitRequest(r *http.Request) *requestAdmissionError {
 func requiresRequestAdmission(r *http.Request) bool {
 	switch {
 	case r.Method == http.MethodPost:
-		if r.URL.Path == "/api/diagnoses" || r.URL.Path == "/api/diagnose" || r.URL.Path == "/api/diagnose/view" || r.URL.Path == "/api/browser-captures" {
+		if r.URL.Path == "/api/diagnoses" || r.URL.Path == "/api/diagnose" || r.URL.Path == "/api/diagnose/view" ||
+			r.URL.Path == "/api/browser-captures" || r.URL.Path == "/api/environment" {
 			return true
 		}
 		_, action, ok := parseBrowserCapturePath(r.URL.Path)
@@ -684,6 +702,58 @@ func (h *Handler) legacyDiagnose(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(encoded)
+}
+
+// environmentSnapshot collects target-independent local context for the
+// Inspect this PC workflow. The response is the canonical snapshot itself;
+// presentation code never needs to infer facts from probe evidence.
+func (h *Handler) environmentSnapshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), h.legacyTimeout)
+	defer cancel()
+	snapshot, err := h.environmentRun(ctx)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			status = http.StatusGatewayTimeout
+		}
+		writeError(w, status, "collect environment snapshot: "+err.Error())
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, model.NormalizeEnvironmentSnapshot(&snapshot))
+}
+
+// environmentExport returns the exact JSON encoding of a fresh canonical
+// environment snapshot as a download.
+func (h *Handler) environmentExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), h.legacyTimeout)
+	defer cancel()
+	snapshot, err := h.environmentRun(ctx)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			status = http.StatusGatewayTimeout
+		}
+		writeError(w, status, "collect environment snapshot: "+err.Error())
+		return
+	}
+	encoded, err := json.Marshal(model.NormalizeEnvironmentSnapshot(&snapshot))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "encode environment snapshot: "+err.Error())
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="tadori-environment.json"`)
 	_, _ = w.Write(encoded)
 }
 

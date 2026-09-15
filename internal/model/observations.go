@@ -13,6 +13,7 @@ const (
 	ObservationCertaintyInferred    ObservationCertainty = "inferred"
 	ObservationCertaintyUnknown     ObservationCertainty = "unknown"
 	ObservationCertaintyUnsupported ObservationCertainty = "unsupported"
+	ObservationCertaintyConflicting ObservationCertainty = "conflicting"
 )
 
 // ObservationProvenance is a compact reference to the probe and evidence
@@ -85,6 +86,7 @@ type Observations struct {
 	NameResolution       NameResolutionObservation   `json:"name_resolution"`
 	NetworkContext       NetworkContext              `json:"network_context"`
 	EnterprisePolicy     EnterprisePolicyObservation `json:"enterprise_policy"`
+	Environment          *EnvironmentSnapshot        `json:"environment,omitempty"`
 	Transport            TransportObservation        `json:"transport"`
 	Security             SecurityObservation         `json:"security"`
 	Application          ApplicationObservation      `json:"application"`
@@ -146,6 +148,7 @@ func NormalizeObservations(observations Observations) Observations {
 		NameResolution:       name,
 		NetworkContext:       network,
 		EnterprisePolicy:     enterprise,
+		Environment:          NormalizeEnvironmentSnapshot(observations.Environment),
 		Transport:            NormalizeTransportObservation(observations.Transport),
 		Security:             NormalizeSecurityObservation(observations.Security),
 		Application:          NormalizeApplicationObservation(observations.Application),

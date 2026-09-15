@@ -34,20 +34,21 @@ type ProgressRunner func(context.Context, model.Target, func(ProgressEvent)) mod
 // discarded and rebuilt. The inspector does not re-serialize or reinterpret
 // raw evidence in the browser.
 type DiagnosticViewModel struct {
-	Report         model.DiagnosticReport   `json:"report"`
-	Observations   model.Observations       `json:"observations"`
-	Application    ApplicationView          `json:"application"`
-	CanonicalJSON  string                   `json:"canonical_json"`
-	Privacy        report.PrivacyMetadata   `json:"privacy"`
-	NetworkContext *NetworkContextView      `json:"network_context,omitempty"`
-	Overall        OverallView              `json:"overall"`
-	Progress       []ProgressEvent          `json:"progress"`
-	Probes         []ProbeView              `json:"probes"`
-	NameResolution *NameResolutionView      `json:"name_resolution,omitempty"`
-	Findings       []FindingView            `json:"findings"`
-	Evidence       []EvidenceView           `json:"evidence"`
-	Paths          []PathView               `json:"paths"`
-	Comparisons    []ProtocolComparisonView `json:"comparisons"`
+	Report         model.DiagnosticReport     `json:"report"`
+	Observations   model.Observations         `json:"observations"`
+	Application    ApplicationView            `json:"application"`
+	CanonicalJSON  string                     `json:"canonical_json"`
+	Privacy        report.PrivacyMetadata     `json:"privacy"`
+	Environment    *model.EnvironmentSnapshot `json:"environment,omitempty"`
+	NetworkContext *NetworkContextView        `json:"network_context,omitempty"`
+	Overall        OverallView                `json:"overall"`
+	Progress       []ProgressEvent            `json:"progress"`
+	Probes         []ProbeView                `json:"probes"`
+	NameResolution *NameResolutionView        `json:"name_resolution,omitempty"`
+	Findings       []FindingView              `json:"findings"`
+	Evidence       []EvidenceView             `json:"evidence"`
+	Paths          []PathView                 `json:"paths"`
+	Comparisons    []ProtocolComparisonView   `json:"comparisons"`
 }
 
 // NetworkContextView is the presentation projection of the canonical target
@@ -332,6 +333,7 @@ func BuildDiagnosticView(diagnosticReport model.DiagnosticReport) (DiagnosticVie
 		Application:   buildApplicationView(observations.Application),
 		CanonicalJSON: string(canonical),
 		Privacy:       projection.Privacy,
+		Environment:   model.NormalizeEnvironmentSnapshot(observations.Environment),
 		Progress:      make([]ProgressEvent, 0),
 		Probes:        make([]ProbeView, 0, len(diagnosticReport.Probes)),
 		Findings:      make([]FindingView, 0, len(diagnosticReport.Findings)),

@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yohnark/tadori/internal/environment"
 	"github.com/yohnark/tadori/internal/model"
 	"github.com/yohnark/tadori/internal/orchestrate"
 	"github.com/yohnark/tadori/internal/report"
@@ -40,6 +41,8 @@ func run(args []string, stdout, stderr *os.File) int {
 	switch args[0] {
 	case "diagnose":
 		return runDiagnose(args[1:], stdout, stderr)
+	case "environment":
+		return runEnvironment(args[1:], stdout, stderr)
 	case "serve":
 		return runServe(args[1:], stdout, stderr)
 	default:
@@ -51,8 +54,40 @@ func run(args []string, stdout, stderr *os.File) int {
 
 func printUsage(w *os.File) {
 	fmt.Fprintln(w, "usage: tadori diagnose <url|hostname|ip|unc> [--service id] [--port port] [--json]")
+	fmt.Fprintln(w, "       tadori environment [--json]")
 	fmt.Fprintln(w, "       tadori serve [--listen 127.0.0.1] [--port 8080] [--no-open]")
 	fmt.Fprintln(w, "       tadori serve [--addr 127.0.0.1:8080] [--no-open]")
+}
+
+func runEnvironment(args []string, stdout, stderr *os.File) int {
+	fs := flag.NewFlagSet("environment", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	jsonOutput := fs.Bool("json", false, "emit the environment snapshot as canonical JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		printUsage(stderr)
+		return 2
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	ctx, cancelTimeout := context.WithTimeout(ctx, overallTimeout)
+	defer cancelTimeout()
+	snapshot, err := environment.Collect(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "tadori: %v\n", err)
+		return 1
+	}
+	if *jsonOutput {
+		if err := report.WriteEnvironmentJSON(stdout, snapshot); err != nil {
+			fmt.Fprintf(stderr, "tadori: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	_, _ = stdout.WriteString(report.RenderEnvironmentHuman(snapshot))
+	return 0
 }
 
 func runServe(args []string, stdout, stderr *os.File) int {

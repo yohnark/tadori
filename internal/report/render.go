@@ -4,6 +4,7 @@
 package report
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -42,6 +43,51 @@ func JSON(report model.DiagnosticReport) ([]byte, error) {
 // MarshalJSON and leaves stream framing to the caller.
 func WriteJSON(w io.Writer, report model.DiagnosticReport) error {
 	return writeExportJSON(w, report)
+}
+
+// MarshalEnvironmentJSON returns the canonical JSON representation of a
+// target-independent environment snapshot. Its schema is independent from a
+// destination diagnosis and the snapshot is normalized before encoding.
+func MarshalEnvironmentJSON(snapshot model.EnvironmentSnapshot) ([]byte, error) {
+	return json.Marshal(model.NormalizeEnvironmentSnapshot(&snapshot))
+}
+
+func RenderEnvironmentJSON(snapshot model.EnvironmentSnapshot) ([]byte, error) {
+	return MarshalEnvironmentJSON(snapshot)
+}
+
+func WriteEnvironmentJSON(w io.Writer, snapshot model.EnvironmentSnapshot) error {
+	if w == nil {
+		return errors.New("report: nil environment JSON writer")
+	}
+	encoded, err := MarshalEnvironmentJSON(snapshot)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(encoded)
+	return err
+}
+
+// RenderEnvironmentHuman is the concise terminal projection for an
+// environment-only inspection. It reports collected state without inventing
+// target-specific reachability or root-cause conclusions.
+func RenderEnvironmentHuman(snapshot model.EnvironmentSnapshot) string {
+	snapshot = *model.NormalizeEnvironmentSnapshot(&snapshot)
+	var out strings.Builder
+	fmt.Fprintf(&out, "Environment state: %s\n", snapshot.State)
+	fmt.Fprintf(&out, "Captured at: %s\n", snapshot.CapturedAt.UTC().Format(time.RFC3339Nano))
+	fmt.Fprintf(&out, "Interfaces: %d\n", len(snapshot.Interfaces))
+	fmt.Fprintf(&out, "DNS state: %s\n", snapshot.DNS.State)
+	fmt.Fprintf(&out, "Routing state: %s\n", snapshot.Routing.State)
+	fmt.Fprintf(&out, "Proxy state: %s\n", snapshot.Proxy.State)
+	fmt.Fprintf(&out, "VPN present: %t\n", snapshot.VPN.Present)
+	fmt.Fprintf(&out, "Firewall state: %s\n", snapshot.Firewall.State)
+	fmt.Fprintf(&out, "Trust store state: %s\n", snapshot.Trust.State)
+	fmt.Fprintf(&out, "Runtime: %s/%s %s (Tadori %s)\n", snapshot.Runtime.OS, snapshot.Runtime.Arch, snapshot.Runtime.RuntimeVersion, snapshot.Runtime.TadoriVersion)
+	if len(snapshot.Limitations) > 0 {
+		fmt.Fprintf(&out, "Limitations: %s\n", strings.Join(snapshot.Limitations, " | "))
+	}
+	return out.String()
 }
 
 // RenderHuman returns a concise, deterministic terminal projection of report.

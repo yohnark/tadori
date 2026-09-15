@@ -74,6 +74,40 @@ func (f SnapshotProviderFunc) Snapshot(ctx context.Context, target model.Target)
 	return f(ctx, target)
 }
 
+// EnvironmentSnapshot is the target-independent subset of enterprise
+// collection. It contains only local proxy configuration, adapter metadata,
+// firewall profile state, and trust-store availability. URL-specific proxy
+// resolution, path checks, and paired certificate comparisons remain owned by
+// SnapshotProvider and are intentionally absent here.
+type EnvironmentSnapshot struct {
+	Proxy      proxy.Discovery
+	TrustStore TrustStoreObservation
+	Firewall   FirewallObservation
+	Adapters   []AdapterObservation
+	Issues     []ObservationIssue
+}
+
+// EnvironmentSnapshotProvider supplies target-independent enterprise facts.
+// It exists separately from SnapshotProvider so an environment inspection
+// never has to manufacture a destination merely to collect local policy.
+type EnvironmentSnapshotProvider interface {
+	SnapshotEnvironment(context.Context) (EnvironmentSnapshot, error)
+}
+
+// EnvironmentSnapshotProviderFunc adapts a function to the environment
+// collection boundary.
+type EnvironmentSnapshotProviderFunc func(context.Context) (EnvironmentSnapshot, error)
+
+func (f EnvironmentSnapshotProviderFunc) SnapshotEnvironment(ctx context.Context) (EnvironmentSnapshot, error) {
+	return f(ctx)
+}
+
+// CollectEnvironment collects the platform-local enterprise subset without a
+// target or active network request.
+func CollectEnvironment(ctx context.Context) (EnvironmentSnapshot, error) {
+	return platformSnapshotProvider{}.SnapshotEnvironment(ctx)
+}
+
 // Snapshot is the internal collection boundary for one Windows enterprise
 // diagnosis. It is not a second report model: Probe.Run projects it into the
 // canonical model.ProbeResult and model.Evidence values.
