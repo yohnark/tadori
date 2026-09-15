@@ -133,6 +133,7 @@ type PathObservation struct {
 // CertificateObservation is safe certificate metadata. Raw certificates,
 // public keys, and trust-store contents are intentionally not retained.
 type CertificateObservation struct {
+	ChainIndex   int      `json:"chain_index,omitempty"`
 	Subject      string   `json:"subject,omitempty"`
 	Issuer       string   `json:"issuer,omitempty"`
 	SerialNumber string   `json:"serial_number,omitempty"`
@@ -147,24 +148,35 @@ type CertificateObservation struct {
 // certificates are independently trusted and hostname-valid; issuer strings
 // alone never set PossibleInterception.
 type TLSComparison struct {
-	DirectCertificateSHA256 string `json:"direct_certificate_sha256,omitempty"`
-	ProxyCertificateSHA256  string `json:"proxy_certificate_sha256,omitempty"`
-	CertificatesDiffer      bool   `json:"certificates_differ"`
-	BothTrusted             bool   `json:"both_trusted"`
-	BothHostnameVerified    bool   `json:"both_hostname_verified"`
-	PossibleInterception    bool   `json:"possible_interception"`
-	InterceptionBasis       string `json:"interception_basis,omitempty"`
-	TrustMismatch           bool   `json:"trust_mismatch"`
+	DirectCertificateSHA256  string `json:"direct_certificate_sha256,omitempty"`
+	ProxyCertificateSHA256   string `json:"proxy_certificate_sha256,omitempty"`
+	DirectCertificateSubject string `json:"direct_certificate_subject,omitempty"`
+	ProxyCertificateSubject  string `json:"proxy_certificate_subject,omitempty"`
+	DirectCertificateIssuer  string `json:"direct_certificate_issuer,omitempty"`
+	ProxyCertificateIssuer   string `json:"proxy_certificate_issuer,omitempty"`
+	CertificatesDiffer       bool   `json:"certificates_differ"`
+	CertificatesDifferKnown  bool   `json:"certificates_differ_known"`
+	IssuersDiffer            bool   `json:"issuers_differ"`
+	IssuersDifferKnown       bool   `json:"issuers_differ_known"`
+	BothTrusted              bool   `json:"both_trusted"`
+	BothTrustedKnown         bool   `json:"both_trusted_known"`
+	BothHostnameVerified     bool   `json:"both_hostname_verified"`
+	BothHostnameKnown        bool   `json:"both_hostname_verified_known"`
+	PossibleInterception     bool   `json:"possible_interception"`
+	InterceptionBasis        string `json:"interception_basis,omitempty"`
+	TrustMismatch            bool   `json:"trust_mismatch"`
 }
 
 // TrustStoreObservation reports availability and count only; it does not dump
 // Windows roots or certificate subjects.
 type TrustStoreObservation struct {
-	Source       string `json:"source,omitempty"`
-	Available    bool   `json:"available"`
-	RootCount    int    `json:"root_count,omitempty"`
-	Error        string `json:"error,omitempty"`
-	Insufficient bool   `json:"insufficient_privilege,omitempty"`
+	Source                           string `json:"source,omitempty"`
+	Available                        bool   `json:"available"`
+	RootCount                        int    `json:"root_count,omitempty"`
+	TrustedCorporatePrivateRootKnown bool   `json:"trusted_corporate_private_root_known"`
+	TrustedCorporatePrivateRoot      bool   `json:"trusted_corporate_private_root"`
+	Error                            string `json:"error,omitempty"`
+	Insufficient                     bool   `json:"insufficient_privilege,omitempty"`
 }
 
 // FirewallObservation contains selected profile state, never the complete
@@ -594,13 +606,22 @@ func compareTLS(paths []PathObservation) TLSComparison {
 	comparison := TLSComparison{}
 	if direct != nil && direct.Certificate != nil {
 		comparison.DirectCertificateSHA256 = direct.Certificate.SHA256
+		comparison.DirectCertificateSubject = direct.Certificate.Subject
+		comparison.DirectCertificateIssuer = direct.Certificate.Issuer
 	}
 	if proxyPath != nil && proxyPath.Certificate != nil {
 		comparison.ProxyCertificateSHA256 = proxyPath.Certificate.SHA256
+		comparison.ProxyCertificateSubject = proxyPath.Certificate.Subject
+		comparison.ProxyCertificateIssuer = proxyPath.Certificate.Issuer
 	}
 	comparison.CertificatesDiffer = comparison.DirectCertificateSHA256 != "" && comparison.ProxyCertificateSHA256 != "" && comparison.DirectCertificateSHA256 != comparison.ProxyCertificateSHA256
+	comparison.CertificatesDifferKnown = comparison.DirectCertificateSHA256 != "" && comparison.ProxyCertificateSHA256 != ""
+	comparison.IssuersDiffer = comparison.DirectCertificateIssuer != "" && comparison.ProxyCertificateIssuer != "" && !strings.EqualFold(comparison.DirectCertificateIssuer, comparison.ProxyCertificateIssuer)
+	comparison.IssuersDifferKnown = comparison.DirectCertificateIssuer != "" && comparison.ProxyCertificateIssuer != ""
 	comparison.BothTrusted = direct != nil && proxyPath != nil && direct.CertificateTrusted && proxyPath.CertificateTrusted
+	comparison.BothTrustedKnown = direct != nil && proxyPath != nil && (direct.TLSAttempted || direct.Certificate != nil) && (proxyPath.TLSAttempted || proxyPath.Certificate != nil)
 	comparison.BothHostnameVerified = direct != nil && proxyPath != nil && direct.HostnameVerified && proxyPath.HostnameVerified
+	comparison.BothHostnameKnown = direct != nil && proxyPath != nil && (direct.TLSAttempted || direct.Certificate != nil) && (proxyPath.TLSAttempted || proxyPath.Certificate != nil)
 	comparison.PossibleInterception = comparison.CertificatesDiffer && comparison.BothTrusted && comparison.BothHostnameVerified
 	if comparison.PossibleInterception {
 		comparison.InterceptionBasis = "trusted hostname-valid peer certificates differ between direct and proxy paths"
@@ -830,6 +851,7 @@ func CertificateMetadata(cert *x509.Certificate) *CertificateObservation {
 	digest := sha256.Sum256(cert.Raw)
 	dnsNames := append([]string(nil), cert.DNSNames...)
 	return &CertificateObservation{
+		ChainIndex:   0,
 		Subject:      cert.Subject.String(),
 		Issuer:       cert.Issuer.String(),
 		SerialNumber: cert.SerialNumber.String(),

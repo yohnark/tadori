@@ -15,6 +15,7 @@ import (
 	"github.com/yohnark/tadori/internal/probe/interfacecfg"
 	proxyprobe "github.com/yohnark/tadori/internal/probe/proxy"
 	"github.com/yohnark/tadori/internal/probe/route"
+	tlsprobe "github.com/yohnark/tadori/internal/probe/tls"
 )
 
 func mustTarget(t *testing.T, input string) model.Target {
@@ -650,6 +651,153 @@ func TestBuildEnterpriseTLSPolicySuspicionIsConservative(t *testing.T) {
 	got = Build(mustTarget(t, "service.example:443"), []model.ProbeResult{enterpriseFixtureProbe(t, fixtureEvidence(t, "enterprise-tls-untrusted", model.EvidenceKindTLSTrust, "crypto/x509", tls))})
 	if got.EnterprisePolicy.TLS.PossibleInterception || got.EnterprisePolicy.TLS.InterceptionSuspicion != model.EnterpriseInterceptionSuspicionNotEstablished {
 		t.Fatalf("certificate difference overclaimed interception = %#v", got.EnterprisePolicy.TLS)
+	}
+}
+
+func TestBuildTLSInspectionAssessmentScenarios(t *testing.T) {
+	const host = "service.example"
+	const directSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const proxySHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	proxyPath := enterpriseprobe.PathObservation{
+		Name: enterpriseprobe.PathBrowserWinINET, Source: "wininet", Mode: enterpriseprobe.PathModeProxy,
+		Endpoint: "proxy.corp.example:8080", RequestAttempted: true, TCPConnected: true,
+		ConnectOutcome: enterpriseprobe.ConnectSucceeded, TLSHandshake: true, TLSAttempted: true,
+		CertificateTrusted: true, HostnameVerified: true,
+	}
+	directPath := enterpriseprobe.PathObservation{
+		Name: enterpriseprobe.PathApplicationDirect, Source: "direct", Mode: enterpriseprobe.PathModeDirect,
+		RequestAttempted: true, TCPConnected: true, TLSHandshake: true, TLSAttempted: true,
+		CertificateTrusted: true, HostnameVerified: true,
+	}
+
+	comparisonEvidence := func(t *testing.T, id string, comparison enterpriseprobe.TLSComparison, trust enterpriseprobe.TrustStoreObservation) model.Evidence {
+		t.Helper()
+		return fixtureEvidence(t, id, model.EvidenceKindTLSTrust, "crypto/x509", enterpriseTLSEvidence{Comparison: comparison, TrustStore: trust})
+	}
+	connectivityEvidence := func(t *testing.T, id string, paths ...enterpriseprobe.PathObservation) model.Evidence {
+		t.Helper()
+		return enterpriseConnectivityFixture(t, id, []enterpriseprobe.EffectiveProxy{{Source: "wininet", Mode: enterpriseprobe.PathModeProxy, Endpoint: "proxy.corp.example:8080", ResolutionOK: true}}, paths)
+	}
+
+	tests := []struct {
+		name       string
+		probes     func(*testing.T) []model.ProbeResult
+		wantState  model.TLSInspectionState
+		wantSignal string
+	}{
+		{
+			name: "public CA",
+			probes: func(t *testing.T) []model.ProbeResult {
+				return []model.ProbeResult{tlsFixtureProbe(t, "tls-public", host, "CN=service.example", "CN=Public Example CA", "public-sha", model.FailureReasonNone, "")}
+			},
+			wantState: model.TLSInspectionNotObserved,
+		},
+		{
+			name: "trusted corporate CA without proxy is not inspection",
+			probes: func(t *testing.T) []model.ProbeResult {
+				return []model.ProbeResult{
+					tlsFixtureProbe(t, "tls-corporate", host, "CN=service.example", "CN=Contoso Enterprise CA", "corporate-sha", model.FailureReasonNone, ""),
+					enterpriseFixtureProbe(t, comparisonEvidence(t, "enterprise-corporate-root", enterpriseprobe.TLSComparison{}, enterpriseprobe.TrustStoreObservation{Available: true, TrustedCorporatePrivateRootKnown: true, TrustedCorporatePrivateRoot: true})),
+				}
+			},
+			wantState: model.TLSInspectionNotObserved,
+		},
+		{
+			name: "trusted corporate CA with observed proxy",
+			probes: func(t *testing.T) []model.ProbeResult {
+				return []model.ProbeResult{
+					tlsFixtureProbe(t, "tls-corporate-proxy", host, "CN=service.example", "CN=Contoso Enterprise CA", "corporate-sha", model.FailureReasonNone, ""),
+					enterpriseFixtureProbe(t,
+						comparisonEvidence(t, "enterprise-corporate-root-proxy", enterpriseprobe.TLSComparison{}, enterpriseprobe.TrustStoreObservation{Available: true, TrustedCorporatePrivateRootKnown: true, TrustedCorporatePrivateRoot: true}),
+						connectivityEvidence(t, "enterprise-proxy-observed", proxyPath)),
+				}
+			},
+			wantState:  model.TLSInspectionSuspected,
+			wantSignal: model.TLSInspectionSignalCorporatePrivateIssuerWithProxy,
+		},
+		{
+			name: "trusted hostname-valid Zscaler-like substitution",
+			probes: func(t *testing.T) []model.ProbeResult {
+				comparison := enterpriseprobe.TLSComparison{
+					DirectCertificateSHA256: directSHA, ProxyCertificateSHA256: proxySHA,
+					DirectCertificateSubject: "CN=service.example", ProxyCertificateSubject: "CN=service.example",
+					DirectCertificateIssuer: "CN=Public Example CA", ProxyCertificateIssuer: "CN=Zscaler Intermediate Root CA",
+					CertificatesDiffer: true, CertificatesDifferKnown: true, IssuersDiffer: true, IssuersDifferKnown: true,
+					BothTrusted: true, BothTrustedKnown: true, BothHostnameVerified: true, BothHostnameKnown: true,
+					PossibleInterception: true,
+				}
+				return []model.ProbeResult{enterpriseFixtureProbe(t, comparisonEvidence(t, "enterprise-zscaler", comparison, enterpriseprobe.TrustStoreObservation{Available: true}))}
+			},
+			wantState:  model.TLSInspectionObserved,
+			wantSignal: model.TLSInspectionSignalTrustedChainSubstitution,
+		},
+		{
+			name: "proxy present without substitution",
+			probes: func(t *testing.T) []model.ProbeResult {
+				comparison := enterpriseprobe.TLSComparison{
+					DirectCertificateSHA256: directSHA, ProxyCertificateSHA256: directSHA,
+					DirectCertificateIssuer: "CN=Public Example CA", ProxyCertificateIssuer: "CN=Public Example CA",
+					CertificatesDifferKnown: true, IssuersDifferKnown: true,
+					BothTrusted: true, BothTrustedKnown: true, BothHostnameVerified: true, BothHostnameKnown: true,
+				}
+				return []model.ProbeResult{enterpriseFixtureProbe(t,
+					comparisonEvidence(t, "enterprise-proxy-same-cert", comparison, enterpriseprobe.TrustStoreObservation{Available: true}),
+					connectivityEvidence(t, "enterprise-proxy-same-path", directPath, proxyPath)),
+				}
+			},
+			wantState: model.TLSInspectionNotObserved,
+		},
+		{
+			name: "chain divergence with insufficient evidence",
+			probes: func(t *testing.T) []model.ProbeResult {
+				comparison := enterpriseprobe.TLSComparison{DirectCertificateSHA256: directSHA, ProxyCertificateSHA256: proxySHA, CertificatesDiffer: true, CertificatesDifferKnown: true}
+				return []model.ProbeResult{enterpriseFixtureProbe(t, comparisonEvidence(t, "enterprise-divergent-insufficient", comparison, enterpriseprobe.TrustStoreObservation{Available: false}))}
+			},
+			wantState:  model.TLSInspectionUnknown,
+			wantSignal: model.TLSInspectionSignalChainDifferenceInsufficient,
+		},
+		{
+			name: "conflicting certificate observations",
+			probes: func(t *testing.T) []model.ProbeResult {
+				return []model.ProbeResult{
+					tlsFixtureProbe(t, "tls-conflict-a", host, "CN=service.example", "CN=Public Example CA", "conflict-a", model.FailureReasonNone, ""),
+					tlsFixtureProbe(t, "tls-conflict-b", host, "CN=service.example", "CN=Other Public CA", "conflict-b", model.FailureReasonNone, ""),
+				}
+			},
+			wantState: model.TLSInspectionConflicting,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assessment := Build(mustTarget(t, host+":443"), test.probes(t)).Security.TLSInspection
+			if assessment.State != test.wantState {
+				t.Fatalf("assessment state = %q, want %q: %#v", assessment.State, test.wantState, assessment)
+			}
+			if test.wantSignal != "" && !contains(assessment.Signals, test.wantSignal) {
+				t.Fatalf("assessment signals = %#v, want %q", assessment.Signals, test.wantSignal)
+			}
+			if assessment.RequestedHostname != host {
+				t.Fatalf("requested hostname = %q, want %q", assessment.RequestedHostname, host)
+			}
+		})
+	}
+}
+
+func tlsFixtureProbe(t *testing.T, id, host, subject, issuer, sha string, reason model.FailureReason, errorText string) model.ProbeResult {
+	t.Helper()
+	status := model.ProbeStatusPassed
+	if reason != model.FailureReasonNone {
+		status = model.ProbeStatusFailed
+	}
+	return model.ProbeResult{
+		Name: "tls", Status: status,
+		Evidence: []model.Evidence{
+			fixtureEvidence(t, id+"-handshake", model.EvidenceKindTLSHandshake, "crypto/tls", tlsprobe.HandshakeEvidence{Phase: tlsprobe.PhaseComplete, Address: "192.0.2.10:443", ServerName: host, TLSVersion: "TLS1.3", HandshakeComplete: reason == model.FailureReasonNone, PeerCertificateCount: 1, Error: errorText}),
+			fixtureEvidence(t, id+"-certificate", model.EvidenceKindCertificate, "crypto/tls", tlsprobe.CertificateMetadata{ChainIndex: 0, Subject: subject, Issuer: issuer, DNSNames: []string{host}, SHA256: sha}),
+		},
+		Interpretation: model.ProbeInterpretation{FailureReason: reason, Layer: model.LayerTLS, FaultDomain: model.FaultDomainTLS},
 	}
 }
 

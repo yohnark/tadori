@@ -77,6 +77,49 @@ func TestRenderHTMLUsesCanonicalObservationsAndFindings(t *testing.T) {
 	}
 }
 
+func TestRenderHTMLIncludesEvidenceBoundedTLSInspectionAssessment(t *testing.T) {
+	diagnosticReport := semanticHTMLFixture()
+	diagnosticReport.Observations.Security.TLSInspection = model.TLSInspectionAssessment{
+		State:                   model.TLSInspectionObserved,
+		Certainty:               model.ObservationCertaintyInferred,
+		RequestedHostname:       "github.com",
+		PresentedLeafSubject:    "CN=github.com",
+		PresentedLeafSANs:       []string{"github.com", "www.github.com"},
+		PresentedLeafIssuer:     "CN=Zscaler Intermediate Root CA",
+		PresentedIssuerChain:    []string{"CN=Zscaler Intermediate Root CA", "CN=Zscaler Root CA"},
+		CertificateValidation:   model.CertificateValidationValid,
+		LocalTrustKnown:         true,
+		LocallyTrusted:          true,
+		EnterpriseProxyKnown:    true,
+		EnterpriseProxyObserved: true,
+		OriginComparisonKnown:   true,
+		ChainDivergenceKnown:    true,
+		ChainDiverges:           true,
+		IssuerChangeKnown:       true,
+		IssuerChanged:           true,
+		Signals:                 []string{model.TLSInspectionSignalTrustedChainSubstitution},
+		EvidenceIDs:             []string{"tls-certificate-1", "enterprise-tls"},
+		Provenance:              []string{"assessment:tls_inspection"},
+	}
+	document, err := RenderHTML(diagnosticReport)
+	if err != nil {
+		t.Fatalf("render HTML: %v", err)
+	}
+	value := string(document)
+	for _, want := range []string{
+		"TLS inspection assessment",
+		"github.com",
+		"Zscaler Intermediate Root CA",
+		"trusted_hostname_valid_chain_substitution",
+		"tls-certificate-1",
+		"assessment:tls_inspection",
+	} {
+		if !strings.Contains(value, want) {
+			t.Errorf("HTML missing TLS inspection value %q", want)
+		}
+	}
+}
+
 func TestWriteHTMLMatchesRenderHTML(t *testing.T) {
 	diagnosticReport := semanticHTMLFixture()
 	want, err := RenderHTML(diagnosticReport)

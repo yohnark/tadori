@@ -1159,6 +1159,37 @@
     if (observation && observation.applicability && observation.certificates && observation.certificates.length) {
       renderCertificateTable(securityObservation, observation.certificates);
     }
+    if (observation && observation.tls_inspection) {
+      renderTLSInspectionAssessment(securityObservation, observation.tls_inspection);
+    }
+  }
+
+  function renderTLSInspectionAssessment(container, assessment) {
+    container.appendChild(element("h3", "observation-subheading", "TLS inspection assessment"));
+    appendObservationRows(container, [
+      ["Assessment", assessment.state || "unknown"],
+      ["Assessment certainty", assessment.certainty || "unknown"],
+      ["Requested hostname", assessment.requested_hostname],
+      ["Presented leaf subject", assessment.presented_leaf_subject],
+      ["Presented leaf SANs", listText(assessment.presented_leaf_sans)],
+      ["Presented leaf issuer", assessment.presented_leaf_issuer],
+      ["Presented issuer chain", listText(assessment.presented_issuer_chain)],
+      ["Certificate validation", assessment.certificate_validation || "unknown"],
+      ["Locally trusted", assessment.local_trust_known ? booleanText(assessment.locally_trusted) : "unknown"],
+      ["Trusted corporate/private root", assessment.trusted_corporate_private_root_known ? booleanText(assessment.trusted_corporate_private_root) : "unknown"],
+      ["Enterprise proxy observed", assessment.enterprise_proxy_known ? booleanText(assessment.enterprise_proxy_observed) : "unknown"],
+      ["Enterprise policy observed", assessment.enterprise_policy_known ? booleanText(assessment.enterprise_policy_observed) : "unknown"],
+      ["Origin comparison", assessment.chain_divergence_known ? booleanText(assessment.chain_diverges) : "unknown"],
+      ["Origin leaf SHA-256", assessment.origin_leaf_sha256],
+      ["Presented leaf SHA-256", assessment.presented_leaf_sha256],
+      ["Issuer changed", assessment.issuer_change_known ? booleanText(assessment.issuer_changed) : "unknown"],
+      ["Signals", listText(assessment.signals)],
+      ["Limitations", listText(assessment.limitations)],
+      ["Provenance", listText(assessment.provenance)],
+      ["Evidence", referenceValue(assessment.evidence_ids)],
+    ]);
+    const note = element("p", "section-note", "Proxy configuration, local trust, or an unfamiliar issuer alone does not establish inspection.");
+    container.appendChild(note);
   }
 
   function renderCertificateTable(container, certificates) {
@@ -1367,6 +1398,9 @@
       [t("policy.directVsProxy"), comparisonText(observation.direct_vs_proxy)],
       [t("policy.firewall"), observation.firewall && observation.firewall.state],
       [t("policy.tlsPolicy"), observation.tls && observation.tls.state],
+      [t("policy.directCertificateIssuer"), observation.tls && observation.tls.direct_certificate_issuer],
+      [t("policy.proxyCertificateIssuer"), observation.tls && observation.tls.proxy_certificate_issuer],
+      [t("policy.issuersDiffer"), observation.tls && (observation.tls.issuers_differ_known ? booleanText(observation.tls.issuers_differ) : "unknown")],
       [t("policy.possibleInterception"), observation.tls && booleanText(observation.tls.possible_interception)],
       [t("policy.interceptionSuspicion"), observation.tls && observation.tls.interception_suspicion],
       [t("policy.certainty"), enumText("certainty", observation.certainty, observation.certainty)],

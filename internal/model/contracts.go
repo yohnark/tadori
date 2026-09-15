@@ -13,7 +13,7 @@ import (
 
 // DiagnosticSchemaVersion is the schema version emitted in a
 // DiagnosticReport. It changes only when the canonical JSON contract changes.
-const DiagnosticSchemaVersion = "3"
+const DiagnosticSchemaVersion = "4"
 
 // ProbeStatus describes what happened when a probe ran. Failed means that the
 // probe observed a negative result; Error means that it could not produce a
