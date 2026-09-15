@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/yohnark/tadori/internal/batch"
 	"github.com/yohnark/tadori/internal/capture"
 	"github.com/yohnark/tadori/internal/model"
 )
@@ -167,6 +168,95 @@ func TestBrowserCaptureMalformedRequestDoesNotStartSession(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestBrowserCaptureValidationAPISeparatesCaptureAndActiveResults(t *testing.T) {
+	captureManager := newBrowserCaptureTestManager(t)
+	validationManager := batch.NewManager(batch.Options{
+		NewID: func() string { return "validation-api-test" },
+		Run: func(_ context.Context, target model.Target) model.DiagnosticReport {
+			return model.DiagnosticReport{
+				SchemaVersion: model.DiagnosticSchemaVersion,
+				Target:        target,
+				Status:        model.ReportStatusComplete,
+				Probes:        []model.ProbeResult{},
+				Observations: model.Observations{
+					Endpoint:  model.EndpointObservation{OriginalInput: target.OriginalInput, RequestedIdentity: target.RequestedIdentity, Service: target.Service, ApplicationProtocol: target.ApplicationProtocol, TransportProtocol: target.TransportProtocol, Port: target.Port},
+					Transport: model.TransportObservation{Applicability: model.ObservationApplicabilityApplicable, ConnectionOutcome: model.TransportConnectionOutcomeConnected, Connected: true, FailureReason: model.FailureReasonNone, FaultDomain: model.FaultDomainTransport},
+				},
+			}
+		},
+	})
+	handler := NewHandler(HandlerOptions{CaptureManager: captureManager, ValidationManager: validationManager})
+	defer handler.Close()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/api/browser-captures", "application/json", stringsReader(`{"browser":"edge"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created capture.Snapshot
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	proxyURL, err := url.Parse("http://" + created.ProxyAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	defer upstream.Close()
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	request, _ := http.NewRequest(http.MethodGet, upstream.URL, nil)
+	upstreamResponse, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(upstreamResponse.Body)
+	upstreamResponse.Body.Close()
+
+	stopRequest, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/browser-captures/"+created.ID, nil)
+	stopResponse, err := server.Client().Do(stopRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopResponse.Body.Close()
+	validationResponse, err := server.Client().Post(server.URL+"/api/browser-captures/"+created.ID+"/validation-batches", "application/json", stringsReader(`{"selection":"all","concurrency":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started batch.Snapshot
+	if err := json.NewDecoder(validationResponse.Body).Decode(&started); err != nil {
+		validationResponse.Body.Close()
+		t.Fatal(err)
+	}
+	validationResponse.Body.Close()
+	if validationResponse.StatusCode != http.StatusAccepted || started.ID != "validation-api-test" {
+		t.Fatalf("validation start = %d/%#v", validationResponse.StatusCode, started)
+	}
+	final, err := validationManager.Wait(context.Background(), started.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Summary.Passed != 1 || len(final.Results) != 1 || final.Results[0].CaptureOutcome != model.BrowserCaptureOutcomeConnected || final.Results[0].Outcome != batch.ValidationPassed {
+		t.Fatalf("validation result = %#v", final)
+	}
+	reportResponse, err := server.Client().Get(server.URL + "/api/browser-capture-validations/" + started.ID + "/endpoints/" + final.Results[0].ID + "/report.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var diagnostic model.DiagnosticReport
+	if err := json.NewDecoder(reportResponse.Body).Decode(&diagnostic); err != nil {
+		reportResponse.Body.Close()
+		t.Fatal(err)
+	}
+	reportResponse.Body.Close()
+	if reportResponse.StatusCode != http.StatusOK || diagnostic.Target.RequestedIdentity == "" {
+		t.Fatalf("endpoint report = %d/%#v", reportResponse.StatusCode, diagnostic)
 	}
 }
 

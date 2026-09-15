@@ -50,6 +50,8 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 		`id="path-graph-unsupported"`,
 		`Node selection → Evidence inspector`,
 		`not physical topology`,
+		`id="browser-validation-panel"`,
+		`Validate Failed Only`,
 	} {
 		if !strings.Contains(page, fragment) {
 			t.Errorf("UI page is missing Observed Path workbench fragment %q", fragment)
@@ -69,6 +71,11 @@ func TestHandlerIntegrationServesUIAndCanonicalReport(t *testing.T) {
 	}
 	if strings.Contains(script, "innerHTML") {
 		t.Errorf("app.js must not render evidence with innerHTML")
+	}
+	for _, fragment := range []string{"validation-batches", "renderBrowserValidation", "selectedCaptureDestinations"} {
+		if !strings.Contains(script, fragment) {
+			t.Errorf("app.js is missing browser batch validation behavior %q", fragment)
+		}
 	}
 	if !strings.Contains(script, "/report.html") || !strings.Contains(script, "/report.json") {
 		t.Errorf("app.js does not expose report export URLs")

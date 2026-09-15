@@ -303,6 +303,12 @@ pre,
 	padding: 12px;
 }
 
+.browser-validation-panel {
+	margin-top: 10px;
+	border: 1px solid var(--line);
+	padding: 12px;
+}
+
 .browser-capture-heading,
 .browser-capture-controls,
 .browser-capture-stats {
@@ -383,7 +389,9 @@ pre,
 }
 
 .browser-capture-table th,
-.browser-capture-table td {
+.browser-capture-table td,
+.browser-validation-table th,
+.browser-validation-table td {
 	padding: 7px 8px;
 	border-top: 1px solid var(--line);
 	text-align: left;
@@ -394,6 +402,32 @@ pre,
 	color: var(--muted);
 	font-size: 11px;
 	font-weight: 650;
+}
+
+.browser-validation-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+}
+
+.browser-validation-table th {
+	color: var(--muted);
+	font-size: 11px;
+	font-weight: 650;
+}
+
+.browser-validation-table td:first-child,
+.browser-validation-table td:last-child {
+	font-family: var(--mono);
+}
+
+.browser-validation-table .validation-positive { color: var(--green); }
+.browser-validation-table .validation-negative { color: var(--red); }
+.browser-validation-table .validation-warning { color: var(--amber); }
+.browser-validation-table .validation-neutral { color: var(--muted); }
+
+.browser-capture-table input[type="checkbox"] {
+	accent-color: var(--accent);
 }
 
 .browser-capture-table td:first-child,

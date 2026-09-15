@@ -9,7 +9,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/yohnark/tadori/internal/batch"
 	"github.com/yohnark/tadori/internal/capture"
+	"github.com/yohnark/tadori/internal/model"
 )
 
 const maxBrowserCaptureRequestBytes = 2 << 10
@@ -21,9 +23,10 @@ type browserCaptureRequest struct {
 type browserCapturePathAction string
 
 const (
-	browserCaptureSession browserCapturePathAction = "session"
-	browserCaptureReport  browserCapturePathAction = "report"
-	browserCaptureFQDN    browserCapturePathAction = "fqdns"
+	browserCaptureSession              browserCapturePathAction = "session"
+	browserCaptureReport               browserCapturePathAction = "report"
+	browserCaptureFQDN                 browserCapturePathAction = "fqdns"
+	browserCaptureValidationCollection browserCapturePathAction = "validation-batches"
 )
 
 func (h *Handler) browserCaptureCollection(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +95,12 @@ func (h *Handler) browserCaptureResource(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	switch action {
+	case browserCaptureValidationCollection:
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		h.startBrowserCaptureValidation(w, r, id)
 	case browserCaptureSession:
 		switch r.Method {
 		case http.MethodGet:
@@ -167,7 +176,64 @@ func parseBrowserCapturePath(path string) (string, browserCapturePathAction, boo
 	if len(parts) == 2 && parts[1] == "fqdns.txt" && validSessionID(parts[0]) {
 		return parts[0], browserCaptureFQDN, true
 	}
+	if len(parts) == 2 && parts[1] == "validation-batches" && validSessionID(parts[0]) {
+		return parts[0], browserCaptureValidationCollection, true
+	}
 	return "", "", false
+}
+
+func (h *Handler) startBrowserCaptureValidation(w http.ResponseWriter, r *http.Request, captureID string) {
+	var request batch.Request
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBrowserCaptureRequestBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		if isBodyTooLarge(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "validation request is too large")
+		} else {
+			writeError(w, http.StatusBadRequest, "request body must be JSON validation options")
+		}
+		return
+	}
+	if err := requireSingleJSONValue(decoder); err != nil {
+		writeError(w, http.StatusBadRequest, "request body must contain one JSON object")
+		return
+	}
+	captureReport, err := h.captures.Report(captureID)
+	if err != nil {
+		writeCaptureError(w, err)
+		return
+	}
+	switch captureReport.State {
+	case model.BrowserCaptureStateCompleted, model.BrowserCaptureStateFailed, model.BrowserCaptureStateCancelled:
+	default:
+		writeError(w, http.StatusConflict, "browser capture must be stopped before validation")
+		return
+	}
+	plan, err := batch.BuildPlan(captureReport, request)
+	if err != nil {
+		if errors.Is(err, batch.ErrEmptyValidationPlan) || errors.Is(err, batch.ErrEmptySelection) {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	snapshot, err := h.validations.Start(context.Background(), plan)
+	if err != nil {
+		switch {
+		case errors.Is(err, batch.ErrBusy):
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, batch.ErrClosed):
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	w.Header().Set("Location", "/api/browser-capture-validations/"+snapshot.ID)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusAccepted, snapshot)
 }
 
 func writeCaptureError(w http.ResponseWriter, err error) {
