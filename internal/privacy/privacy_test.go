@@ -15,7 +15,7 @@ func TestProjectReportRedactsStructuredSensitiveFieldsAndPreservesEvidence(t *te
 		t.Fatal(err)
 	}
 	target.Resource = "/health?token=opaque-token"
-	target.OriginalInput = "https://diagnostic.example/health?user=alice#private"
+	target.OriginalInput = "https://diagnostic.example/health?user=alice#zzzfraghidden"
 	report := model.DiagnosticReport{
 		SchemaVersion: model.DiagnosticSchemaVersion,
 		Target:        target,
@@ -44,7 +44,7 @@ func TestProjectReportRedactsStructuredSensitiveFieldsAndPreservesEvidence(t *te
 				}},
 			},
 			Application: model.ApplicationObservation{
-				URL:               "https://diagnostic.example/health?api_key=opaque-token#private",
+				URL:               "https://diagnostic.example/health?api_key=opaque-token#zzzfraghidden",
 				RequestedResource: "/health?api_key=opaque-token",
 			},
 		},
@@ -55,7 +55,7 @@ func TestProjectReportRedactsStructuredSensitiveFieldsAndPreservesEvidence(t *te
 			Evidence: []model.Evidence{{
 				ID:   "http-1",
 				Kind: model.EvidenceKindHTTPResponse,
-				Raw:  json.RawMessage(`{"url":"https://diagnostic.example/health?token=opaque-token#private","headers":{"Authorization":"Bearer bearer-secret","Cookie":"sid=cookie-secret","Location":"https://diagnostic.example/next?secret=opaque-token","Content-Type":"text/plain"},"body":"response-secret","username":"alice","path":"C:\\Users\\alice\\Documents\\report.txt","token":"opaque-token","safe":"diagnostic evidence"}`),
+				Raw:  json.RawMessage(`{"url":"https://diagnostic.example/health?token=opaque-token#zzzfraghidden","headers":{"Authorization":"Bearer bearer-secret","Cookie":"sid=cookie-secret","Location":"https://diagnostic.example/next?secret=opaque-token","Content-Type":"text/plain"},"body":"response-secret","username":"alice","path":"C:\\Users\\alice\\Documents\\report.txt","token":"opaque-token","safe":"diagnostic evidence"}`),
 			}},
 		}},
 	}
@@ -83,7 +83,7 @@ func TestProjectReportRedactsStructuredSensitiveFieldsAndPreservesEvidence(t *te
 		"cookie-secret",
 		"response-secret",
 		"alice",
-		"private",
+		"zzzfraghidden",
 		"api_key",
 		"alice@example.invalid",
 	} {
