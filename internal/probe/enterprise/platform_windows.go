@@ -76,8 +76,8 @@ func (platformSnapshotProvider) Snapshot(ctx context.Context, target model.Targe
 		config proxy.SourceConfiguration
 		path   string
 	}{
-		{name: "wininet", config: discovery.WinINET, path: PathBrowserWinINET},
-		{name: "winhttp", config: discovery.WinHTTP, path: PathServiceWinHTTP},
+		{name: "wininet", config: local.Proxy.WinINET, path: PathBrowserWinINET},
+		{name: "winhttp", config: local.Proxy.WinHTTP, path: PathServiceWinHTTP},
 	} {
 		effective := resolveEffectiveProxy(ctx, targetURL, source.name, source.config)
 		if effective.Error != "" {
