@@ -20,10 +20,15 @@ import (
 // observations and findings. Raw probe evidence is listed only as provenance;
 // it is never decoded to create a semantic label or conclusion.
 func RenderHTML(report model.DiagnosticReport) ([]byte, error) {
-	canonical, err := MarshalJSON(report)
+	projection, err := Project(report)
 	if err != nil {
 		return nil, err
 	}
+	canonical, err := marshalReportWithPrivacy(projection.Report)
+	if err != nil {
+		return nil, err
+	}
+	report = projection.Report
 
 	var out bytes.Buffer
 	out.WriteString("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">")
@@ -44,6 +49,7 @@ func RenderHTML(report model.DiagnosticReport) ([]byte, error) {
 	}
 	out.WriteString("</div></header>")
 
+	renderPrivacyPreview(&out, projection.Privacy)
 	renderDestinationStatus(&out, report)
 	renderConclusion(&out, report)
 	renderTarget(&out, report)
@@ -59,6 +65,39 @@ func RenderHTML(report model.DiagnosticReport) ([]byte, error) {
 	out.WriteString("</code></pre></details></section>")
 	out.WriteString("</main></body></html>")
 	return out.Bytes(), nil
+}
+
+func renderPrivacyPreview(out *bytes.Buffer, metadata PrivacyMetadata) {
+	out.WriteString("<section class=\"section privacy-preview\" aria-labelledby=\"privacy-preview-title\"><p class=\"eyebrow\">Export privacy preview</p><h2 id=\"privacy-preview-title\">Data boundary</h2>")
+	out.WriteString("<p class=\"section-note\">This export uses the deterministic <code>")
+	writeText(out, metadata.Policy)
+	out.WriteString("</code> policy, version <code>")
+	writeText(out, metadata.Version)
+	out.WriteString("</code>.</p>")
+	renderPrivacyInventory(out, "Included", metadata.Included)
+	renderPrivacyInventory(out, "Redacted", metadata.Redacted)
+	renderPrivacyInventory(out, "Excluded", metadata.Excluded)
+	if len(metadata.OperatorSelectable) > 0 {
+		renderPrivacyInventory(out, "Operator-selectable", metadata.OperatorSelectable)
+	}
+	out.WriteString("</section>")
+}
+
+func renderPrivacyInventory(out *bytes.Buffer, title string, values []string) {
+	out.WriteString("<div class=\"privacy-inventory\"><h3>")
+	writeText(out, title)
+	out.WriteString("</h3><ul>")
+	for _, value := range values {
+		out.WriteString("<li>")
+		writeText(out, privacyCategoryLabel(value))
+		out.WriteString("</li>")
+	}
+	out.WriteString("</ul></div>")
+}
+
+func privacyCategoryLabel(value string) string {
+	value = strings.ReplaceAll(value, "_", " ")
+	return value
 }
 
 func renderDestinationStatus(out *bytes.Buffer, diagnosticReport model.DiagnosticReport) {

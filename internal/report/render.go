@@ -4,7 +4,6 @@
 package report
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,7 +21,7 @@ import (
 // marshalers normalize report, probe, and evidence timestamps to UTC without
 // changing the supplied report or inspecting Evidence.Raw.
 func MarshalJSON(report model.DiagnosticReport) ([]byte, error) {
-	return json.Marshal(report)
+	return MarshalExportJSON(report)
 }
 
 // RenderJSON is an explicit presentation-oriented alias for MarshalJSON.
@@ -42,16 +41,7 @@ func JSON(report model.DiagnosticReport) ([]byte, error) {
 // newline.  The absence of a newline keeps the returned document identical to
 // MarshalJSON and leaves stream framing to the caller.
 func WriteJSON(w io.Writer, report model.DiagnosticReport) error {
-	if w == nil {
-		return errors.New("report: nil JSON writer")
-	}
-
-	encoded, err := MarshalJSON(report)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(encoded)
-	return err
+	return writeExportJSON(w, report)
 }
 
 // RenderHuman returns a concise, deterministic terminal projection of report.

@@ -96,6 +96,14 @@
   const canonicalJSON = document.querySelector("#canonical-json");
   const htmlReportLink = document.querySelector("#html-report-link");
   const jsonReportLink = document.querySelector("#json-report-link");
+  const privacyPreview = document.querySelector("#privacy-preview");
+  const privacyPreviewPolicy = document.querySelector("#privacy-preview-policy");
+  const privacyPreviewIncluded = document.querySelector("#privacy-preview-included");
+  const privacyPreviewRedacted = document.querySelector("#privacy-preview-redacted");
+  const privacyPreviewExcluded = document.querySelector("#privacy-preview-excluded");
+  const privacyPreviewError = document.querySelector("#privacy-preview-error");
+  const privacyPreviewCancel = document.querySelector("#privacy-preview-cancel");
+  const privacyPreviewConfirm = document.querySelector("#privacy-preview-confirm");
   const composer = globalThis.TadoriTargetComposer;
   const display = globalThis.TadoriWorkbenchDisplay;
   const locale = globalThis.TadoriLocale;
@@ -117,6 +125,7 @@
   let currentSessionState = "idle";
   let progressEvents = [];
   let activeCaptureSnapshot = null;
+  let pendingExport = null;
   const progressItems = new Map();
   let progressHeader = { labelKey: "target.ready", badge: "idle", tone: "neutral" };
   let composerState = composer.createState({ service: serviceInput.value });
@@ -702,6 +711,93 @@
     browserCaptureError.hidden = false;
   }
 
+  function privacyCategoryText(value) {
+    return text(value).replaceAll("_", " ");
+  }
+
+  function renderPrivacyList(list, values) {
+    list.replaceChildren();
+    for (const value of Array.isArray(values) ? values : []) {
+      list.appendChild(element("li", "", privacyCategoryText(value)));
+    }
+  }
+
+  function renderPrivacyPreview(metadata) {
+    const policy = text(metadata && metadata.policy) || "tadori/export-redaction";
+    const version = text(metadata && metadata.version) || "unknown";
+    privacyPreviewPolicy.textContent = `Policy ${policy}, version ${version}. The export is limited to the categories below.`;
+    renderPrivacyList(privacyPreviewIncluded, metadata && metadata.included);
+    renderPrivacyList(privacyPreviewRedacted, metadata && metadata.redacted);
+    renderPrivacyList(privacyPreviewExcluded, metadata && metadata.excluded);
+  }
+
+  function closePrivacyPreview() {
+    pendingExport = null;
+    privacyPreviewError.textContent = "";
+    privacyPreviewError.hidden = true;
+    if (privacyPreview.open) {
+      privacyPreview.close();
+    } else {
+      privacyPreview.hidden = true;
+    }
+  }
+
+  function followPendingExport() {
+    if (!pendingExport) {
+      return;
+    }
+    const link = element("a");
+    link.href = pendingExport.href;
+    link.target = pendingExport.target;
+    link.rel = "noopener";
+    if (pendingExport.download) {
+      link.download = "";
+    }
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    closePrivacyPreview();
+  }
+
+  async function requestExport(event) {
+    event.preventDefault();
+    const link = event.currentTarget;
+    if (!link || !link.href || link.href.endsWith("#")) {
+      return;
+    }
+    pendingExport = {
+      href: link.href,
+      target: link.target || "_self",
+      download: link.hasAttribute("download"),
+    };
+    let metadata = currentView && currentView.privacy;
+    const endpoint = link.dataset.privacyEndpoint;
+    if (endpoint) {
+      try {
+        metadata = await readResponse(await fetch(endpoint, { cache: "no-store" }));
+      } catch (err) {
+        pendingExport = null;
+        showError(err instanceof Error ? err.message : "could not load export privacy preview");
+        return;
+      }
+    }
+    renderPrivacyPreview(metadata || {});
+    privacyPreviewError.textContent = "";
+    privacyPreviewError.hidden = true;
+    if (typeof privacyPreview.showModal === "function") {
+      privacyPreview.showModal();
+    } else {
+      privacyPreview.hidden = false;
+    }
+  }
+
+  htmlReportLink.addEventListener("click", (event) => { void requestExport(event); });
+  jsonReportLink.addEventListener("click", (event) => { void requestExport(event); });
+  browserCaptureJSON.addEventListener("click", (event) => { void requestExport(event); });
+  browserCaptureFQDNs.addEventListener("click", (event) => { void requestExport(event); });
+  privacyPreviewCancel.addEventListener("click", closePrivacyPreview);
+  privacyPreviewConfirm.addEventListener("click", followPendingExport);
+
   function clearBrowserCaptureError() {
     browserCaptureError.textContent = "";
     browserCaptureError.hidden = true;
@@ -874,8 +970,10 @@
     if (snapshot.id) {
       browserCaptureJSON.hidden = false;
       browserCaptureJSON.href = `/api/browser-captures/${encodeURIComponent(snapshot.id)}/report.json`;
+      browserCaptureJSON.dataset.privacyEndpoint = `/api/browser-captures/${encodeURIComponent(snapshot.id)}/privacy.json`;
       browserCaptureFQDNs.hidden = false;
       browserCaptureFQDNs.href = `/api/browser-captures/${encodeURIComponent(snapshot.id)}/fqdns.txt`;
+      browserCaptureFQDNs.dataset.privacyEndpoint = `/api/browser-captures/${encodeURIComponent(snapshot.id)}/privacy.json`;
       browserCaptureCopy.hidden = false;
     }
     const terminal = browserCaptureIsTerminal(state) && destinations.length > 0;
@@ -2247,7 +2345,9 @@
     }
     const encodedID = encodeURIComponent(reportSessionID);
     htmlReportLink.href = `/api/diagnoses/${encodedID}/report.html`;
+    htmlReportLink.dataset.privacyEndpoint = `/api/diagnoses/${encodedID}/privacy.json`;
     jsonReportLink.href = `/api/diagnoses/${encodedID}/report.json`;
+    jsonReportLink.dataset.privacyEndpoint = `/api/diagnoses/${encodedID}/privacy.json`;
   }
 
   function renderNetworkContext(context) {
